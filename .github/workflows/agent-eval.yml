@@ -1,0 +1,29 @@
+name: Agent eval
+
+# ข้อสอบของแงว รันอัตโนมัติทุกครั้งที่โค้ดของ agent เปลี่ยน
+# ต้องตั้ง repository secret ชื่อ CRON_SECRET ให้ตรงกับที่ตั้งไว้ใน Supabase
+on:
+  push:
+    branches: [main]
+    paths:
+      - "supabase/functions/**"
+      - "tests/**"
+      - ".github/workflows/agent-eval.yml"
+  workflow_dispatch:
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run agent eval
+        shell: pwsh
+        env:
+          TEST_KEY: ${{ secrets.CRON_SECRET }}
+        run: |
+          if (-not $env:TEST_KEY) {
+            Write-Host "::error::CRON_SECRET repository secret is not set - add it in Settings > Secrets and variables > Actions"
+            exit 1
+          }
+          ./tests/run-eval.ps1 -TestKey $env:TEST_KEY

@@ -1062,12 +1062,28 @@ async function runEval(body: string): Promise<Response> {
 
   const toolLog: string[] = [];
   const started = Date.now();
+  const startedIso = new Date().toISOString();
   try {
     const answer = await runAgent(message, ctx, chatId, { toolLog });
+
+    // เก็บกวาดของที่ข้อสอบสร้างไว้ ไม่ให้ไปรกรายการงานจริงของทีม
+    // ยกเลิกแทนการลบ เพื่อให้ audit trail ยังครบ
+    let cleaned = { tasks: 0, reminders: 0 };
+    const { data: evalTasks } = await supabase.from("tasks")
+      .update({ status: "CANCELLED", updated_at: new Date().toISOString() })
+      .eq("created_by_user_id", caller.id).gte("created_at", startedIso)
+      .in("status", ["TODO", "DOING"]).select("id");
+    cleaned.tasks = (evalTasks ?? []).length;
+    const { data: evalReminders } = await supabase.from("reminders")
+      .update({ status: "CANCELLED" })
+      .eq("created_by_user_id", caller.id).gte("created_at", startedIso)
+      .eq("status", "PENDING").select("id");
+    cleaned.reminders = (evalReminders ?? []).length;
+
     return Response.json({
       as_user: caller.display_name, role: caller.role,
       group: group?.group_name ?? null,
-      message, answer, tools_called: toolLog, ms: Date.now() - started,
+      message, answer, tools_called: toolLog, cleaned, ms: Date.now() - started,
     });
   } catch (e) {
     return Response.json({ error: String(e), tools_called: toolLog }, { status: 500 });
