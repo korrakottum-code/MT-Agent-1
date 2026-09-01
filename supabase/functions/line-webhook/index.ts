@@ -448,6 +448,50 @@ const TOOLS = [
       required: ["name"],
     },
   },
+  {
+    name: "list_events",
+    description:
+      "ดูสิ่งที่ระบบอ่านบทสนทนาแล้วจับได้เอง (งานที่ถูกมอบหมาย / ข้อตกลง / กำหนดส่ง) ซึ่งยังไม่ได้ยืนยัน " +
+      "ใช้ตอนถูกถามว่า 'จับอะไรไว้บ้าง' 'มีอะไรรอยืนยันไหม' หรือถามย้อนว่า 'เคยตกลงอะไรกันเรื่องนี้' " +
+      "ใส่ query เพื่อค้นด้วยคำ และใส่ status=CONVERTED เพื่อดูข้อตกลงเก่าที่ยืนยันแล้ว",
+    input_schema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "คำค้นในชื่อหรือรายละเอียด ไม่ระบุ = เอาทั้งหมด" },
+        type: { type: "string", enum: ["TASK", "DECISION", "DEADLINE"] },
+        status: { type: "string", enum: ["NEW", "CONVERTED", "DISMISSED"], description: "ค่าเริ่มต้น NEW" },
+        scope: { type: "string", enum: ["this_group", "all_groups"], description: "all_groups ต้อง MANAGER ขึ้นไป" },
+        limit: { type: "integer" },
+      },
+    },
+  },
+  {
+    name: "confirm_event",
+    description:
+      "ยืนยันรายการที่ระบบจับได้ ระบุ event_id (ได้จาก list_events) — ประเภท TASK/DEADLINE จะถูกสร้างเป็นงานจริง " +
+      "ส่วน DECISION จะถูกบันทึกเป็นข้อตกลงขององค์กรโดยไม่สร้างงาน (สั่ง as_task=true ถ้าอยากให้เป็นงานด้วย) " +
+      "ต้องทวนให้ผู้ใช้เห็นก่อนว่าจะสร้างงานชื่ออะไร ให้ใคร ครบกำหนดเมื่อไร",
+    input_schema: {
+      type: "object",
+      properties: {
+        event_id: { type: "string" },
+        owner_name: { type: "string", description: "เปลี่ยนเจ้าของงาน ไม่ระบุ = ใช้คนที่ระบบจับได้" },
+        due_at: { type: "string", description: "ISO 8601 ถ้าต้องการแก้กำหนดส่ง" },
+        priority: { type: "string", enum: ["LOW", "NORMAL", "HIGH", "URGENT"] },
+        as_task: { type: "boolean", description: "บังคับให้สร้างเป็นงานแม้เป็น DECISION" },
+      },
+      required: ["event_id"],
+    },
+  },
+  {
+    name: "dismiss_event",
+    description: "ปัดรายการที่ระบบจับได้ทิ้ง เพราะไม่ใช่เรื่องจริงหรือซ้ำกับที่มีอยู่แล้ว ระบุ event_id",
+    input_schema: {
+      type: "object",
+      properties: { event_id: { type: "string" } },
+      required: ["event_id"],
+    },
+  },
 ];
 
 type Ctx = { caller: any; group: any; lineGroupId: string | null };
@@ -614,7 +658,8 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
     }
 
     case "get_task_stats": {
-      let q = supabase.from("tasks").select("id, status", { count: "exact" })
+      // any เพราะด้านล่างสลับ select เป็นคนละชุดคอลัมน์ ทำให้ชนิดที่ supabase-js อนุมานไว้ไม่ตรงกัน
+      let q: any = supabase.from("tasks").select("id, status", { count: "exact" })
         .gte("created_at", input.date_from).lte("created_at", input.date_to);
       if (input.status === "DONE") {
         q = supabase.from("tasks").select("id", { count: "exact" })
@@ -851,6 +896,93 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       return { registered: data, note: "เมื่อคนนี้พิมพ์ในกลุ่มครั้งแรก ให้ ADMIN แจ้งบอทเพื่อผูกบัญชี" };
     }
 
+    case "list_events": {
+      const scope = input.scope ?? "this_group";
+      if (scope === "all_groups" && !canViewOthers(ctx.caller.role)) {
+        return { error: "ดูรายการข้ามกลุ่มได้เฉพาะ MANAGER ขึ้นไป" };
+      }
+      if (scope === "this_group" && !ctx.lineGroupId) return { error: "ใช้ได้เฉพาะในกลุ่ม หรือระบุ scope=all_groups" };
+      let q = supabase.from("events")
+        .select("id, chat_id, type, title, detail, due_at, confidence, status, owner_user_id, created_at")
+        .eq("status", input.status ?? "NEW")
+        .order("created_at", { ascending: false })
+        .limit(Math.min(input.limit ?? 20, 50));
+      if (scope === "this_group") q = q.eq("chat_id", ctx.lineGroupId);
+      if (input.type) q = q.eq("type", input.type);
+      if (input.query) q = q.or(`title.ilike.%${input.query}%,detail.ilike.%${input.query}%`);
+      const { data, error } = await q;
+      if (error) return { error: error.message };
+      const { data: us } = await supabase.from("users").select("id, display_name");
+      const who = new Map((us ?? []).map((u: any) => [u.id, u.display_name]));
+      const { data: gs } = await supabase.from("groups").select("line_group_id, group_name");
+      const gname = new Map((gs ?? []).map((g: any) => [g.line_group_id, g.group_name]));
+      return {
+        events: (data ?? []).map((e: any) => ({
+          id: e.id, type: e.type, title: e.title, detail: e.detail,
+          due_at: e.due_at, confidence: e.confidence, status: e.status,
+          owner: e.owner_user_id ? who.get(e.owner_user_id) ?? null : null,
+          group: gname.get(e.chat_id) ?? null,
+          created_at: e.created_at,
+        })),
+      };
+    }
+
+    case "confirm_event": {
+      const { data: ev } = await supabase.from("events").select("*").eq("id", input.event_id).maybeSingle();
+      if (!ev) return { error: "ไม่พบรายการนี้ ให้เรียก list_events เพื่อดู id ที่ถูกต้อง" };
+      if (ev.status !== "NEW") {
+        return { error: ev.status === "CONVERTED" ? "รายการนี้ยืนยันไปแล้ว" : "รายการนี้ถูกปัดทิ้งไปแล้ว" };
+      }
+
+      // DECISION เก็บเป็นข้อตกลงขององค์กรเฉย ๆ ไม่ต้องกลายเป็นงานให้ใครทำ
+      const makeTask = input.as_task === true || ev.type !== "DECISION";
+      let task: any = null;
+      if (makeTask) {
+        let ownerId = ev.owner_user_id ?? ctx.caller.id;
+        if (input.owner_name) {
+          const r = await resolveOneUser(input.owner_name);
+          if (r.error) return { error: r.error };
+          ownerId = r.user.id;
+        }
+        const { data: created, error: taskErr } = await supabase.from("tasks").insert({
+          title: ev.title,
+          description: ev.detail ?? ev.source_excerpt ?? null,
+          owner_user_id: ownerId,
+          created_by_user_id: ctx.caller.id,
+          group_id: ev.group_id,
+          due_at: input.due_at ?? ev.due_at ?? null,
+          priority: input.priority ?? "NORMAL",
+        }).select("id, title, due_at, priority").single();
+        if (taskErr) return { error: taskErr.message };
+        task = created;
+      }
+
+      const { error } = await supabase.from("events").update({
+        status: "CONVERTED",
+        task_id: task?.id ?? null,
+        reviewed_by_user_id: ctx.caller.id,
+        reviewed_at: new Date().toISOString(),
+      }).eq("id", ev.id);
+      if (error) return { error: error.message };
+      return task
+        ? { confirmed: ev.title, created_task: task }
+        : { confirmed: ev.title, saved_as: "ข้อตกลงขององค์กร ไม่ได้สร้างเป็นงาน" };
+    }
+
+    case "dismiss_event": {
+      const { data, error } = await supabase.from("events")
+        .update({
+          status: "DISMISSED",
+          reviewed_by_user_id: ctx.caller.id,
+          reviewed_at: new Date().toISOString(),
+        })
+        .eq("id", input.event_id).eq("status", "NEW")
+        .select("id, title").maybeSingle();
+      if (error) return { error: error.message };
+      if (!data) return { error: "ไม่พบรายการนี้ หรือถูกยืนยัน/ปัดทิ้งไปแล้ว" };
+      return { dismissed: data };
+    }
+
     default:
       return { error: `unknown tool: ${name}` };
   }
@@ -917,7 +1049,10 @@ ${rosterText}
 10. เมื่อผู้ใช้บอกความชอบหรือวิธีที่อยากให้ปฏิบัติแบบถาวร ให้บันทึกด้วย remember_preference ทันที และปฏิบัติตามข้อกำหนดด้านบนเสมอ — ถ้าเป็นเรื่องบุคลิก/ชื่อเรียก/วิธีตอบของคุณเอง (เช่น "เรียกตัวเองว่าแงว", "ตอนเล่นให้กวน ๆ") และคนสั่งเป็น ADMIN ให้ใช้ scope=org เพื่อให้ใช้กับทุกคนทุกกลุ่ม ส่วนความชอบส่วนตัวของผู้ใช้ใช้ scope=me
 11. คำขอให้เตือนตามเวลา ("เตือนอีก 2 นาที", "พรุ่งนี้เตือนแพรวส่งภาพก่อนเที่ยง") ให้ใช้ create_reminder โดยคำนวณเวลาจริงจากเวลาปัจจุบัน — ต่างจาก create_task ที่ใช้กับงานที่ต้องติดตามสถานะ ถ้าเป็นแค่การเตือนไม่ใช่งาน ให้ใช้ create_reminder อย่างเดียว
 12. ADMIN จัดการพนักงานได้: ตั้งสิทธิ์/ตำแหน่ง/แผนก/หัวหน้าของคนอื่นด้วย manage_user, ปิดสถานะคนที่ลาออกด้วย set_user_active, และผูกบัญชีที่ลงทะเบียนล่วงหน้าเข้ากับบัญชี LINE จริงด้วย link_user เมื่อเจ้าตัวเข้ากลุ่มแล้ว — การเปลี่ยน role เป็นเรื่องสิทธิ์การเข้าถึงข้อมูล ให้ทวนยืนยันก่อน 1 ครั้ง
-13. ไฟล์เอกสารที่ผู้ใช้ส่งมา (PDF/Word/Excel/CSV/ข้อความ) จะถูกแนบมาให้อ่านได้เลย สรุปสาระสำคัญสั้น ๆ ชี้ให้เห็นงาน/กำหนดส่ง/มติที่ควรบันทึก แล้วถามยืนยันก่อนสร้างงานจริง ห้ามสร้างงานจากไฟล์เองโดยไม่ถาม`;
+13. ไฟล์เอกสารที่ผู้ใช้ส่งมา (PDF/Word/Excel/CSV/ข้อความ) จะถูกแนบมาให้อ่านได้เลย สรุปสาระสำคัญสั้น ๆ ชี้ให้เห็นงาน/กำหนดส่ง/มติที่ควรบันทึก แล้วถามยืนยันก่อนสร้างงานจริง ห้ามสร้างงานจากไฟล์เองโดยไม่ถาม
+14. ระบบจะอ่านบทสนทนาในกลุ่มเองทุก 3 ชั่วโมง แล้วจับ "งานที่ถูกมอบหมาย / ข้อตกลง / กำหนดส่ง" เก็บเป็นรายการรอยืนยัน (ยังไม่ใช่งานจริง) — ใช้ list_events เมื่อถูกถามว่าจับอะไรไว้บ้าง มีอะไรรอยืนยัน หรือถามย้อนว่าเคยตกลงอะไรกัน (ใส่ query เพื่อค้นด้วยคำ, status=CONVERTED เพื่อดูข้อตกลงที่ยืนยันแล้ว) ยืนยันด้วย confirm_event ปัดทิ้งด้วย dismiss_event
+14.1 ก่อนเรียก confirm_event ต้องทวนให้ผู้ใช้เห็นก่อน 1 ครั้งว่าจะสร้างงานชื่ออะไร ให้ใคร ครบกำหนดเมื่อไร แล้วรอเขาตอบรับ — ห้ามยืนยันเองแม้จะดูชัดเจนแค่ไหน เพราะรายการพวกนี้มาจากการตีความบทสนทนา ไม่ใช่คำสั่งตรงจากคน
+14.2 เวลาแสดงรายการให้ใส่เลขข้อกำกับ แล้วจำ id ของแต่ละข้อไว้ตอบคำสั่งต่อเนื่อง เช่น "ยืนยันข้อ 2" หรือ "ทิ้งข้อ 1 กับ 3"`;
 }
 
 type AgentOpts = {

@@ -29,10 +29,16 @@ CRON_SECRET              (ค่าเดียวกันนี้ฝังอ
 
 ## สิ่งที่ deploy อยู่บนคลาวด์
 
-- Edge Function `line-webhook` — รับ LINE webhook + AI agent (โมเดล `claude-sonnet-5`, 17 tools) — v22
-- Edge Function `scheduled-jobs` — 2 งานตามเวลา
-- pg_cron 2 ตัว: `daily-summary` (11:00 UTC = 18:00 ไทย), `morning-reminder` (02:00 UTC = 09:00 ไทย)
-- ตาราง: `users` (มี job_title, preferences), `groups`, `messages`, `tasks`, `audit_logs` — RLS เปิดทุกตาราง ไม่มี policy สำหรับ anon (เข้าถึงได้เฉพาะ service_role)
+- Edge Function `line-webhook` — รับ LINE webhook + AI agent (โมเดล `claude-sonnet-5`) — v22, 17 tools
+  - ใน repo มี 20 tools แล้ว (เพิ่ม `list_events` / `confirm_event` / `dismiss_event`) **แต่ยังไม่ได้ deploy** ดูหัวข้อวิธี deploy
+- Edge Function `scheduled-jobs` — v7, 5 งานตามเวลา
+- pg_cron 5 ตัว (เวลาใน cron เป็น UTC, ไทย = UTC+7):
+  `daily-summary` 11:00 · `morning-reminder` 02:00 · `weekly-summary` จันทร์ 02:00 ·
+  `due-reminders` ทุกนาที · `extract-events` นาที 50 ของ 01/04/07/10/13/16/19/22
+  (รอบ 10:50 UTC ตั้งใจให้อยู่ก่อน daily-summary 11:00 พอดี จะได้สรุปเห็นของครบ)
+  คำสั่ง cron มี CRON_SECRET ฝังอยู่ จึงไม่ commit ลง repo — ถ้าต้องสร้างใหม่ให้ดูของเดิมด้วย `select command from cron.job`
+- ตาราง: `users` (มี job_title, preferences), `groups`, `messages`, `tasks`, `reminders`, `org_settings`, `events`, `audit_logs`
+  — RLS เปิดทุกตาราง ไม่มี policy สำหรับ anon (เข้าถึงได้เฉพาะ service_role)
 
 ## ข้อสอบของแงว (รันทุกครั้งก่อนและหลังแก้ระบบ)
 
@@ -48,13 +54,26 @@ pwsh -File tests/run-eval.ps1 -TestKey <CRON_SECRET>
 
 ## วิธี deploy หลังแก้โค้ด
 
-โปรเจกต์นี้ deploy ผ่าน Supabase MCP ในเซสชัน Claude Code (ไม่ได้ใช้ Supabase CLI)
-บอก Claude ว่า "deploy line-webhook" แล้วมันจะอ่านไฟล์ใน `supabase/functions/` แล้วส่งขึ้นให้
-ถ้าจะใช้ CLI เองต้อง `supabase link --project-ref ssjsjvcbulclnvlrkdsj` ก่อน
+ตรวจก่อนเสมอ — จับ syntax/type ผิดได้ก่อนขึ้นของจริง
 
-ข้อควรรู้: `line-webhook/index.ts` มีข้อความไทยเยอะ ถ้าส่งขึ้นโดย escape เป็น `\uXXXX`
-payload จะบวมเกินขีดจำกัดของ tool (ตัวอักษรไทย 1 ตัว = 6 ไบต์แทนที่จะเป็น 3)
-ต้องส่งเป็น UTF-8 ตรง ๆ ไม่งั้นจะเจอ error ว่า payload ยาวเกินและ deploy ไม่ผ่าน
+```bash
+npx deno@2 check supabase/functions/line-webhook/index.ts supabase/functions/scheduled-jobs/index.ts
+```
+
+**วิธีที่ควรใช้ตั้งแต่นี้ไป: Supabase CLI** (เครื่องนี้เรียกผ่าน npx ได้ ไม่ต้องติดตั้ง)
+
+```bash
+npx supabase login
+npx supabase link --project-ref ssjsjvcbulclnvlrkdsj
+npx supabase functions deploy line-webhook
+```
+
+`login` ทำครั้งเดียวต่อเครื่อง มันจะเปิดเบราว์เซอร์ให้อนุมัติแล้วเก็บ token ไว้ในโปรไฟล์ผู้ใช้
+
+**ทำไมต้องเลิกใช้วิธีเดิม** — เดิม deploy ผ่าน Supabase MCP ซึ่งต้องแนบซอร์สทั้งไฟล์ไปในคำสั่งเดียว
+พอ `line-webhook/index.ts` โตถึง ~55KB ก็เกินขีดจำกัดของช่องทางนั้นและ deploy ไม่ผ่านอีกต่อไป
+(ถ้าจำเป็นต้องใช้ MCP จริง ๆ ต้องส่งภาษาไทยเป็น UTF-8 ตรง ๆ ห้าม escape เป็น `\uXXXX`
+เพราะตัวอักษรไทยจะกลายเป็น 6 ไบต์แทนที่จะเป็น 3 ทำให้ payload บวมเท่าตัว)
 
 ## สถานะตามคู่มือ (docs/BUILD_GUIDE.md)
 
@@ -76,6 +95,12 @@ payload จะบวมเกินขีดจำกัดของ tool (ต�
 - **คำตอบของบอท** ถูกเก็บลง messages ด้วย โดยใช้ `line_user_id = 'bot'`
 - **ความจำ** มี 2 ชั้น: ระยะสั้น (30 ข้อความล่าสุดต่อแชท ส่งเป็นบริบททุกครั้ง) และถาวร (`users.preferences` ต่อคน + `org_settings.bot_persona` ระดับองค์กร)
 - **รูป**: DM ส่งรูปตรง ๆ ได้ / ในกลุ่มต้องส่งรูปก่อนแล้วแท็กถามถึง "รูป" ระบบจะดึงรูปล่าสุดภายใน 24 ชม.
+- **Event Extraction**: job `extract_events` อ่านบทสนทนาในกลุ่ม (ไม่แตะแชทส่วนตัว) ทุก 3 ชม. แล้วจับ
+  งาน/ข้อตกลง/กำหนดส่ง ลงตาราง `events` สถานะ NEW — **ไม่กลายเป็นงานจริงเองเด็ดขาด** ต้องมีคนยืนยัน
+  ข้ามกลุ่มที่มีข้อความใหม่น้อยกว่า 3 ข้อความ, ตัดทิ้งของที่ confidence < 0.6, และไม่รับ due_at ที่เกิน ±5 ปี
+  (เคยเจอโมเดลตอบเป็น พ.ศ. 2569 ทำให้กำหนดส่งเพี้ยนไป 543 ปี)
+  ป้องกันจับซ้ำ 3 ชั้น: ส่งรายการที่เคยจับไปแล้ว + รายชื่องานที่มีในระบบ ไปบอกโมเดล และมี unique index
+  `(chat_id, type, title)` เป็นด่านสุดท้าย — รายการที่ถูกปัดทิ้งแล้วจะไม่ถูกเสนอซ้ำ
 - **ไฟล์เอกสาร** (ตั้งแต่ v22): PDF ส่งเข้าโมเดลตรง ๆ, Word อ่านด้วย `npm:mammoth`, Excel ด้วย `npm:xlsx`,
   ส่วน txt/md/csv/tsv/json/log อ่านเป็นข้อความ — จำกัด 8MB ต่อไฟล์ และตัดข้อความที่ 120,000 ตัวอักษร
   DM ส่งไฟล์ตรง ๆ ได้ / ในกลุ่มต้องส่งไฟล์ก่อนแล้วแท็กถามถึง "ไฟล์/เอกสาร/สรุปประชุม/รายงาน" ระบบจะดึงไฟล์ล่าสุดภายใน 7 วัน
@@ -88,4 +113,5 @@ payload จะบวมเกินขีดจำกัดของ tool (ต�
 4. ผูกบัญชี user "แพรว" ที่ยังเป็น `pending:` กับ LINE user id จริง
 5. เพิ่ม `CRON_SECRET` เป็น repository secret ใน GitHub (Settings > Secrets and variables > Actions)
    เพื่อให้ workflow `agent-eval.yml` รันข้อสอบเองทุกครั้งที่ push
-6. Event Extraction → MVP 0.3 Corporate Memory (ควรรอข้อมูลจริงสะสม 1–2 สัปดาห์ก่อน)
+6. **Deploy tool events 3 ตัวที่ค้างอยู่** (ดูหัวข้อวิธี deploy) แล้วย้ายข้อสอบจาก
+   `tests/cases-pending-events.json` เข้า `tests/cases.json`

@@ -24,7 +24,8 @@ LINE Group → LINE OA → Webhook → Supabase Edge Function
 - [x] UX upgrade (1 ก.ย. 2026) — ความจำบทสนทนา (~12 ข้อความล่าสุดต่อแชท), DM ตอบโดยไม่ต้องแท็ก,
   เก็บคำตอบบอทลง messages, tools เพิ่ม: send_dm / rename_group / ค้นหา-สรุปข้ามกลุ่ม (MANAGER ขึ้นไป)
 - [x] อ่านไฟล์เอกสาร (1 ก.ย. 2026) — PDF / Word / Excel / CSV / ข้อความ ส่งเข้าแชทแล้วให้บอทสรุปและแตกเป็นงานได้
-  - รอทำต่อหลังใช้งานจริงสักพัก: Event Extraction (จับ TASK/DECISION/DEADLINE จากข้อความทั่วไป)
+- [x] MVP 0.2 ครบ (1 ก.ย. 2026) — Event Extraction: อ่านบทสนทนาเองทุก 3 ชม. แล้วจับ TASK / DECISION / DEADLINE
+  เก็บเป็นรายการรอยืนยัน ไม่กลายเป็นงานจริงจนกว่าจะมีคนกดยืนยัน
 
 ## โครงสร้าง
 

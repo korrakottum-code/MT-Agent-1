@@ -12,3 +12,6 @@ Thumbs.db
 # Node / Deno
 node_modules/
 .deno/
+
+# Supabase CLI — ไฟล์ชั่วคราวประจำเครื่อง ไม่ใช่ของโปรเจกต์
+supabase/.temp/
