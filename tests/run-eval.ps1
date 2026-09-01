@@ -6,7 +6,10 @@ param(
   [Parameter(Mandatory = $true)][string]$TestKey,
   [string]$Url = "https://ssjsjvcbulclnvlrkdsj.supabase.co/functions/v1/line-webhook",
   [string]$CasesPath = "$PSScriptRoot\cases.json",
-  [string]$Only = ""
+  [string]$Only = "",
+  # haiku = cheap gate for routine checks. sonnet = what production actually runs,
+  # so use it before calling a phase done. A haiku pass is evidence, not proof.
+  [ValidateSet("haiku", "sonnet")][string]$Model = "sonnet"
 )
 
 $OutputEncoding = [Text.UTF8Encoding]::new($false)
@@ -14,10 +17,10 @@ $cases = Get-Content $CasesPath -Raw -Encoding UTF8 | ConvertFrom-Json
 if ($Only) { $cases = $cases | Where-Object { $_.id -like "*$Only*" } }
 
 $headers = @{ "Content-Type" = "application/json; charset=utf-8"; "x-test-key" = $TestKey }
-$pass = 0; $fail = 0; $failed = @()
+$pass = 0; $fail = 0; $failed = @(); $requestErrors = 0
 
 foreach ($c in $cases) {
-  $payload = @{ as_user = $c.as_user; message = $c.message }
+  $payload = @{ as_user = $c.as_user; message = $c.message; model = $Model }
   if ($c.in_group) { $payload.in_group = $c.in_group }
   $bodyBytes = [Text.Encoding]::UTF8.GetBytes(($payload | ConvertTo-Json -Compress))
 
@@ -29,8 +32,24 @@ foreach ($c in $cases) {
     $res = [Text.Encoding]::UTF8.GetString($raw.RawContentStream.ToArray()) | ConvertFrom-Json
   } catch {
     Write-Host "[ERROR] $($c.id) - request failed: $_" -ForegroundColor Red
-    $fail++; $failed += $c.id; continue
+    # Read the body: the endpoint puts the real reason there, and a bare 500 hides it.
+    try {
+      $sr = New-Object IO.StreamReader($_.Exception.Response.GetResponseStream(), [Text.Encoding]::UTF8)
+      $detail = $sr.ReadToEnd()
+      if ($detail) { Write-Host "       $detail" -ForegroundColor Yellow }
+    } catch { }
+    $fail++; $failed += $c.id; $requestErrors++
+    # Two in a row means the service is down, not that the bot regressed.
+    # Keep going and every remaining case just burns time for the same answer.
+    if ($requestErrors -ge 2) {
+      Write-Host ""
+      Write-Host "Aborting: two requests in a row failed outright. Check the detail above -" -ForegroundColor Red
+      Write-Host "an exhausted Anthropic credit balance looks exactly like this." -ForegroundColor Red
+      exit 1
+    }
+    continue
   }
+  $requestErrors = 0
 
   $problems = @()
   $answer = [string]$res.answer
@@ -74,7 +93,7 @@ foreach ($c in $cases) {
 }
 
 Write-Host ""
-Write-Host "PASSED $pass / $($pass + $fail)" -ForegroundColor Cyan
+Write-Host "PASSED $pass / $($pass + $fail)  (model: $Model)" -ForegroundColor Cyan
 if ($fail -gt 0) {
   Write-Host "FAILED: $($failed -join ', ')" -ForegroundColor Red
   exit 1

@@ -1088,6 +1088,13 @@ type AgentOpts = {
   // ทำให้ประวัติจบลงที่คำขอของผู้ใช้แบบไม่มีคำตอบ แล้วโมเดลนึกว่าเป็นงานค้างที่ต้องทำให้
   skipLatestMessage?: boolean;
   purpose?: string; // ใช้แยกยอด token ว่าหมดไปกับอะไร: chat / eval / gate
+  model?: string;   // ใช้ตอนรันข้อสอบด้วยโมเดลถูกกว่า ปกติไม่ต้องส่ง
+};
+
+// โมเดลที่ยอมให้ข้อสอบเลือกได้ ไม่รับค่าอิสระ กันพิมพ์ผิดแล้วไปเรียกโมเดลที่ไม่มีจริง
+const EVAL_MODELS: Record<string, string> = {
+  haiku: "claude-haiku-4-5-20251001",
+  sonnet: "claude-sonnet-5",
 };
 
 // เก็บยอด token ทุกครั้งที่เรียกโมเดล ถ้าเก็บไม่ได้ต้องไม่ทำให้บอทตอบไม่ได้
@@ -1176,12 +1183,16 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
 
   // นับ token รวมทุกรอบของคำตอบเดียว แล้วบันทึกครั้งเดียวตอนจบ ไม่ว่าจะจบด้วยทางไหน
   const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, iterations: 0 };
+  const model = opts.model ?? MODEL;
+  // Haiku 4.5 ไม่รับ output_config.effort ถ้าส่งไปจะได้ 400 กลับมา
+  const supportsEffort = !model.includes("haiku");
+
   try {
   for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
     const response: any = await (anthropic as any).messages.create({
-      model: MODEL,
+      model,
       max_tokens: 4096,
-      output_config: { effort: "medium" },
+      ...(supportsEffort ? { output_config: { effort: "medium" } } : {}),
       system,
       tools: TOOLS,
       messages,
@@ -1237,7 +1248,7 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
     if (usage.iterations > 0) {
       await logTokenUsage({
         purpose: opts.purpose ?? "chat",
-        model: MODEL,
+        model,
         chat_id: chatId,
         user_id: ctx.caller?.id ?? null,
         input_tokens: usage.input,
@@ -1360,7 +1371,14 @@ async function handleEvent(event: any) {
 // โหมดข้อสอบ: รัน agent จริงด้วยตัวตนที่ระบุ แต่ไม่ส่งเข้า LINE และไม่บันทึกลง messages
 // ใช้ตรวจว่าการแก้แต่ละครั้งทำให้พฤติกรรมเดิมพังหรือไม่ ก่อนปล่อยให้ทีมใช้
 async function runEval(body: string): Promise<Response> {
-  const { as_user, message, in_group } = JSON.parse(body);
+  const { as_user, message, in_group, model: modelKey } = JSON.parse(body);
+  const evalModel = EVAL_MODELS[String(modelKey ?? "sonnet").toLowerCase()];
+  if (!evalModel) {
+    return Response.json(
+      { error: `ไม่รู้จักโมเดล "${modelKey}" (ใช้ได้: ${Object.keys(EVAL_MODELS).join(", ")})` },
+      { status: 400 },
+    );
+  }
   const { data: caller } = await supabase.from("users").select("*")
     .ilike("display_name", `%${as_user}%`).eq("is_active", true).maybeSingle();
   if (!caller) return Response.json({ error: `ไม่พบผู้ใช้ "${as_user}"` }, { status: 400 });
@@ -1379,7 +1397,9 @@ async function runEval(body: string): Promise<Response> {
   const started = Date.now();
   const startedIso = new Date().toISOString();
   try {
-    const answer = await runAgent(message, ctx, chatId, { toolLog, skipLatestMessage: false, purpose: "eval" });
+    const answer = await runAgent(message, ctx, chatId, {
+      toolLog, skipLatestMessage: false, purpose: "eval", model: evalModel,
+    });
 
     // เก็บกวาดของที่ข้อสอบสร้างไว้ ไม่ให้ไปรกรายการงานจริงของทีม
     // ยกเลิกแทนการลบ เพื่อให้ audit trail ยังครบ
@@ -1403,7 +1423,7 @@ async function runEval(body: string): Promise<Response> {
 
     return Response.json({
       as_user: caller.display_name, role: caller.role,
-      group: group?.group_name ?? null,
+      group: group?.group_name ?? null, model: evalModel,
       message, answer, tools_called: toolLog, cleaned, ms: Date.now() - started,
     });
   } catch (e) {
