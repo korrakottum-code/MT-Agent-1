@@ -29,8 +29,7 @@ CRON_SECRET              (ค่าเดียวกันนี้ฝังอ
 
 ## สิ่งที่ deploy อยู่บนคลาวด์
 
-- Edge Function `line-webhook` — รับ LINE webhook + AI agent (โมเดล `claude-sonnet-5`) — v22, 17 tools
-  - ใน repo มี 20 tools แล้ว (เพิ่ม `list_events` / `confirm_event` / `dismiss_event`) **แต่ยังไม่ได้ deploy** ดูหัวข้อวิธี deploy
+- Edge Function `line-webhook` — รับ LINE webhook + AI agent (โมเดล `claude-sonnet-5`) — 20 tools
 - Edge Function `scheduled-jobs` — v7, 5 งานตามเวลา
 - pg_cron 5 ตัว (เวลาใน cron เป็น UTC, ไทย = UTC+7):
   `daily-summary` 11:00 · `morning-reminder` 02:00 · `weekly-summary` จันทร์ 02:00 ·
@@ -91,6 +90,10 @@ npx supabase functions deploy line-webhook
 ## พฤติกรรมสำคัญที่ควรรู้ก่อนแก้โค้ด
 
 - **การตอบ**: ในกลุ่มตอบเมื่อแท็ก `@ai` หรือเอ่ยชื่อ (แงว/เอ็มที/mt agent) โดยการเอ่ยชื่อจะให้โมเดลอ่านบริบทแล้วตอบ `SILENT` ถ้าไม่ได้ถูกเรียกจริง / แชทส่วนตัวตอบทุกข้อความโดยไม่ต้องแท็ก
+- **ตอบแบบอ้างข้อความ**: ในกลุ่มบอทจะแนบ `quoteToken` ของข้อความต้นทาง คำตอบจึงโผล่เป็น reply ที่อ้างข้อความนั้น
+  ในแชทส่วนตัวไม่แนบ เพราะมีบทสนทนาเดียวอยู่แล้ว
+- **บทสนทนาเก่าเป็นบริบท ไม่ใช่คิวคำสั่ง** (กฎ 8.1): เคยเจอบั๊กว่าถามเรื่องอื่นแล้วบอทย้อนไปตั้งเตือนซ้ำจากข้อความเก่า
+  แก้ทั้งที่ prompt และใส่การกันตั้งซ้ำใน `create_reminder` (ถ้ามีข้อความเดียวกันสถานะ PENDING ในแชทนั้นอยู่แล้ว จะไม่สร้างใหม่)
 - **`messages.line_group_id`** ใช้เป็น chat id: กลุ่มเก็บ groupId, แชทส่วนตัวเก็บ userId ของคู่สนทนา
 - **คำตอบของบอท** ถูกเก็บลง messages ด้วย โดยใช้ `line_user_id = 'bot'`
 - **ความจำ** มี 2 ชั้น: ระยะสั้น (30 ข้อความล่าสุดต่อแชท ส่งเป็นบริบททุกครั้ง) และถาวร (`users.preferences` ต่อคน + `org_settings.bot_persona` ระดับองค์กร)
@@ -109,9 +112,5 @@ npx supabase functions deploy line-webhook
 
 1. เอาบอทเข้ากลุ่มงานจริง 2–3 กลุ่ม แล้วสั่ง `แงว ตั้งชื่อกลุ่มนี้ว่า ...` (ต้องเป็น ADMIN)
 2. ชวนทีมกดเพิ่ม OA เป็นเพื่อน ไม่งั้นรับ DM และการแจ้งเตือนส่วนตัวไม่ได้
-3. ตั้ง role หัวหน้าทีมเป็น MANAGER ในตาราง users
+3. ~~ตั้ง role หัวหน้าทีมเป็น MANAGER~~ — ตั้ง XXXXXX เป็น MANAGER แล้วเมื่อ 1 ก.ย. 2026
 4. ผูกบัญชี user "แพรว" ที่ยังเป็น `pending:` กับ LINE user id จริง
-5. เพิ่ม `CRON_SECRET` เป็น repository secret ใน GitHub (Settings > Secrets and variables > Actions)
-   เพื่อให้ workflow `agent-eval.yml` รันข้อสอบเองทุกครั้งที่ push
-6. **Deploy tool events 3 ตัวที่ค้างอยู่** (ดูหัวข้อวิธี deploy) แล้วย้ายข้อสอบจาก
-   `tests/cases-pending-events.json` เข้า `tests/cases.json`

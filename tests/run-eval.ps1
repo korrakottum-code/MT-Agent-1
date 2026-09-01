@@ -22,7 +22,11 @@ foreach ($c in $cases) {
   $bodyBytes = [Text.Encoding]::UTF8.GetBytes(($payload | ConvertTo-Json -Compress))
 
   try {
-    $res = Invoke-RestMethod -Uri $Url -Method POST -Headers $headers -Body $bodyBytes -TimeoutSec 180
+    # Decode the body as UTF-8 by hand. PowerShell 5.1 falls back to Latin-1 when the
+    # response has no charset, which turns Thai into mojibake and silently breaks
+    # every Thai assertion below - they would match nothing and always "pass".
+    $raw = Invoke-WebRequest -UseBasicParsing -Uri $Url -Method POST -Headers $headers -Body $bodyBytes -TimeoutSec 180
+    $res = [Text.Encoding]::UTF8.GetString($raw.RawContentStream.ToArray()) | ConvertFrom-Json
   } catch {
     Write-Host "[ERROR] $($c.id) - request failed: $_" -ForegroundColor Red
     $fail++; $failed += $c.id; continue

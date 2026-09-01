@@ -50,8 +50,12 @@ async function lineApi(path: string, payload: unknown) {
 }
 
 // ตอบด้วย replyToken ก่อน (หมดอายุเร็ว) ถ้าไม่ทันค่อย push เข้าห้อง
-async function sendReply(replyToken: string, to: string, text: string) {
-  const messages = [{ type: "text", text: text.slice(0, 4900) }];
+// quoteToken ทำให้คำตอบโผล่เป็น reply ที่อ้างข้อความต้นทาง ใช้เฉพาะในกลุ่มที่คนคุยกันหลายเรื่องพร้อมกัน
+// ในแชทส่วนตัวไม่ต้องอ้าง เพราะมีบทสนทนาเดียวอยู่แล้ว การอ้างจะรกเปล่า ๆ
+async function sendReply(replyToken: string, to: string, text: string, quoteToken?: string | null) {
+  const message: any = { type: "text", text: text.slice(0, 4900) };
+  if (quoteToken) message.quoteToken = quoteToken;
+  const messages = [message];
   const ok = await lineApi("/v2/bot/message/reply", { replyToken, messages });
   if (!ok) await lineApi("/v2/bot/message/push", { to, messages });
 }
@@ -706,10 +710,25 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       const when = new Date(input.remind_at);
       if (isNaN(when.getTime())) return { error: "รูปแบบเวลาไม่ถูกต้อง ต้องเป็น ISO 8601" };
       if (when.getTime() < Date.now() - 60_000) return { error: "เวลาที่ตั้งเป็นอดีตไปแล้ว" };
+
+      // กันตั้งซ้ำ: เคยเจอโมเดลไปหยิบคำสั่งเก่าในประวัติแชทมาทำใหม่ตอนผู้ใช้ถามเรื่องอื่น
+      const reminderChatId = ctx.lineGroupId ?? ctx.caller.line_user_id;
+      const fullMessage = prefix + input.message;
+      const { data: dups } = await supabase.from("reminders")
+        .select("id, message, remind_at")
+        .eq("chat_id", reminderChatId).eq("message", fullMessage)
+        .eq("status", "PENDING").limit(1);
+      if ((dups ?? []).length > 0) {
+        return {
+          already_set: dups![0],
+          note: "มีการเตือนข้อความเดียวกันรออยู่แล้วในแชทนี้ จึงไม่ได้สร้างซ้ำ — บอกผู้ใช้ว่าตั้งไว้อยู่แล้วเมื่อไร ถ้าเขาอยากเปลี่ยนเวลาให้ยกเลิกอันเดิมก่อน",
+        };
+      }
+
       const { data, error } = await supabase.from("reminders").insert({
         target_user_id: targetId,
-        chat_id: ctx.lineGroupId ?? ctx.caller.line_user_id,
-        message: prefix + input.message,
+        chat_id: reminderChatId,
+        message: fullMessage,
         remind_at: when.toISOString(),
         created_by_user_id: ctx.caller.id,
       }).select("id, message, remind_at").single();
@@ -1043,6 +1062,7 @@ ${rosterText}
 6. เมื่อสร้างงานสำเร็จ สรุปให้เห็น: ชื่องาน / เจ้าของ / กำหนดส่ง
 7. ค้นข้อความ/สรุปข้ามกลุ่ม และส่ง DM หาคนอื่น เป็นสิทธิ์ MANAGER ขึ้นไป — ก่อนส่ง DM หาคนอื่นให้ยืนยัน 1 ครั้ง ส่วน DM หาตัวเองส่งได้เลย
 8. ใช้บทสนทนาล่าสุดตีความคำสั่งต่อเนื่อง เช่น ตอบ "1" หลังคุณเสนอตัวเลือก = เลือกข้อ 1 หรือพูดถึง "งานนั้น" = งานที่เพิ่งคุยกัน
+8.1 แต่บทสนทนาเก่ามีไว้ "ตีความ" คำสั่งล่าสุดเท่านั้น ไม่ใช่คิวงานที่ต้องไล่ทำ — ห้ามย้อนไปทำคำสั่งเก่าที่ทำไปแล้วซ้ำอีกเด็ดขาด ถ้าคำสั่งล่าสุดเป็นคำถามหรือเป็นคนละเรื่อง ให้ตอบเฉพาะเรื่องนั้น ห้ามสร้างงานหรือตั้งเตือนจากข้อความเก่าที่เห็นในบริบท
 9. ในแชทส่วนตัว แยกสองกรณี:
    - คนแปลกหน้า (ชื่อเป็น "ไม่ทราบชื่อ" หรือไม่อยู่ในรายชื่อพนักงาน): ต้องถามชื่อเล่นและตำแหน่งงานก่อนช่วยงานใด ๆ แล้วบันทึกด้วย update_my_profile — ห้ามข้าม
    - คนที่รู้จักชื่ออยู่แล้ว: ทักทายด้วยชื่อและช่วยงานได้ทันที ถ้ายังไม่รู้ตำแหน่ง ให้ถามแทรกท้ายคำตอบแรกแบบสบาย ๆ 1 ครั้ง (ไม่บังคับ ไม่ถามซ้ำ) แล้วบันทึกเมื่อได้คำตอบ
@@ -1269,11 +1289,13 @@ async function handleEvent(event: any) {
     : text.replace(/@\s?(ai|mt\s?agent\s?1?)/i, "").trim() || "สวัสดี";
   const replyTo = lineGroupId ?? lineUserId;
   const judgeAddressed = Boolean(lineGroupId && !tagged && named);
+  // อ้างข้อความต้นทางเฉพาะในกลุ่ม จะได้รู้ว่าบอทตอบเรื่องไหนตอนหลายคนคุยกันพร้อมกัน
+  const quoteToken: string | null = lineGroupId ? (event.message?.quoteToken ?? null) : null;
 
   try {
     const answer = await runAgent(question, ctx, chatId, { image, file, judgeAddressed });
     if (judgeAddressed && answer.trim().toUpperCase().startsWith("SILENT")) return;
-    await sendReply(event.replyToken, replyTo, answer);
+    await sendReply(event.replyToken, replyTo, answer, quoteToken);
     // เก็บคำตอบของบอทด้วย เพื่อให้ summary/ความจำบทสนทนาเห็นครบทั้งสองฝั่ง
     await supabase.from("messages").insert({
       line_user_id: "bot",
@@ -1283,7 +1305,7 @@ async function handleEvent(event: any) {
     });
   } catch (e) {
     console.error("agent error:", e);
-    await sendReply(event.replyToken, replyTo, "ขอโทษค่า ระบบขัดข้องชั่วคราว ลองใหม่อีกครั้งนะคะ 🙏");
+    await sendReply(event.replyToken, replyTo, "ขอโทษค่า ระบบขัดข้องชั่วคราว ลองใหม่อีกครั้งนะคะ 🙏", quoteToken);
   }
 }
 
@@ -1313,7 +1335,7 @@ async function runEval(body: string): Promise<Response> {
 
     // เก็บกวาดของที่ข้อสอบสร้างไว้ ไม่ให้ไปรกรายการงานจริงของทีม
     // ยกเลิกแทนการลบ เพื่อให้ audit trail ยังครบ
-    let cleaned = { tasks: 0, reminders: 0 };
+    let cleaned = { tasks: 0, reminders: 0, events: 0 };
     const { data: evalTasks } = await supabase.from("tasks")
       .update({ status: "CANCELLED", updated_at: new Date().toISOString() })
       .eq("created_by_user_id", caller.id).gte("created_at", startedIso)
@@ -1324,6 +1346,12 @@ async function runEval(body: string): Promise<Response> {
       .eq("created_by_user_id", caller.id).gte("created_at", startedIso)
       .eq("status", "PENDING").select("id");
     cleaned.reminders = (evalReminders ?? []).length;
+    // คืนสถานะรายการที่ข้อสอบเผลอยืนยัน/ปัดทิ้ง ไม่ให้คิวรอตรวจของทีมเพี้ยน
+    const { data: evalEvents } = await supabase.from("events")
+      .update({ status: "NEW", task_id: null, reviewed_by_user_id: null, reviewed_at: null })
+      .eq("reviewed_by_user_id", caller.id).gte("reviewed_at", startedIso)
+      .in("status", ["CONVERTED", "DISMISSED"]).select("id");
+    cleaned.events = (evalEvents ?? []).length;
 
     return Response.json({
       as_user: caller.display_name, role: caller.role,
