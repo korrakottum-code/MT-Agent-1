@@ -18,6 +18,12 @@ const anthropic = new Anthropic({
   ...(WORKSPACE_ID ? { defaultHeaders: { "anthropic-workspace-id": WORKSPACE_ID } } : {}),
 });
 
+// งานอ่านแล้วสรุปใช้ Haiku ได้ ไม่ต้องตัดสินใจแทนใคร ผิดนิดหน่อยก็แค่สรุปไม่คม
+// ส่วนสรุปรายสัปดาห์ยังใช้ Sonnet เพราะต้องร้อยเรื่องทั้งสัปดาห์ และรันแค่สัปดาห์ละครั้ง ค่าใช้จ่ายไม่มีนัย
+// หมายเหตุ: Haiku 4.5 ไม่รับ output_config.effort จึงต้องไม่ส่งพารามิเตอร์นั้นไปด้วย
+const MODEL_CHEAP = "claude-haiku-4-5-20251001";
+const MODEL_SMART = "claude-sonnet-5";
+
 async function pushToGroup(to: string, text: string) {
   const res = await fetch("https://api.line.me/v2/bot/message/push", {
     method: "POST",
@@ -83,9 +89,8 @@ async function dailySummary() {
       .join("\n");
 
     const response: any = await (anthropic as any).messages.create({
-      model: "claude-sonnet-5",
+      model: MODEL_CHEAP,
       max_tokens: 1024,
-      output_config: { effort: "low" },
       system:
         `คุณคือ MT Agent สรุปประจำวันของ LINE Group ให้ทีม อ่านบทสนทนาแล้วสรุปเป็นภาษาไทย ` +
         `ห้ามใช้ markdown ใช้เลขข้อและขึ้นบรรทัดใหม่ เน้น: เรื่องสำคัญที่คุยกัน / การตัดสินใจ / งานที่เกิดขึ้น-เสร็จ / สิ่งที่ค้างต้องตามต่อ ` +
@@ -98,7 +103,7 @@ async function dailySummary() {
           `งานที่เสร็จวันนี้: ${JSON.stringify(doneTasks ?? [])}`,
       }],
     });
-    await logTokenUsage("daily_summary", "claude-sonnet-5", g.line_group_id, response);
+    await logTokenUsage("daily_summary", MODEL_CHEAP, g.line_group_id, response);
     const summary = response.content
       .filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
     if (!summary) continue;
@@ -209,7 +214,7 @@ async function weeklySummary() {
       .join("\n").slice(0, 60000);
 
     const response: any = await (anthropic as any).messages.create({
-      model: "claude-sonnet-5",
+      model: MODEL_SMART,
       max_tokens: 1500,
       output_config: { effort: "medium" },
       system:
@@ -226,7 +231,7 @@ async function weeklySummary() {
           `งานที่เลยกำหนดและยังค้าง: ${JSON.stringify(withOwner(overdue))}`,
       }],
     });
-    await logTokenUsage("weekly_summary", "claude-sonnet-5", g.line_group_id, response);
+    await logTokenUsage("weekly_summary", MODEL_SMART, g.line_group_id, response);
     const summary = response.content
       .filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
     if (!summary) continue;
@@ -325,9 +330,8 @@ async function extractEvents() {
       const nowIso = new Date(runStart.getTime() + 7 * 3600_000).toISOString().replace("Z", "+07:00");
 
       const response: any = await (anthropic as any).messages.create({
-        model: "claude-sonnet-5",
+        model: MODEL_CHEAP,
         max_tokens: 2000,
-        output_config: { effort: "low" },
         system:
           `คุณคือแงว อ่านบทสนทนาในกลุ่มงานแล้วดึงเฉพาะ 3 อย่างนี้ออกมา\n` +
           `TASK = มีคนถูกมอบหมายให้ทำอะไรจริง ๆ / DECISION = ทีมตกลงหรือสรุปอะไรกันแล้ว / DEADLINE = มีกำหนดเวลาที่ต้องส่งหรือต้องเกิดขึ้น\n\n` +
@@ -354,7 +358,7 @@ async function extractEvents() {
         }],
       });
 
-      await logTokenUsage("extract_events", "claude-sonnet-5", g.line_group_id, response);
+      await logTokenUsage("extract_events", MODEL_CHEAP, g.line_group_id, response);
 
       const call = (response.content ?? []).find((b: any) => b.type === "tool_use");
       const found = (call?.input?.events ?? []).filter((e: any) =>
