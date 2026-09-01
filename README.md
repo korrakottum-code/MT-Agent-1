@@ -18,6 +18,8 @@ LINE Group → LINE OA → Webhook → Supabase Edge Function
 - [x] Phase 9–10 — Permission ตาม role + Audit log ทุก tool call
 - [x] MVP 0.1 — ผ่าน Test Scenario หลัก (สร้างงาน/ดูงาน/สรุปกลุ่ม/ลงทะเบียน) เมื่อ 1 ก.ย. 2026
   - เหลือทดสอบ: คนที่ไม่ใช่ ADMIN ถามงานคนอื่นแล้วต้องโดนปฏิเสธ
+- [x] MVP 0.2 (บางส่วน) — `scheduled-jobs`: Daily Summary 18:00 + เตือนงานเช้า 09:00 ผ่าน pg_cron
+  - รอทำต่อหลังใช้งานจริงสักพัก: Event Extraction (จับ TASK/DECISION/DEADLINE จากข้อความทั่วไป), Weekly Summary
 
 ## โครงสร้าง
 
