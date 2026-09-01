@@ -1080,6 +1080,10 @@ type AgentOpts = {
   judgeAddressed?: boolean;
   file?: FilePayload | null;
   toolLog?: string[]; // ใช้ตอนรันข้อสอบ เก็บชื่อ tool ที่ถูกเรียกจริง
+  // ปกติข้อความที่เพิ่งเข้ามาถูกบันทึกลง messages ไปแล้ว จึงต้องตัดตัวล่าสุดออกจากประวัติกันซ้ำ
+  // แต่โหมดข้อสอบไม่ได้บันทึกอะไร ถ้าตัดจะไปตัดคำตอบล่าสุดของบอททิ้ง
+  // ทำให้ประวัติจบลงที่คำขอของผู้ใช้แบบไม่มีคำตอบ แล้วโมเดลนึกว่าเป็นงานค้างที่ต้องทำให้
+  skipLatestMessage?: boolean;
 };
 
 async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentOpts = {}): Promise<string> {
@@ -1096,7 +1100,7 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
     .limit(31);
   const nameOf = new Map((roster ?? []).map((u: any) => [u.line_user_id, u.display_name]));
   nameOf.set("bot", "แงว");
-  const history = (recent ?? []).slice(1).reverse()
+  const history = (recent ?? []).slice(opts.skipLatestMessage === false ? 0 : 1).reverse()
     .map((m: any) => `${nameOf.get(m.line_user_id) ?? "?"}: ${m.message_text}`)
     .join("\n");
 
@@ -1331,7 +1335,7 @@ async function runEval(body: string): Promise<Response> {
   const started = Date.now();
   const startedIso = new Date().toISOString();
   try {
-    const answer = await runAgent(message, ctx, chatId, { toolLog });
+    const answer = await runAgent(message, ctx, chatId, { toolLog, skipLatestMessage: false });
 
     // เก็บกวาดของที่ข้อสอบสร้างไว้ ไม่ให้ไปรกรายการงานจริงของทีม
     // ยกเลิกแทนการลบ เพื่อให้ audit trail ยังครบ
