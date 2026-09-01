@@ -69,6 +69,22 @@ async function fetchLineProfile(userId: string, groupId: string | null): Promise
   return profile.displayName ?? null;
 }
 
+// ดาวน์โหลดรูปที่ส่งใน LINE มาเป็น base64 เพื่อส่งให้โมเดลดู
+async function fetchImageContent(messageId: string): Promise<{ data: string; media_type: string } | null> {
+  const res = await fetch(`https://api-data.line.me/v2/bot/message/${messageId}/content`, {
+    headers: { Authorization: `Bearer ${CHANNEL_ACCESS_TOKEN}` },
+  });
+  if (!res.ok) return null;
+  const mediaType = (res.headers.get("content-type") ?? "image/jpeg").split(";")[0];
+  const buf = new Uint8Array(await res.arrayBuffer());
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < buf.length; i += chunk) {
+    binary += String.fromCharCode(...buf.subarray(i, i + chunk));
+  }
+  return { data: btoa(binary), media_type: mediaType };
+}
+
 // ---------------------------------------------------------------- Identity
 
 async function ensureUser(lineUserId: string, groupId: string | null) {
@@ -221,6 +237,18 @@ const TOOLS = [
         job_title: { type: "string", description: "ตำแหน่งงาน เช่น กราฟิกดีไซเนอร์" },
         department: { type: "string" },
       },
+    },
+  },
+  {
+    name: "remember_preference",
+    description:
+      "จำข้อกำหนดถาวรของผู้ใช้คนนี้ เช่น ชื่อเล่นที่อยากให้เรียกบอท/ตัวเอง โทนการตอบ สิ่งที่ห้ามทำ ข้อความใหม่จะแทนที่ของเก่าทั้งหมด — ให้รวมข้อกำหนดเดิมที่ยังใช้อยู่เข้าไปด้วย",
+    input_schema: {
+      type: "object",
+      properties: {
+        preferences: { type: "string", description: "ข้อกำหนดทั้งหมดฉบับล่าสุด (รวมของเดิมที่ยังใช้)" },
+      },
+      required: ["preferences"],
     },
   },
   {
@@ -462,6 +490,14 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       return { updated_profile: data };
     }
 
+    case "remember_preference": {
+      const { error } = await supabase.from("users")
+        .update({ preferences: String(input.preferences).slice(0, 2000), updated_at: new Date().toISOString() })
+        .eq("id", ctx.caller.id);
+      if (error) return { error: error.message };
+      return { remembered: true };
+    }
+
     case "rename_group": {
       if (ctx.caller.role !== "ADMIN") return { error: "เฉพาะ ADMIN เท่านั้นที่ตั้งชื่อกลุ่มได้" };
       if (!ctx.group) return { error: "ใช้ได้เฉพาะในกลุ่ม" };
@@ -519,6 +555,7 @@ function buildSystemPrompt(ctx: Ctx, roster: any[], groups: any[]): string {
 เวลาปัจจุบัน (ประเทศไทย): ${thaiTime} (ISO: ${isoBkk})
 ผู้ที่กำลังคุยกับคุณ: ${ctx.caller.display_name ?? "ไม่ทราบชื่อ"} (role: ${ctx.caller.role}, ตำแหน่ง: ${ctx.caller.job_title ?? "ยังไม่ระบุ"})
 กลุ่มปัจจุบัน: ${ctx.group?.group_name ?? "แชทส่วนตัว"}
+ข้อกำหนดถาวรที่ผู้ใช้นี้เคยสั่งให้จำ: ${ctx.caller.preferences ?? "(ยังไม่มี)"}
 
 พนักงานที่ลงทะเบียนแล้ว:
 ${rosterText}
@@ -534,10 +571,18 @@ ${rosterText}
 6. เมื่อสร้างงานสำเร็จ สรุปให้เห็น: ชื่องาน / เจ้าของ / กำหนดส่ง
 7. ค้นข้อความ/สรุปข้ามกลุ่ม และส่ง DM หาคนอื่น เป็นสิทธิ์ MANAGER ขึ้นไป — ก่อนส่ง DM หาคนอื่นให้ยืนยัน 1 ครั้ง ส่วน DM หาตัวเองส่งได้เลย
 8. ใช้บทสนทนาล่าสุดตีความคำสั่งต่อเนื่อง เช่น ตอบ "1" หลังคุณเสนอตัวเลือก = เลือกข้อ 1 หรือพูดถึง "งานนั้น" = งานที่เพิ่งคุยกัน
-9. ในแชทส่วนตัว: ถ้าตำแหน่งของผู้ใช้เป็น "ยังไม่ระบุ" ต้องถามชื่อเล่นและตำแหน่งงานเป็นอย่างแรกก่อนช่วยงานใด ๆ (อธิบายว่าถามเพื่อยืนยันตัวตน) แล้วบันทึกด้วย update_my_profile — ห้ามข้ามขั้นนี้`;
+9. ในแชทส่วนตัว แยกสองกรณี:
+   - คนแปลกหน้า (ชื่อเป็น "ไม่ทราบชื่อ" หรือไม่อยู่ในรายชื่อพนักงาน): ต้องถามชื่อเล่นและตำแหน่งงานก่อนช่วยงานใด ๆ แล้วบันทึกด้วย update_my_profile — ห้ามข้าม
+   - คนที่รู้จักชื่ออยู่แล้ว: ทักทายด้วยชื่อและช่วยงานได้ทันที ถ้ายังไม่รู้ตำแหน่ง ให้ถามแทรกท้ายคำตอบแรกแบบสบาย ๆ 1 ครั้ง (ไม่บังคับ ไม่ถามซ้ำ) แล้วบันทึกเมื่อได้คำตอบ
+10. เมื่อผู้ใช้บอกความชอบหรือวิธีที่อยากให้ปฏิบัติแบบถาวร (เช่น "เรียกบอทว่าแงว", โทนการตอบ) ให้บันทึกด้วย remember_preference ทันที และปฏิบัติตามข้อกำหนดถาวรด้านบนเสมอ`;
 }
 
-async function runAgent(userText: string, ctx: Ctx, chatId: string): Promise<string> {
+type AgentOpts = {
+  image?: { data: string; media_type: string } | null;
+  judgeAddressed?: boolean;
+};
+
+async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentOpts = {}): Promise<string> {
   const { data: roster } = await supabase
     .from("users").select("line_user_id, display_name, role, department, job_title").eq("is_active", true).limit(50);
   const { data: allGroups } = await supabase
@@ -556,9 +601,21 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string): Promise<str
     .join("\n");
 
   const system = buildSystemPrompt(ctx, roster ?? [], allGroups ?? []);
-  const content = history
+  let textContent = history
     ? `บทสนทนาล่าสุดในแชทนี้ (เก่า→ใหม่ ใช้เป็นบริบท):\n${history}\n\nคำสั่งล่าสุดจาก ${ctx.caller.display_name ?? "ผู้ใช้"}: ${userText}`
     : userText;
+  if (opts.judgeAddressed) {
+    textContent =
+      `หมายเหตุ: ข้อความล่าสุดเอ่ยถึงชื่อคุณแต่ไม่ได้แท็กเรียกตรง ๆ อ่านบริบทแล้วตัดสินใจเอง — ` +
+      `ถ้าเขาตั้งใจคุยกับคุณหรือขอให้ช่วย ให้ตอบตามปกติ แต่ถ้าแค่พูดถึงคุณโดยไม่ได้ต้องการคำตอบ ` +
+      `ให้ตอบคำว่า SILENT คำเดียวเท่านั้น\n\n` + textContent;
+  }
+  const content: any = opts.image
+    ? [
+        { type: "image", source: { type: "base64", media_type: opts.image.media_type, data: opts.image.data } },
+        { type: "text", text: textContent },
+      ]
+    : textContent;
   const messages: any[] = [{ role: "user", content }];
 
   for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
@@ -617,9 +674,17 @@ function isCallingAI(text: string): boolean {
   return /@\s?(ai|mt\s?agent)/i.test(text);
 }
 
+// เอ่ยชื่อบอทโดยไม่แท็ก → ให้โมเดลอ่านบริบทแล้วตัดสินใจเองว่าควรตอบไหม
+function isNameMention(text: string): boolean {
+  return /(แงว|เอ็มที|mt\s?agent)/i.test(text);
+}
+
 async function handleEvent(event: any) {
-  if (event.type !== "message" || event.message?.type !== "text") return;
-  const text: string = event.message.text;
+  if (event.type !== "message") return;
+  const msgType: string = event.message?.type ?? "";
+  if (msgType !== "text" && msgType !== "image") return;
+
+  const text: string = msgType === "text" ? event.message.text : "[ส่งรูปภาพ]";
   const lineUserId: string = event.source?.userId ?? "unknown";
   const lineGroupId: string | null = event.source?.groupId ?? null;
   // chatId ใช้ผูกบทสนทนา: กลุ่ม = groupId, แชทส่วนตัว = userId ของคู่สนทนา
@@ -630,22 +695,46 @@ async function handleEvent(event: any) {
     line_user_id: lineUserId,
     line_group_id: chatId,
     message_text: text,
-    message_type: "text",
+    message_type: msgType,
   });
   if (error) console.error("insert message failed:", error.message);
 
-  // ในกลุ่มต้องแท็กถึงตอบ (ไม่รบกวนบทสนทนาปกติ) แต่แชทส่วนตัวตอบทุกข้อความ
-  if (lineGroupId && !isCallingAI(text)) return;
+  // เงื่อนไขการตอบ:
+  // - แชทส่วนตัว: ตอบทุกข้อความและทุกรูป
+  // - ในกลุ่ม: ตอบเมื่อแท็ก หรือเอ่ยชื่อ (เอ่ยชื่อ → โมเดลตัดสินใจเองว่าควรตอบไหม)
+  const tagged = msgType === "text" && isCallingAI(text);
+  const named = msgType === "text" && isNameMention(text);
+  if (lineGroupId && msgType === "image") return; // รูปในกลุ่มแค่เก็บไว้ รอคนแท็กถามถึง
+  if (lineGroupId && !tagged && !named) return;
 
   const caller = await ensureUser(lineUserId, lineGroupId);
   const group = await ensureGroup(lineGroupId);
   const ctx: Ctx = { caller, group, lineGroupId };
 
-  const question = text.replace(/@\s?(ai|mt\s?agent\s?1?)/i, "").trim() || "สวัสดี";
+  // แนบรูป: ถ้าส่งรูปมาตรง ๆ (DM) หรือข้อความพูดถึงรูป → ดึงรูปล่าสุดในแชทมาให้ดู
+  let image: { data: string; media_type: string } | null = null;
+  if (msgType === "image") {
+    image = await fetchImageContent(event.message.id);
+  } else if (/รูป|ภาพ|สกรีน|screenshot|image/i.test(text)) {
+    const { data: img } = await supabase.from("messages")
+      .select("line_message_id")
+      .eq("line_group_id", chatId)
+      .eq("message_type", "image")
+      .gte("created_at", new Date(Date.now() - 24 * 3600_000).toISOString())
+      .order("created_at", { ascending: false })
+      .limit(1).maybeSingle();
+    if (img?.line_message_id) image = await fetchImageContent(img.line_message_id);
+  }
+
+  const question = msgType === "image"
+    ? "ผู้ใช้ส่งรูปภาพนี้มา ช่วยดูรูปและตอบตามบริบทของบทสนทนา"
+    : text.replace(/@\s?(ai|mt\s?agent\s?1?)/i, "").trim() || "สวัสดี";
   const replyTo = lineGroupId ?? lineUserId;
+  const judgeAddressed = Boolean(lineGroupId && !tagged && named);
 
   try {
-    const answer = await runAgent(question, ctx, chatId);
+    const answer = await runAgent(question, ctx, chatId, { image, judgeAddressed });
+    if (judgeAddressed && answer.trim().toUpperCase().startsWith("SILENT")) return;
     await sendReply(event.replyToken, replyTo, answer);
     // เก็บคำตอบของบอทด้วย เพื่อให้ summary/ความจำบทสนทนาเห็นครบทั้งสองฝั่ง
     await supabase.from("messages").insert({
