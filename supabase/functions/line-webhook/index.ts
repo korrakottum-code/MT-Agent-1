@@ -211,6 +211,19 @@ const TOOLS = [
     },
   },
   {
+    name: "update_my_profile",
+    description:
+      "บันทึก/แก้ไขโปรไฟล์ของคนที่กำลังคุยอยู่: ชื่อเล่น ตำแหน่งงาน แผนก ใช้ตอนผู้ใช้แนะนำตัวในแชทส่วนตัว",
+    input_schema: {
+      type: "object",
+      properties: {
+        display_name: { type: "string", description: "ชื่อเล่นที่ใช้เรียกในองค์กร" },
+        job_title: { type: "string", description: "ตำแหน่งงาน เช่น กราฟิกดีไซเนอร์" },
+        department: { type: "string" },
+      },
+    },
+  },
+  {
     name: "rename_group",
     description:
       "ตั้ง/เปลี่ยนชื่อกลุ่มปัจจุบันในระบบ (เฉพาะ ADMIN) ใช้ตอนเชิญบอทเข้ากลุ่มใหม่ที่ยังไม่มีชื่อ",
@@ -438,6 +451,17 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       return { sent_to: target.display_name };
     }
 
+    case "update_my_profile": {
+      const patch: any = { updated_at: new Date().toISOString() };
+      if (input.display_name) patch.display_name = input.display_name;
+      if (input.job_title) patch.job_title = input.job_title;
+      if (input.department) patch.department = input.department;
+      const { data, error } = await supabase.from("users").update(patch)
+        .eq("id", ctx.caller.id).select("display_name, job_title, department").single();
+      if (error) return { error: error.message };
+      return { updated_profile: data };
+    }
+
     case "rename_group": {
       if (ctx.caller.role !== "ADMIN") return { error: "เฉพาะ ADMIN เท่านั้นที่ตั้งชื่อกลุ่มได้" };
       if (!ctx.group) return { error: "ใช้ได้เฉพาะในกลุ่ม" };
@@ -487,13 +511,13 @@ function buildSystemPrompt(ctx: Ctx, roster: any[], groups: any[]): string {
   });
   const isoBkk = new Date(now.getTime() + 7 * 3600_000).toISOString().replace("Z", "+07:00");
   const rosterText = roster
-    .map((u) => `- ${u.display_name ?? "(ไม่มีชื่อ)"} (${u.role}${u.department ? ", " + u.department : ""})`)
+    .map((u) => `- ${u.display_name ?? "(ไม่มีชื่อ)"} (${u.role}${u.job_title ? ", " + u.job_title : ""}${u.department ? ", " + u.department : ""})`)
     .join("\n");
 
   return `คุณคือ "MT Agent" — AI กลางขององค์กร ทำงานอยู่ใน LINE Group ขององค์กร
 
 เวลาปัจจุบัน (ประเทศไทย): ${thaiTime} (ISO: ${isoBkk})
-ผู้ที่กำลังคุยกับคุณ: ${ctx.caller.display_name ?? "ไม่ทราบชื่อ"} (role: ${ctx.caller.role})
+ผู้ที่กำลังคุยกับคุณ: ${ctx.caller.display_name ?? "ไม่ทราบชื่อ"} (role: ${ctx.caller.role}, ตำแหน่ง: ${ctx.caller.job_title ?? "ยังไม่ระบุ"})
 กลุ่มปัจจุบัน: ${ctx.group?.group_name ?? "แชทส่วนตัว"}
 
 พนักงานที่ลงทะเบียนแล้ว:
@@ -509,12 +533,13 @@ ${rosterText}
 5. ถ้า tool ตอบ error เรื่องสิทธิ์ ให้อธิบายอย่างสุภาพว่าติดสิทธิ์อะไร
 6. เมื่อสร้างงานสำเร็จ สรุปให้เห็น: ชื่องาน / เจ้าของ / กำหนดส่ง
 7. ค้นข้อความ/สรุปข้ามกลุ่ม และส่ง DM หาคนอื่น เป็นสิทธิ์ MANAGER ขึ้นไป — ก่อนส่ง DM หาคนอื่นให้ยืนยัน 1 ครั้ง ส่วน DM หาตัวเองส่งได้เลย
-8. ใช้บทสนทนาล่าสุดตีความคำสั่งต่อเนื่อง เช่น ตอบ "1" หลังคุณเสนอตัวเลือก = เลือกข้อ 1 หรือพูดถึง "งานนั้น" = งานที่เพิ่งคุยกัน`;
+8. ใช้บทสนทนาล่าสุดตีความคำสั่งต่อเนื่อง เช่น ตอบ "1" หลังคุณเสนอตัวเลือก = เลือกข้อ 1 หรือพูดถึง "งานนั้น" = งานที่เพิ่งคุยกัน
+9. ในแชทส่วนตัว: ถ้าตำแหน่งของผู้ใช้เป็น "ยังไม่ระบุ" ต้องถามชื่อเล่นและตำแหน่งงานเป็นอย่างแรกก่อนช่วยงานใด ๆ (อธิบายว่าถามเพื่อยืนยันตัวตน) แล้วบันทึกด้วย update_my_profile — ห้ามข้ามขั้นนี้`;
 }
 
 async function runAgent(userText: string, ctx: Ctx, chatId: string): Promise<string> {
   const { data: roster } = await supabase
-    .from("users").select("line_user_id, display_name, role, department").eq("is_active", true).limit(50);
+    .from("users").select("line_user_id, display_name, role, department, job_title").eq("is_active", true).limit(50);
   const { data: allGroups } = await supabase
     .from("groups").select("group_name").eq("is_active", true).limit(50);
 
