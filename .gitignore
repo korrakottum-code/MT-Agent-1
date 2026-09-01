@@ -1,0 +1,14 @@
+# Secrets — ห้าม commit เด็ดขาด
+.env
+.env.*
+*.local
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Node / Deno
+node_modules/
+.deno/
