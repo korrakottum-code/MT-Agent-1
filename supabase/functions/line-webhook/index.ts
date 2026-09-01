@@ -638,6 +638,8 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
         if (ctx.caller.role !== "ADMIN") {
           return { error: "ตั้งค่าที่ใช้กับทุกคนได้เฉพาะ ADMIN (ถ้าต้องการเฉพาะตัวเอง ใช้ scope=me)" };
         }
+        const { data: prev } = await supabase.from("org_settings")
+          .select("value").eq("key", "bot_persona").maybeSingle();
         const { error } = await supabase.from("org_settings").upsert({
           key: "bot_persona",
           value,
@@ -645,7 +647,13 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
           updated_at: new Date().toISOString(),
         });
         if (error) return { error: error.message };
-        return { remembered: true, scope: "org", note: "ใช้กับทุกคนทุกกลุ่มแล้ว" };
+        // ส่งค่าเดิมกลับไปด้วย เผื่อเผลอเขียนทับข้อกำหนดเก่าที่ยังต้องใช้
+        return {
+          remembered: true,
+          scope: "org",
+          previous_value: prev?.value ?? null,
+          note: "ใช้กับทุกคนทุกกลุ่มแล้ว — ถ้า previous_value มีข้อกำหนดที่ยังต้องใช้แต่หายไปจากค่าใหม่ ให้เรียกซ้ำโดยรวมของเดิมเข้าไปด้วย",
+        };
       }
       const { error } = await supabase.from("users")
         .update({ preferences: value, updated_at: new Date().toISOString() })
@@ -729,6 +737,8 @@ ${rosterText}
 กฎการทำงาน:
 1. ตอบภาษาไทย สั้น กระชับ อ่านง่ายใน LINE — ห้ามใช้ markdown (ไม่มี ** หรือ #) ใช้ขึ้นบรรทัดใหม่, เลขข้อ และ emoji เล็กน้อยแทน ใส่เลขข้อเฉพาะตอนมีหลายรายการจริง ๆ คุยเล่นไม่ต้องทำเป็นลิสต์
 2. ข้อมูลจริงทั้งหมด (งาน, ข้อความ, สถิติ) ต้องมาจาก tools เท่านั้น ห้ามเดาหรือแต่งข้อมูลเอง
+2.1 ห้ามอ้างว่าทำอะไรสำเร็จถ้าไม่ได้เรียก tool จริงและ tool ไม่ได้ตอบว่าสำเร็จ — คุณเปลี่ยนกฎ/ความสามารถ/โค้ดของตัวเองไม่ได้ ทำได้แค่บันทึกด้วย remember_preference เท่านั้น ถ้าผู้ใช้ขอสิ่งที่ต้องแก้ระบบ ให้บอกตรง ๆ ว่าบันทึกไว้เป็นฟีดแบ็คให้ แต่ต้องรอทีมพัฒนาแก้
+2.2 คำถามว่า "วันนี้ทำอะไรไปบ้าง / จดอะไรไว้ / มีงานอะไร / เตือนอะไรไว้" ต้องเรียก tool ตรวจจริงเสมอ (get_my_tasks, list_reminders, search_messages, get_group_summary) ห้ามตอบจากบทสนทนาที่เห็นในหน้าต่างนี้อย่างเดียว เพราะคุณเห็นย้อนหลังได้จำกัด การตอบว่า "ไม่มี" ทั้งที่ไม่ได้ตรวจ ถือว่าผิดร้ายแรง
 3. ตีความวันเวลาแบบไทยจากเวลาปัจจุบัน เช่น "พรุ่งนี้ 15:00" → ISO 8601 +07:00
 4. การยกเลิกงาน (CANCELLED) หรือแก้ข้อมูลสำคัญของคนอื่น ให้ถามยืนยันก่อน 1 ครั้ง
 5. ถ้า tool ตอบ error เรื่องสิทธิ์ ให้อธิบายอย่างสุภาพว่าติดสิทธิ์อะไร
@@ -758,7 +768,7 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
     .select("line_user_id, message_text")
     .eq("line_group_id", chatId)
     .order("created_at", { ascending: false })
-    .limit(13);
+    .limit(31);
   const nameOf = new Map((roster ?? []).map((u: any) => [u.line_user_id, u.display_name]));
   nameOf.set("bot", "แงว");
   const history = (recent ?? []).slice(1).reverse()
