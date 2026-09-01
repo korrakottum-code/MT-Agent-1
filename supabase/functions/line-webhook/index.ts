@@ -211,6 +211,19 @@ const TOOLS = [
     },
   },
   {
+    name: "rename_group",
+    description:
+      "ตั้ง/เปลี่ยนชื่อกลุ่มปัจจุบันในระบบ (เฉพาะ ADMIN) ใช้ตอนเชิญบอทเข้ากลุ่มใหม่ที่ยังไม่มีชื่อ",
+    input_schema: {
+      type: "object",
+      properties: {
+        new_name: { type: "string" },
+        department: { type: "string", description: "แผนกของกลุ่ม (ถ้ามี)" },
+      },
+      required: ["new_name"],
+    },
+  },
+  {
     name: "register_user",
     description:
       "ลงทะเบียนพนักงานล่วงหน้าด้วยชื่อเล่น (เฉพาะ ADMIN) ใช้เมื่อสร้างงานให้คนที่ยังไม่เคยพิมพ์ในกลุ่ม",
@@ -425,6 +438,17 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       return { sent_to: target.display_name };
     }
 
+    case "rename_group": {
+      if (ctx.caller.role !== "ADMIN") return { error: "เฉพาะ ADMIN เท่านั้นที่ตั้งชื่อกลุ่มได้" };
+      if (!ctx.group) return { error: "ใช้ได้เฉพาะในกลุ่ม" };
+      const patch: any = { group_name: input.new_name };
+      if (input.department) patch.department = input.department;
+      const { data, error } = await supabase.from("groups").update(patch)
+        .eq("id", ctx.group.id).select("group_name, department").single();
+      if (error) return { error: error.message };
+      return { renamed: data };
+    }
+
     case "register_user": {
       if (ctx.caller.role !== "ADMIN") return { error: "เฉพาะ ADMIN เท่านั้นที่ลงทะเบียนพนักงานได้" };
       const { data, error } = await supabase.from("users").insert({
@@ -484,17 +508,33 @@ ${rosterText}
 4. การยกเลิกงาน (CANCELLED) หรือแก้ข้อมูลสำคัญของคนอื่น ให้ถามยืนยันก่อน 1 ครั้ง
 5. ถ้า tool ตอบ error เรื่องสิทธิ์ ให้อธิบายอย่างสุภาพว่าติดสิทธิ์อะไร
 6. เมื่อสร้างงานสำเร็จ สรุปให้เห็น: ชื่องาน / เจ้าของ / กำหนดส่ง
-7. ค้นข้อความ/สรุปข้ามกลุ่ม และส่ง DM หาคนอื่น เป็นสิทธิ์ MANAGER ขึ้นไป — ก่อนส่ง DM หาคนอื่นให้ยืนยัน 1 ครั้ง ส่วน DM หาตัวเองส่งได้เลย`;
+7. ค้นข้อความ/สรุปข้ามกลุ่ม และส่ง DM หาคนอื่น เป็นสิทธิ์ MANAGER ขึ้นไป — ก่อนส่ง DM หาคนอื่นให้ยืนยัน 1 ครั้ง ส่วน DM หาตัวเองส่งได้เลย
+8. ใช้บทสนทนาล่าสุดตีความคำสั่งต่อเนื่อง เช่น ตอบ "1" หลังคุณเสนอตัวเลือก = เลือกข้อ 1 หรือพูดถึง "งานนั้น" = งานที่เพิ่งคุยกัน`;
 }
 
-async function runAgent(userText: string, ctx: Ctx): Promise<string> {
+async function runAgent(userText: string, ctx: Ctx, chatId: string): Promise<string> {
   const { data: roster } = await supabase
-    .from("users").select("display_name, role, department").eq("is_active", true).limit(50);
+    .from("users").select("line_user_id, display_name, role, department").eq("is_active", true).limit(50);
   const { data: allGroups } = await supabase
     .from("groups").select("group_name").eq("is_active", true).limit(50);
 
+  // บทสนทนาล่าสุดในแชทนี้ เพื่อให้คำสั่งต่อเนื่องสั้น ๆ ("1", "งานเดียว") ตีความได้
+  const { data: recent } = await supabase.from("messages")
+    .select("line_user_id, message_text")
+    .eq("line_group_id", chatId)
+    .order("created_at", { ascending: false })
+    .limit(13);
+  const nameOf = new Map((roster ?? []).map((u: any) => [u.line_user_id, u.display_name]));
+  nameOf.set("bot", "MT Agent");
+  const history = (recent ?? []).slice(1).reverse()
+    .map((m: any) => `${nameOf.get(m.line_user_id) ?? "?"}: ${m.message_text}`)
+    .join("\n");
+
   const system = buildSystemPrompt(ctx, roster ?? [], allGroups ?? []);
-  const messages: any[] = [{ role: "user", content: userText }];
+  const content = history
+    ? `บทสนทนาล่าสุดในแชทนี้ (เก่า→ใหม่ ใช้เป็นบริบท):\n${history}\n\nคำสั่งล่าสุดจาก ${ctx.caller.display_name ?? "ผู้ใช้"}: ${userText}`
+    : userText;
+  const messages: any[] = [{ role: "user", content }];
 
   for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
     const response: any = await (anthropic as any).messages.create({
@@ -557,17 +597,20 @@ async function handleEvent(event: any) {
   const text: string = event.message.text;
   const lineUserId: string = event.source?.userId ?? "unknown";
   const lineGroupId: string | null = event.source?.groupId ?? null;
+  // chatId ใช้ผูกบทสนทนา: กลุ่ม = groupId, แชทส่วนตัว = userId ของคู่สนทนา
+  const chatId = lineGroupId ?? lineUserId;
 
   const { error } = await supabase.from("messages").insert({
     line_message_id: event.message.id,
     line_user_id: lineUserId,
-    line_group_id: lineGroupId,
+    line_group_id: chatId,
     message_text: text,
     message_type: "text",
   });
   if (error) console.error("insert message failed:", error.message);
 
-  if (!isCallingAI(text)) return;
+  // ในกลุ่มต้องแท็กถึงตอบ (ไม่รบกวนบทสนทนาปกติ) แต่แชทส่วนตัวตอบทุกข้อความ
+  if (lineGroupId && !isCallingAI(text)) return;
 
   const caller = await ensureUser(lineUserId, lineGroupId);
   const group = await ensureGroup(lineGroupId);
@@ -577,12 +620,12 @@ async function handleEvent(event: any) {
   const replyTo = lineGroupId ?? lineUserId;
 
   try {
-    const answer = await runAgent(question, ctx);
+    const answer = await runAgent(question, ctx, chatId);
     await sendReply(event.replyToken, replyTo, answer);
-    // เก็บคำตอบของบอทด้วย เพื่อให้ summary/การค้นหาเห็นบทสนทนาครบทั้งสองฝั่ง
+    // เก็บคำตอบของบอทด้วย เพื่อให้ summary/ความจำบทสนทนาเห็นครบทั้งสองฝั่ง
     await supabase.from("messages").insert({
       line_user_id: "bot",
-      line_group_id: lineGroupId,
+      line_group_id: chatId,
       message_text: answer,
       message_type: "bot",
     });
