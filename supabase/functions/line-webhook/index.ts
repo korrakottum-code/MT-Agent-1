@@ -160,11 +160,12 @@ const TOOLS = [
   },
   {
     name: "search_messages",
-    description: "ค้นหาข้อความเก่าในกลุ่มนี้ด้วยคำค้น",
+    description: "ค้นหาข้อความเก่าด้วยคำค้น ค่าเริ่มต้นค้นเฉพาะกลุ่มนี้ scope=all_groups ค้นทุกกลุ่ม (MANAGER ขึ้นไป)",
     input_schema: {
       type: "object",
       properties: {
         query: { type: "string" },
+        scope: { type: "string", enum: ["this_group", "all_groups"] },
         limit: { type: "integer" },
       },
       required: ["query"],
@@ -173,13 +174,27 @@ const TOOLS = [
   {
     name: "get_group_summary",
     description:
-      "ดึงข้อความในกลุ่มนี้ตามช่วงเวลา (ชั่วโมงย้อนหลัง) เพื่อนำมาสรุป พร้อมสถิติงานของกลุ่ม",
+      "ดึงข้อความของกลุ่มตามช่วงเวลา (ชั่วโมงย้อนหลัง) เพื่อนำมาสรุป พร้อมสถิติงานของกลุ่ม ระบุ group_name เพื่อดูกลุ่มอื่น (MANAGER ขึ้นไป)",
     input_schema: {
       type: "object",
       properties: {
         hours_back: { type: "integer", description: "ย้อนหลังกี่ชั่วโมง เช่น 24 = วันนี้" },
+        group_name: { type: "string", description: "ชื่อกลุ่มอื่น ไม่ระบุ = กลุ่มปัจจุบัน" },
       },
       required: ["hours_back"],
+    },
+  },
+  {
+    name: "send_dm",
+    description:
+      "ส่งข้อความเข้าแชทส่วนตัว (DM) ของพนักงาน ผู้รับต้องเคยเพิ่ม OA เป็นเพื่อน ส่งหาตัวเองได้ทุกคน ส่งหาคนอื่นต้อง MANAGER ขึ้นไปและควรยืนยันก่อน",
+    input_schema: {
+      type: "object",
+      properties: {
+        to_name: { type: "string", description: "ชื่อเล่นผู้รับ" },
+        message: { type: "string" },
+      },
+      required: ["to_name", "message"],
     },
   },
   {
@@ -312,31 +327,57 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
     }
 
     case "search_messages": {
-      if (!ctx.lineGroupId) return { error: "ใช้ได้เฉพาะในกลุ่ม" };
-      const { data, error } = await supabase.from("messages")
-        .select("line_user_id, message_text, created_at")
-        .eq("line_group_id", ctx.lineGroupId)
+      const scope = input.scope ?? "this_group";
+      if (scope === "all_groups" && !canViewOthers(ctx.caller.role)) {
+        return { error: "ค้นข้ามกลุ่มได้เฉพาะ MANAGER ขึ้นไป" };
+      }
+      if (scope === "this_group" && !ctx.lineGroupId) return { error: "ใช้ได้เฉพาะในกลุ่ม" };
+      let q = supabase.from("messages")
+        .select("line_user_id, line_group_id, message_text, created_at")
         .ilike("message_text", `%${input.query}%`)
         .order("created_at", { ascending: false })
         .limit(Math.min(input.limit ?? 20, 50));
+      if (scope === "this_group") q = q.eq("line_group_id", ctx.lineGroupId);
+      const { data, error } = await q;
       if (error) return { error: error.message };
-      return { results: data };
+      const { data: gs } = await supabase.from("groups").select("line_group_id, group_name");
+      const gname = new Map((gs ?? []).map((g: any) => [g.line_group_id, g.group_name]));
+      return {
+        results: (data ?? []).map((m: any) => ({
+          ...m,
+          group: gname.get(m.line_group_id) ?? null,
+        })),
+      };
     }
 
     case "get_group_summary": {
-      if (!ctx.lineGroupId) return { error: "ใช้ได้เฉพาะในกลุ่ม" };
+      let targetGroup = ctx.group;
+      let targetLineGroupId = ctx.lineGroupId;
+      if (input.group_name) {
+        if (!canViewOthers(ctx.caller.role)) {
+          return { error: "ดูสรุปกลุ่มอื่นได้เฉพาะ MANAGER ขึ้นไป" };
+        }
+        const { data: g } = await supabase.from("groups").select("*")
+          .ilike("group_name", `%${input.group_name}%`).limit(2);
+        if (!g || g.length === 0) return { error: `ไม่พบกลุ่มชื่อ "${input.group_name}"` };
+        if (g.length > 1) return { error: `ชื่อกลุ่มตรงหลายกลุ่ม: ${g.map((x: any) => x.group_name).join(", ")}` };
+        targetGroup = g[0];
+        targetLineGroupId = g[0].line_group_id;
+      }
+      if (!targetLineGroupId) return { error: "ใช้ได้เฉพาะในกลุ่ม หรือระบุ group_name" };
       const since = new Date(Date.now() - input.hours_back * 3600_000).toISOString();
       const { data: msgs } = await supabase.from("messages")
         .select("line_user_id, message_text, created_at")
-        .eq("line_group_id", ctx.lineGroupId)
+        .eq("line_group_id", targetLineGroupId)
         .gte("created_at", since)
         .order("created_at", { ascending: true })
         .limit(200);
       const { data: users } = await supabase.from("users").select("line_user_id, display_name");
       const nameOf = new Map((users ?? []).map((u: any) => [u.line_user_id, u.display_name]));
+      nameOf.set("bot", "MT Agent");
       const { data: tasks } = await supabase.from("tasks")
         .select("title, status, due_at")
-        .eq("group_id", ctx.group?.id ?? "00000000-0000-0000-0000-000000000000")
+        .eq("group_id", targetGroup?.id ?? "00000000-0000-0000-0000-000000000000")
         .gte("created_at", since);
       return {
         messages: (msgs ?? []).map((m: any) => ({
@@ -361,6 +402,27 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       const { count, error } = await q;
       if (error) return { error: error.message };
       return { count, date_from: input.date_from, date_to: input.date_to, status: input.status ?? "ALL" };
+    }
+
+    case "send_dm": {
+      const r = await resolveOneUser(input.to_name);
+      if (r.error) return { error: r.error };
+      const target = r.user;
+      if (String(target.line_user_id).startsWith("pending:")) {
+        return { error: `"${target.display_name}" ยังไม่ได้ผูกบัญชี LINE จริง ส่ง DM ไม่ได้` };
+      }
+      const isSelf = target.id === ctx.caller.id;
+      if (!isSelf && !canViewOthers(ctx.caller.role)) {
+        return { error: "ส่ง DM หาคนอื่นได้เฉพาะ MANAGER ขึ้นไป" };
+      }
+      const ok = await lineApi("/v2/bot/message/push", {
+        to: target.line_user_id,
+        messages: [{ type: "text", text: String(input.message).slice(0, 4900) }],
+      });
+      if (!ok) {
+        return { error: `ส่งไม่สำเร็จ — "${target.display_name}" อาจยังไม่ได้เพิ่ม MT agent 1 เป็นเพื่อนใน LINE` };
+      }
+      return { sent_to: target.display_name };
     }
 
     case "register_user": {
@@ -394,7 +456,7 @@ async function auditLog(ctx: Ctx, toolName: string, input: any, result: any) {
 
 // ---------------------------------------------------------------- Agent
 
-function buildSystemPrompt(ctx: Ctx, roster: any[]): string {
+function buildSystemPrompt(ctx: Ctx, roster: any[], groups: any[]): string {
   const now = new Date();
   const thaiTime = now.toLocaleString("th-TH", {
     timeZone: "Asia/Bangkok", dateStyle: "full", timeStyle: "short",
@@ -413,20 +475,25 @@ function buildSystemPrompt(ctx: Ctx, roster: any[]): string {
 พนักงานที่ลงทะเบียนแล้ว:
 ${rosterText}
 
+กลุ่มทั้งหมดในองค์กร: ${groups.map((g) => g.group_name ?? "(ยังไม่ตั้งชื่อ)").join(", ")}
+
 กฎการทำงาน:
 1. ตอบภาษาไทย สั้น กระชับ อ่านง่ายใน LINE — ห้ามใช้ markdown (ไม่มี ** หรือ #) ใช้ขึ้นบรรทัดใหม่, เลขข้อ และ emoji เล็กน้อยแทน
 2. ข้อมูลจริงทั้งหมด (งาน, ข้อความ, สถิติ) ต้องมาจาก tools เท่านั้น ห้ามเดาหรือแต่งข้อมูลเอง
 3. ตีความวันเวลาแบบไทยจากเวลาปัจจุบัน เช่น "พรุ่งนี้ 15:00" → ISO 8601 +07:00
 4. การยกเลิกงาน (CANCELLED) หรือแก้ข้อมูลสำคัญของคนอื่น ให้ถามยืนยันก่อน 1 ครั้ง
 5. ถ้า tool ตอบ error เรื่องสิทธิ์ ให้อธิบายอย่างสุภาพว่าติดสิทธิ์อะไร
-6. เมื่อสร้างงานสำเร็จ สรุปให้เห็น: ชื่องาน / เจ้าของ / กำหนดส่ง`;
+6. เมื่อสร้างงานสำเร็จ สรุปให้เห็น: ชื่องาน / เจ้าของ / กำหนดส่ง
+7. ค้นข้อความ/สรุปข้ามกลุ่ม และส่ง DM หาคนอื่น เป็นสิทธิ์ MANAGER ขึ้นไป — ก่อนส่ง DM หาคนอื่นให้ยืนยัน 1 ครั้ง ส่วน DM หาตัวเองส่งได้เลย`;
 }
 
 async function runAgent(userText: string, ctx: Ctx): Promise<string> {
   const { data: roster } = await supabase
     .from("users").select("display_name, role, department").eq("is_active", true).limit(50);
+  const { data: allGroups } = await supabase
+    .from("groups").select("group_name").eq("is_active", true).limit(50);
 
-  const system = buildSystemPrompt(ctx, roster ?? []);
+  const system = buildSystemPrompt(ctx, roster ?? [], allGroups ?? []);
   const messages: any[] = [{ role: "user", content: userText }];
 
   for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
@@ -512,6 +579,13 @@ async function handleEvent(event: any) {
   try {
     const answer = await runAgent(question, ctx);
     await sendReply(event.replyToken, replyTo, answer);
+    // เก็บคำตอบของบอทด้วย เพื่อให้ summary/การค้นหาเห็นบทสนทนาครบทั้งสองฝั่ง
+    await supabase.from("messages").insert({
+      line_user_id: "bot",
+      line_group_id: lineGroupId,
+      message_text: answer,
+      message_type: "bot",
+    });
   } catch (e) {
     console.error("agent error:", e);
     await sendReply(event.replyToken, replyTo, "ขอโทษครับ ระบบขัดข้องชั่วคราว ลองใหม่อีกครั้งนะครับ");

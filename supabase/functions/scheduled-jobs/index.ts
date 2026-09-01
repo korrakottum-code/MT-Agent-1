@@ -40,6 +40,7 @@ async function dailySummary() {
   const since = new Date(Date.now() - 24 * 3600_000).toISOString();
   const { data: users } = await supabase.from("users").select("line_user_id, display_name");
   const nameOf = new Map((users ?? []).map((u: any) => [u.line_user_id, u.display_name]));
+  nameOf.set("bot", "MT Agent");
 
   for (const g of groups ?? []) {
     const { data: msgs } = await supabase.from("messages")
@@ -66,7 +67,7 @@ async function dailySummary() {
       system:
         `คุณคือ MT Agent สรุปประจำวันของ LINE Group ให้ทีม อ่านบทสนทนาแล้วสรุปเป็นภาษาไทย ` +
         `ห้ามใช้ markdown ใช้เลขข้อและขึ้นบรรทัดใหม่ เน้น: เรื่องสำคัญที่คุยกัน / การตัดสินใจ / งานที่เกิดขึ้น-เสร็จ / สิ่งที่ค้างต้องตามต่อ ` +
-        `สั้น กระชับ ไม่เกิน 12 บรรทัด ข้ามเรื่องหยอกล้อไม่สำคัญ`,
+        `สั้น กระชับ ไม่เกิน 12 บรรทัด ข้ามเรื่องหยอกล้อไม่สำคัญ ข้อความจาก "MT Agent" คือคำตอบของบอทเอง ใช้เป็นข้อมูลประกอบผลลัพธ์ที่เกิดขึ้นจริง`,
       messages: [{
         role: "user",
         content:
