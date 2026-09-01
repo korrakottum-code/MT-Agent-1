@@ -34,6 +34,18 @@ CRON_SECRET              (ค่าเดียวกันนี้ฝังอ
 - pg_cron 2 ตัว: `daily-summary` (11:00 UTC = 18:00 ไทย), `morning-reminder` (02:00 UTC = 09:00 ไทย)
 - ตาราง: `users` (มี job_title, preferences), `groups`, `messages`, `tasks`, `audit_logs` — RLS เปิดทุกตาราง ไม่มี policy สำหรับ anon (เข้าถึงได้เฉพาะ service_role)
 
+## ข้อสอบของแงว (รันทุกครั้งก่อนและหลังแก้ระบบ)
+
+```bash
+pwsh -File tests/run-eval.ps1 -TestKey <CRON_SECRET>
+```
+
+ยิงคำถามจริงเข้า agent ผ่าน header `x-test-key` (ค่าเดียวกับ CRON_SECRET) โดยไม่ส่งข้อความเข้า LINE
+และไม่บันทึกลงตาราง messages — ตรวจทั้งว่าเรียก tool ถูกตัวไหม และคำตอบผิดกติกาหรือเปล่า
+เพิ่มข้อสอบใหม่ได้ที่ `tests/cases.json` ทุกครั้งที่เจอบั๊ก ให้เพิ่มเคสกันไม่ให้กลับมาอีก
+
+กติกา: ต้องผ่านครบทุกข้อก่อนถึงจะขึ้นเฟสถัดไป
+
 ## วิธี deploy หลังแก้โค้ด
 
 โปรเจกต์นี้ deploy ผ่าน Supabase MCP ในเซสชัน Claude Code (ไม่ได้ใช้ Supabase CLI)

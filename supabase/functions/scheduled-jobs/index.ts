@@ -129,6 +129,75 @@ async function morningReminder() {
   }
 }
 
+// ---------------------------------------------------------------- weekly summary (จันทร์ 09:00)
+
+async function weeklySummary() {
+  const since = new Date(Date.now() - 7 * 24 * 3600_000).toISOString();
+  const { data: groups } = await supabase.from("groups").select("*").eq("is_active", true);
+  const { data: users } = await supabase.from("users").select("id, line_user_id, display_name");
+  const nameOf = new Map((users ?? []).map((u: any) => [u.line_user_id, u.display_name]));
+  nameOf.set("bot", "แงว");
+  const ownerOf = new Map((users ?? []).map((u: any) => [u.id, u.display_name]));
+
+  for (const g of groups ?? []) {
+    const { data: msgs } = await supabase.from("messages")
+      .select("line_user_id, message_text")
+      .eq("line_group_id", g.line_group_id)
+      .gte("created_at", since)
+      .order("created_at", { ascending: true })
+      .limit(600);
+    if (!msgs || msgs.length < 5) continue; // กลุ่มเงียบทั้งสัปดาห์ ข้าม
+
+    const { data: tasks } = await supabase.from("tasks")
+      .select("title, status, due_at, owner_user_id, completed_at")
+      .eq("group_id", g.id).gte("created_at", since);
+    const { data: done } = await supabase.from("tasks")
+      .select("title, owner_user_id").eq("group_id", g.id)
+      .eq("status", "DONE").gte("completed_at", since);
+    const { data: overdue } = await supabase.from("tasks")
+      .select("title, due_at, owner_user_id").eq("group_id", g.id)
+      .in("status", ["TODO", "DOING"]).not("due_at", "is", null)
+      .lt("due_at", new Date().toISOString());
+
+    const withOwner = (rows: any[] | null) =>
+      (rows ?? []).map((t: any) => ({ ...t, owner: ownerOf.get(t.owner_user_id) ?? "ไม่มีเจ้าของ" }));
+
+    const transcript = msgs
+      .map((m: any) => `${nameOf.get(m.line_user_id) ?? "?"}: ${m.message_text}`)
+      .join("\n").slice(0, 60000);
+
+    const response: any = await (anthropic as any).messages.create({
+      model: "claude-sonnet-5",
+      max_tokens: 1500,
+      output_config: { effort: "medium" },
+      system:
+        `คุณคือแงว สรุปภาพรวมประจำสัปดาห์ของทีมจากบทสนทนาและข้อมูลงาน ตอบภาษาไทย ` +
+        `ห้ามใช้ markdown ใช้หัวข้อสั้นกับเลขข้อ ไม่เกิน 18 บรรทัด เนื้อหาต้องมี: ` +
+        `เรื่องหลักที่ทีมโฟกัสสัปดาห์นี้ / การตัดสินใจสำคัญ / งานที่เสร็จ / งานที่ค้างและเลยกำหนด / สิ่งที่ควรตามต่อสัปดาห์หน้า ` +
+        `เน้นสิ่งที่มีผลต่อการทำงานจริง ข้ามเรื่องเล่นและทักทาย`,
+      messages: [{
+        role: "user",
+        content:
+          `บทสนทนา 7 วันล่าสุด:\n${transcript}\n\n` +
+          `งานที่สร้างสัปดาห์นี้: ${JSON.stringify(withOwner(tasks))}\n` +
+          `งานที่เสร็จสัปดาห์นี้: ${JSON.stringify(withOwner(done))}\n` +
+          `งานที่เลยกำหนดและยังค้าง: ${JSON.stringify(withOwner(overdue))}`,
+      }],
+    });
+    const summary = response.content
+      .filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
+    if (!summary) continue;
+
+    await pushToGroup(g.line_group_id, `📊 สรุปประจำสัปดาห์ — ${g.group_name ?? "กลุ่ม"}\n\n${summary}`);
+    await supabase.from("audit_logs").insert({
+      action: "scheduled_job", tool_name: "weekly_summary",
+      input: { group: g.line_group_id },
+      result: { messages: msgs.length, done: (done ?? []).length, overdue: (overdue ?? []).length },
+      status: "OK",
+    });
+  }
+}
+
 // ---------------------------------------------------------------- due reminders (ทุกนาที)
 
 async function dueReminders() {
@@ -164,6 +233,7 @@ Deno.serve(async (req: Request) => {
   try {
     if (job === "daily_summary") await dailySummary();
     else if (job === "morning_reminder") await morningReminder();
+    else if (job === "weekly_summary") await weeklySummary();
     else if (job === "due_reminders") await dueReminders();
     else return new Response("unknown job", { status: 400 });
     return new Response("OK");

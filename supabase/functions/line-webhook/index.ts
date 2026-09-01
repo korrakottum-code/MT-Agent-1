@@ -290,6 +290,37 @@ const TOOLS = [
     },
   },
   {
+    name: "manage_user",
+    description:
+      "แก้ข้อมูลพนักงานคนอื่น: role (สิทธิ์) ตำแหน่งงาน แผนก หัวหน้า (เฉพาะ ADMIN) " +
+      "ใช้ตอนตั้งหัวหน้าทีมเป็น MANAGER หรือแก้ตำแหน่งให้คนอื่น",
+    input_schema: {
+      type: "object",
+      properties: {
+        user_name: { type: "string", description: "ชื่อเล่นคนที่จะแก้" },
+        role: { type: "string", enum: ["EMPLOYEE", "MANAGER", "ADMIN", "EXECUTIVE"] },
+        job_title: { type: "string" },
+        department: { type: "string" },
+        manager_name: { type: "string", description: "ชื่อเล่นหัวหน้าของคนนี้" },
+      },
+      required: ["user_name"],
+    },
+  },
+  {
+    name: "link_user",
+    description:
+      "ผูกบัญชีที่ลงทะเบียนล่วงหน้าไว้ (pending) เข้ากับบัญชี LINE จริงของคนคนเดียวกัน (เฉพาะ ADMIN) " +
+      "ใช้เมื่อคนที่ ADMIN ลงทะเบียนชื่อไว้ก่อน เข้ามาพิมพ์ในกลุ่มจริงแล้ว งานและข้อมูลจะถูกย้ายมารวมกัน",
+    input_schema: {
+      type: "object",
+      properties: {
+        pending_name: { type: "string", description: "ชื่อบัญชีที่ลงทะเบียนล่วงหน้าไว้" },
+        real_name: { type: "string", description: "ชื่อบัญชี LINE จริงที่จะรวมเข้าไป" },
+      },
+      required: ["pending_name", "real_name"],
+    },
+  },
+  {
     name: "update_my_profile",
     description:
       "บันทึก/แก้ไขโปรไฟล์ของคนที่กำลังคุยอยู่: ชื่อเล่น ตำแหน่งงาน แผนก ใช้ตอนผู้ใช้แนะนำตัวในแชทส่วนตัว",
@@ -621,6 +652,70 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       return { updated: data, cancelled_tasks: cancelledTasks, open_tasks_remaining: openLeft ?? 0 };
     }
 
+    case "manage_user": {
+      if (ctx.caller.role !== "ADMIN") return { error: "แก้ข้อมูลพนักงานคนอื่นได้เฉพาะ ADMIN" };
+      const r = await resolveOneUser(input.user_name);
+      if (r.error) return { error: r.error };
+      const patch: any = { updated_at: new Date().toISOString() };
+      if (input.role) patch.role = input.role;
+      if (input.job_title) patch.job_title = input.job_title;
+      if (input.department) patch.department = input.department;
+      if (input.manager_name) {
+        const m = await resolveOneUser(input.manager_name);
+        if (m.error) return { error: `หาหัวหน้าไม่เจอ: ${m.error}` };
+        patch.manager_user_id = m.user.id;
+      }
+      if (Object.keys(patch).length === 1) return { error: "ไม่ได้ระบุว่าจะแก้อะไร" };
+      const { data, error } = await supabase.from("users").update(patch)
+        .eq("id", r.user.id).select("display_name, role, job_title, department").single();
+      if (error) return { error: error.message };
+      return { updated_user: data };
+    }
+
+    case "link_user": {
+      if (ctx.caller.role !== "ADMIN") return { error: "ผูกบัญชีได้เฉพาะ ADMIN" };
+      const p = await resolveOneUser(input.pending_name);
+      if (p.error) return { error: `บัญชีที่ลงทะเบียนไว้: ${p.error}` };
+      const rl = await resolveOneUser(input.real_name);
+      if (rl.error) return { error: `บัญชี LINE จริง: ${rl.error}` };
+      const pending = p.user, real = rl.user;
+      if (pending.id === real.id) return { error: "เป็นบัญชีเดียวกันอยู่แล้ว" };
+      if (!String(pending.line_user_id).startsWith("pending:")) {
+        return { error: `"${pending.display_name}" ไม่ใช่บัญชีที่ลงทะเบียนล่วงหน้า (ผูกได้เฉพาะบัญชี pending)` };
+      }
+      if (String(real.line_user_id).startsWith("pending:")) {
+        return { error: `"${real.display_name}" ยังไม่ใช่บัญชี LINE จริง` };
+      }
+
+      const { data: movedOwn } = await supabase.from("tasks")
+        .update({ owner_user_id: real.id, updated_at: new Date().toISOString() })
+        .eq("owner_user_id", pending.id).select("id");
+      const { data: movedCreated } = await supabase.from("tasks")
+        .update({ created_by_user_id: real.id, updated_at: new Date().toISOString() })
+        .eq("created_by_user_id", pending.id).select("id");
+      await supabase.from("reminders")
+        .update({ target_user_id: real.id }).eq("target_user_id", pending.id);
+
+      // ย้ายข้อมูลโปรไฟล์ที่บัญชี pending มีแต่บัญชีจริงยังว่าง
+      const carry: any = { updated_at: new Date().toISOString() };
+      if (!real.job_title && pending.job_title) carry.job_title = pending.job_title;
+      if (!real.department && pending.department) carry.department = pending.department;
+      if (real.role === "EMPLOYEE" && pending.role !== "EMPLOYEE") carry.role = pending.role;
+      if (Object.keys(carry).length > 1) {
+        await supabase.from("users").update(carry).eq("id", real.id);
+      }
+      await supabase.from("users")
+        .update({ is_active: false, updated_at: new Date().toISOString() })
+        .eq("id", pending.id);
+
+      return {
+        linked: { from: pending.display_name, into: real.display_name },
+        moved_owned_tasks: (movedOwn ?? []).length,
+        moved_created_tasks: (movedCreated ?? []).length,
+        note: "ปิดสถานะบัญชีที่ลงทะเบียนล่วงหน้าแล้ว ข้อมูลทั้งหมดอยู่ที่บัญชี LINE จริง",
+      };
+    }
+
     case "update_my_profile": {
       const patch: any = { updated_at: new Date().toISOString() };
       if (input.display_name) patch.display_name = input.display_name;
@@ -749,12 +844,14 @@ ${rosterText}
    - คนแปลกหน้า (ชื่อเป็น "ไม่ทราบชื่อ" หรือไม่อยู่ในรายชื่อพนักงาน): ต้องถามชื่อเล่นและตำแหน่งงานก่อนช่วยงานใด ๆ แล้วบันทึกด้วย update_my_profile — ห้ามข้าม
    - คนที่รู้จักชื่ออยู่แล้ว: ทักทายด้วยชื่อและช่วยงานได้ทันที ถ้ายังไม่รู้ตำแหน่ง ให้ถามแทรกท้ายคำตอบแรกแบบสบาย ๆ 1 ครั้ง (ไม่บังคับ ไม่ถามซ้ำ) แล้วบันทึกเมื่อได้คำตอบ
 10. เมื่อผู้ใช้บอกความชอบหรือวิธีที่อยากให้ปฏิบัติแบบถาวร ให้บันทึกด้วย remember_preference ทันที และปฏิบัติตามข้อกำหนดด้านบนเสมอ — ถ้าเป็นเรื่องบุคลิก/ชื่อเรียก/วิธีตอบของคุณเอง (เช่น "เรียกตัวเองว่าแงว", "ตอนเล่นให้กวน ๆ") และคนสั่งเป็น ADMIN ให้ใช้ scope=org เพื่อให้ใช้กับทุกคนทุกกลุ่ม ส่วนความชอบส่วนตัวของผู้ใช้ใช้ scope=me
+12. ADMIN จัดการพนักงานได้: ตั้งสิทธิ์/ตำแหน่ง/แผนก/หัวหน้าของคนอื่นด้วย manage_user, ปิดสถานะคนที่ลาออกด้วย set_user_active, และผูกบัญชีที่ลงทะเบียนล่วงหน้าเข้ากับบัญชี LINE จริงด้วย link_user เมื่อเจ้าตัวเข้ากลุ่มแล้ว — การเปลี่ยน role เป็นเรื่องสิทธิ์การเข้าถึงข้อมูล ให้ทวนยืนยันก่อน 1 ครั้ง
 11. คำขอให้เตือนตามเวลา ("เตือนอีก 2 นาที", "พรุ่งนี้เตือนแพรวส่งภาพก่อนเที่ยง") ให้ใช้ create_reminder โดยคำนวณเวลาจริงจากเวลาปัจจุบัน — ต่างจาก create_task ที่ใช้กับงานที่ต้องติดตามสถานะ ถ้าเป็นแค่การเตือนไม่ใช่งาน ให้ใช้ create_reminder อย่างเดียว`;
 }
 
 type AgentOpts = {
   image?: { data: string; media_type: string } | null;
   judgeAddressed?: boolean;
+  toolLog?: string[]; // ใช้ตอนรันข้อสอบ เก็บชื่อ tool ที่ถูกเรียกจริง
 };
 
 async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentOpts = {}): Promise<string> {
@@ -844,6 +941,7 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
     const toolResults: any[] = [];
     for (const block of response.content) {
       if (block.type !== "tool_use") continue;
+      opts.toolLog?.push(block.name);
       let result: any;
       try {
         result = await executeTool(block.name, block.input, ctx);
@@ -944,10 +1042,44 @@ async function handleEvent(event: any) {
   }
 }
 
+// โหมดข้อสอบ: รัน agent จริงด้วยตัวตนที่ระบุ แต่ไม่ส่งเข้า LINE และไม่บันทึกลง messages
+// ใช้ตรวจว่าการแก้แต่ละครั้งทำให้พฤติกรรมเดิมพังหรือไม่ ก่อนปล่อยให้ทีมใช้
+async function runEval(body: string): Promise<Response> {
+  const { as_user, message, in_group } = JSON.parse(body);
+  const { data: caller } = await supabase.from("users").select("*")
+    .ilike("display_name", `%${as_user}%`).eq("is_active", true).maybeSingle();
+  if (!caller) return Response.json({ error: `ไม่พบผู้ใช้ "${as_user}"` }, { status: 400 });
+
+  let group: any = null;
+  if (in_group) {
+    const { data: g } = await supabase.from("groups").select("*")
+      .ilike("group_name", `%${in_group}%`).maybeSingle();
+    if (!g) return Response.json({ error: `ไม่พบกลุ่ม "${in_group}"` }, { status: 400 });
+    group = g;
+  }
+  const ctx: Ctx = { caller, group, lineGroupId: group?.line_group_id ?? null };
+  const chatId = group?.line_group_id ?? caller.line_user_id;
+
+  const toolLog: string[] = [];
+  const started = Date.now();
+  try {
+    const answer = await runAgent(message, ctx, chatId, { toolLog });
+    return Response.json({
+      as_user: caller.display_name, role: caller.role,
+      group: group?.group_name ?? null,
+      message, answer, tools_called: toolLog, ms: Date.now() - started,
+    });
+  } catch (e) {
+    return Response.json({ error: String(e), tools_called: toolLog }, { status: 500 });
+  }
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method !== "POST") return new Response("MT Agent 1 webhook is alive");
 
   const body = await req.text();
+  const testKey = Deno.env.get("CRON_SECRET") ?? "";
+  if (testKey && req.headers.get("x-test-key") === testKey) return runEval(body);
   const signature = req.headers.get("x-line-signature") ?? "";
   if (!(await verifySignature(body, signature))) {
     return new Response("invalid signature", { status: 401 });
