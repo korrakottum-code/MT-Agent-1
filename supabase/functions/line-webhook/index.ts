@@ -11,8 +11,13 @@ const supabase = createClient(
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
 );
 
-const anthropic = new Anthropic({ apiKey: Deno.env.get("ANTHROPIC_API_KEY") ?? "" });
-const MODEL = "claude-opus-5";
+// identity-linked API key ต้องแนบ anthropic-workspace-id ทุก request
+const WORKSPACE_ID = Deno.env.get("ANTHROPIC_WORKSPACE_ID") ?? "";
+const anthropic = new Anthropic({
+  apiKey: Deno.env.get("ANTHROPIC_API_KEY") ?? "",
+  ...(WORKSPACE_ID ? { defaultHeaders: { "anthropic-workspace-id": WORKSPACE_ID } } : {}),
+});
+const MODEL = "claude-sonnet-5";
 const MAX_TOOL_ITERATIONS = 8;
 
 // ---------------------------------------------------------------- LINE helpers
@@ -425,11 +430,9 @@ async function runAgent(userText: string, ctx: Ctx): Promise<string> {
   const messages: any[] = [{ role: "user", content: userText }];
 
   for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
-    const response: any = await (anthropic as any).beta.messages.create({
+    const response: any = await (anthropic as any).messages.create({
       model: MODEL,
       max_tokens: 4096,
-      betas: ["server-side-fallback-2026-07-01"],
-      fallbacks: "default",
       output_config: { effort: "medium" },
       system,
       tools: TOOLS,
