@@ -129,6 +129,29 @@ async function morningReminder() {
   }
 }
 
+// ---------------------------------------------------------------- due reminders (ทุกนาที)
+
+async function dueReminders() {
+  const { data: due } = await supabase.from("reminders")
+    .select("id, chat_id, message")
+    .eq("status", "PENDING")
+    .lte("remind_at", new Date().toISOString())
+    .order("remind_at", { ascending: true })
+    .limit(50);
+  if (!due || due.length === 0) return;
+
+  for (const r of due) {
+    await pushToGroup(r.chat_id, `⏰ ${r.message}`);
+    await supabase.from("reminders")
+      .update({ status: "SENT", sent_at: new Date().toISOString() })
+      .eq("id", r.id);
+  }
+  await supabase.from("audit_logs").insert({
+    action: "scheduled_job", tool_name: "due_reminders",
+    input: {}, result: { sent: due.length }, status: "OK",
+  });
+}
+
 // ---------------------------------------------------------------- entry
 
 Deno.serve(async (req: Request) => {
@@ -141,6 +164,7 @@ Deno.serve(async (req: Request) => {
   try {
     if (job === "daily_summary") await dailySummary();
     else if (job === "morning_reminder") await morningReminder();
+    else if (job === "due_reminders") await dueReminders();
     else return new Response("unknown job", { status: 400 });
     return new Response("OK");
   } catch (e) {

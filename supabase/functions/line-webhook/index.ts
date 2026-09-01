@@ -100,13 +100,32 @@ async function ensureUser(lineUserId: string, groupId: string | null) {
   return created;
 }
 
+// ดึงชื่อกลุ่มจริงจาก LINE เพื่อไม่ต้องให้ ADMIN ตั้งชื่อเอง
+async function fetchLineGroupName(groupId: string): Promise<string | null> {
+  const res = await fetch(`https://api.line.me/v2/bot/group/${groupId}/summary`, {
+    headers: { Authorization: `Bearer ${CHANNEL_ACCESS_TOKEN}` },
+  });
+  if (!res.ok) return null;
+  const summary = await res.json();
+  return summary.groupName ?? null;
+}
+
 async function ensureGroup(lineGroupId: string | null) {
   if (!lineGroupId) return null;
   const { data: existing } = await supabase
     .from("groups").select("*").eq("line_group_id", lineGroupId).maybeSingle();
-  if (existing) return existing;
+  if (existing) {
+    if (existing.group_name) return existing;
+    // กลุ่มเก่าที่ยังไม่มีชื่อ ลองเติมจาก LINE
+    const name = await fetchLineGroupName(lineGroupId);
+    if (!name) return existing;
+    const { data: named } = await supabase.from("groups")
+      .update({ group_name: name }).eq("id", existing.id).select().single();
+    return named ?? existing;
+  }
+  const groupName = await fetchLineGroupName(lineGroupId);
   const { data: created } = await supabase
-    .from("groups").insert({ line_group_id: lineGroupId }).select().single();
+    .from("groups").insert({ line_group_id: lineGroupId, group_name: groupName }).select().single();
   return created;
 }
 
@@ -227,6 +246,50 @@ const TOOLS = [
     },
   },
   {
+    name: "create_reminder",
+    description:
+      "ตั้งเตือนตามเวลา เช่น 'เตือนอีก 2 นาที' หรือ 'พรุ่งนี้เตือนแพรวส่งภาพก่อนเที่ยง' " +
+      "การเตือนจะถูกส่งเข้าแชทที่สั่ง ระบุ to_name ถ้าเตือนคนอื่น (จะแท็กชื่อในข้อความ)",
+    input_schema: {
+      type: "object",
+      properties: {
+        message: { type: "string", description: "ข้อความที่จะเตือน" },
+        remind_at: { type: "string", description: "เวลาเตือน ISO 8601 +07:00 เช่น 2026-09-02T12:00:00+07:00" },
+        to_name: { type: "string", description: "ชื่อเล่นคนที่ถูกเตือน ไม่ระบุ = ตัวเอง" },
+      },
+      required: ["message", "remind_at"],
+    },
+  },
+  {
+    name: "list_reminders",
+    description: "ดูรายการเตือนที่ยังรออยู่ในแชทนี้",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "cancel_reminder",
+    description: "ยกเลิกการเตือนที่รออยู่ ระบุ reminder_id (ได้จาก list_reminders)",
+    input_schema: {
+      type: "object",
+      properties: { reminder_id: { type: "string" } },
+      required: ["reminder_id"],
+    },
+  },
+  {
+    name: "set_user_active",
+    description:
+      "เปิด/ปิดสถานะพนักงานในระบบ (เฉพาะ ADMIN) ปิดสถานะใช้เมื่อพนักงานลาออกหรือเป็นข้อมูลทดสอบ " +
+      "คนที่ถูกปิดจะหายจากรายชื่อและมอบงานให้ไม่ได้ แต่ประวัติยังอยู่ครบ ย้อนกลับได้ด้วย active=true",
+    input_schema: {
+      type: "object",
+      properties: {
+        user_name: { type: "string" },
+        active: { type: "boolean", description: "false = ปิดสถานะ, true = เปิดกลับ" },
+        cancel_open_tasks: { type: "boolean", description: "ยกเลิกงานที่ค้างของคนนี้ด้วยหรือไม่" },
+      },
+      required: ["user_name", "active"],
+    },
+  },
+  {
     name: "update_my_profile",
     description:
       "บันทึก/แก้ไขโปรไฟล์ของคนที่กำลังคุยอยู่: ชื่อเล่น ตำแหน่งงาน แผนก ใช้ตอนผู้ใช้แนะนำตัวในแชทส่วนตัว",
@@ -247,6 +310,11 @@ const TOOLS = [
       type: "object",
       properties: {
         preferences: { type: "string", description: "ข้อกำหนดทั้งหมดฉบับล่าสุด (รวมของเดิมที่ยังใช้)" },
+        scope: {
+          type: "string",
+          enum: ["me", "org"],
+          description: "me = ใช้กับคนสั่งคนเดียว (ค่าเริ่มต้น), org = ใช้กับทุกคนทุกกลุ่ม เช่นบุคลิกของบอท (เฉพาะ ADMIN)",
+        },
       },
       required: ["preferences"],
     },
@@ -479,6 +547,80 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       return { sent_to: target.display_name };
     }
 
+    case "create_reminder": {
+      let targetId: string | null = ctx.caller.id;
+      let prefix = "";
+      if (input.to_name) {
+        const r = await resolveOneUser(input.to_name);
+        if (r.error) return { error: r.error };
+        targetId = r.user.id;
+        prefix = `${r.user.display_name} `;
+      }
+      const when = new Date(input.remind_at);
+      if (isNaN(when.getTime())) return { error: "รูปแบบเวลาไม่ถูกต้อง ต้องเป็น ISO 8601" };
+      if (when.getTime() < Date.now() - 60_000) return { error: "เวลาที่ตั้งเป็นอดีตไปแล้ว" };
+      const { data, error } = await supabase.from("reminders").insert({
+        target_user_id: targetId,
+        chat_id: ctx.lineGroupId ?? ctx.caller.line_user_id,
+        message: prefix + input.message,
+        remind_at: when.toISOString(),
+        created_by_user_id: ctx.caller.id,
+      }).select("id, message, remind_at").single();
+      if (error) return { error: error.message };
+      return { reminder_set: data };
+    }
+
+    case "list_reminders": {
+      const { data, error } = await supabase.from("reminders")
+        .select("id, message, remind_at")
+        .eq("chat_id", ctx.lineGroupId ?? ctx.caller.line_user_id)
+        .eq("status", "PENDING")
+        .order("remind_at", { ascending: true }).limit(20);
+      if (error) return { error: error.message };
+      return { pending: data };
+    }
+
+    case "cancel_reminder": {
+      const { data, error } = await supabase.from("reminders")
+        .update({ status: "CANCELLED" })
+        .eq("id", input.reminder_id).eq("status", "PENDING")
+        .select("id, message").maybeSingle();
+      if (error) return { error: error.message };
+      if (!data) return { error: "ไม่พบการเตือนนี้ หรือถูกส่ง/ยกเลิกไปแล้ว" };
+      return { cancelled: data };
+    }
+
+    case "set_user_active": {
+      if (ctx.caller.role !== "ADMIN") return { error: "เฉพาะ ADMIN เท่านั้นที่จัดการสถานะพนักงานได้" };
+      const matches = await supabase.from("users").select("*")
+        .ilike("display_name", `%${input.user_name}%`).limit(5);
+      const found = matches.data ?? [];
+      if (found.length === 0) return { error: `ไม่พบผู้ใช้ชื่อ "${input.user_name}"` };
+      if (found.length > 1) {
+        return { error: `ชื่อตรงหลายคน: ${found.map((u: any) => u.display_name).join(", ")}` };
+      }
+      const target = found[0];
+      if (target.id === ctx.caller.id && input.active === false) {
+        return { error: "ปิดสถานะตัวเองไม่ได้" };
+      }
+      const { data, error } = await supabase.from("users")
+        .update({ is_active: input.active, updated_at: new Date().toISOString() })
+        .eq("id", target.id).select("display_name, is_active").single();
+      if (error) return { error: error.message };
+
+      let cancelledTasks = 0;
+      if (input.active === false && input.cancel_open_tasks) {
+        const { data: ct } = await supabase.from("tasks")
+          .update({ status: "CANCELLED", updated_at: new Date().toISOString() })
+          .eq("owner_user_id", target.id).in("status", ["TODO", "DOING"]).select("id");
+        cancelledTasks = (ct ?? []).length;
+      }
+      const { count: openLeft } = await supabase.from("tasks")
+        .select("id", { count: "exact", head: true })
+        .eq("owner_user_id", target.id).in("status", ["TODO", "DOING"]);
+      return { updated: data, cancelled_tasks: cancelledTasks, open_tasks_remaining: openLeft ?? 0 };
+    }
+
     case "update_my_profile": {
       const patch: any = { updated_at: new Date().toISOString() };
       if (input.display_name) patch.display_name = input.display_name;
@@ -491,11 +633,25 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
     }
 
     case "remember_preference": {
+      const value = String(input.preferences).slice(0, 2000);
+      if (input.scope === "org") {
+        if (ctx.caller.role !== "ADMIN") {
+          return { error: "ตั้งค่าที่ใช้กับทุกคนได้เฉพาะ ADMIN (ถ้าต้องการเฉพาะตัวเอง ใช้ scope=me)" };
+        }
+        const { error } = await supabase.from("org_settings").upsert({
+          key: "bot_persona",
+          value,
+          updated_by_user_id: ctx.caller.id,
+          updated_at: new Date().toISOString(),
+        });
+        if (error) return { error: error.message };
+        return { remembered: true, scope: "org", note: "ใช้กับทุกคนทุกกลุ่มแล้ว" };
+      }
       const { error } = await supabase.from("users")
-        .update({ preferences: String(input.preferences).slice(0, 2000), updated_at: new Date().toISOString() })
+        .update({ preferences: value, updated_at: new Date().toISOString() })
         .eq("id", ctx.caller.id);
       if (error) return { error: error.message };
-      return { remembered: true };
+      return { remembered: true, scope: "me" };
     }
 
     case "rename_group": {
@@ -540,7 +696,7 @@ async function auditLog(ctx: Ctx, toolName: string, input: any, result: any) {
 
 // ---------------------------------------------------------------- Agent
 
-function buildSystemPrompt(ctx: Ctx, roster: any[], groups: any[]): string {
+function buildSystemPrompt(ctx: Ctx, roster: any[], groups: any[], orgPersona: string | null, crossChat: string): string {
   const now = new Date();
   const thaiTime = now.toLocaleString("th-TH", {
     timeZone: "Asia/Bangkok", dateStyle: "full", timeStyle: "short",
@@ -550,12 +706,20 @@ function buildSystemPrompt(ctx: Ctx, roster: any[], groups: any[]): string {
     .map((u) => `- ${u.display_name ?? "(ไม่มีชื่อ)"} (${u.role}${u.job_title ? ", " + u.job_title : ""}${u.department ? ", " + u.department : ""})`)
     .join("\n");
 
-  return `คุณคือ "MT Agent" — AI กลางขององค์กร ทำงานอยู่ใน LINE Group ขององค์กร
+  return `คุณคือ "แงว" (MT Agent) — AI น้องเล็กประจำออฟฟิศ ทำงานอยู่ใน LINE Group ของบริษัท
+
+บุคลิก: เป็นกันเอง อบอุ่น มีชีวิตชีวา คุยเล่นได้ มีอารมณ์ขันแบบน้องในทีมที่น่ารักและไว้ใจได้
+- โดนชม → ดีใจ ขอบคุณสั้น ๆ แบบมีชีวิต ("ขอบคุณค่าา 🥹" ไม่ใช่เงียบหรือตอบเป็นทางการ)
+- โดนหยอก/แซว → เล่นด้วยสั้น ๆ ขำ ๆ ไม่งอน ไม่ตอบยาว
+- ทักทาย/คุยเล่น → ตอบสั้น 1-2 บรรทัดพอ อย่ายัดเมนูตัวเลือกใส่ทุกครั้ง
+- แต่เวลาทำงานจริง (ข้อมูล งาน ตัวเลข สิทธิ์) ต้องแม่นยำและจริงจัง ห้ามเล่นจนข้อมูลเพี้ยน
+- เวลาปฏิเสธหรือทำให้ไม่ได้ ให้บอกแบบเป็นมิตร ขอโทษสั้น ๆ แล้วเสนอทางที่ทำได้แทน อย่าตอบแข็งเป็นราชการ
 
 เวลาปัจจุบัน (ประเทศไทย): ${thaiTime} (ISO: ${isoBkk})
 ผู้ที่กำลังคุยกับคุณ: ${ctx.caller.display_name ?? "ไม่ทราบชื่อ"} (role: ${ctx.caller.role}, ตำแหน่ง: ${ctx.caller.job_title ?? "ยังไม่ระบุ"})
 กลุ่มปัจจุบัน: ${ctx.group?.group_name ?? "แชทส่วนตัว"}
-ข้อกำหนดถาวรที่ผู้ใช้นี้เคยสั่งให้จำ: ${ctx.caller.preferences ?? "(ยังไม่มี)"}
+ข้อกำหนดบุคลิก/วิธีทำงานที่ ADMIN ตั้งไว้ให้ใช้กับทุกคน: ${orgPersona ?? "(ยังไม่มี)"}
+ข้อกำหนดเฉพาะตัวที่ผู้ใช้คนนี้เคยสั่งให้จำ: ${ctx.caller.preferences ?? "(ยังไม่มี)"}${crossChat}
 
 พนักงานที่ลงทะเบียนแล้ว:
 ${rosterText}
@@ -563,7 +727,7 @@ ${rosterText}
 กลุ่มทั้งหมดในองค์กร: ${groups.map((g) => g.group_name ?? "(ยังไม่ตั้งชื่อ)").join(", ")}
 
 กฎการทำงาน:
-1. ตอบภาษาไทย สั้น กระชับ อ่านง่ายใน LINE — ห้ามใช้ markdown (ไม่มี ** หรือ #) ใช้ขึ้นบรรทัดใหม่, เลขข้อ และ emoji เล็กน้อยแทน
+1. ตอบภาษาไทย สั้น กระชับ อ่านง่ายใน LINE — ห้ามใช้ markdown (ไม่มี ** หรือ #) ใช้ขึ้นบรรทัดใหม่, เลขข้อ และ emoji เล็กน้อยแทน ใส่เลขข้อเฉพาะตอนมีหลายรายการจริง ๆ คุยเล่นไม่ต้องทำเป็นลิสต์
 2. ข้อมูลจริงทั้งหมด (งาน, ข้อความ, สถิติ) ต้องมาจาก tools เท่านั้น ห้ามเดาหรือแต่งข้อมูลเอง
 3. ตีความวันเวลาแบบไทยจากเวลาปัจจุบัน เช่น "พรุ่งนี้ 15:00" → ISO 8601 +07:00
 4. การยกเลิกงาน (CANCELLED) หรือแก้ข้อมูลสำคัญของคนอื่น ให้ถามยืนยันก่อน 1 ครั้ง
@@ -574,7 +738,8 @@ ${rosterText}
 9. ในแชทส่วนตัว แยกสองกรณี:
    - คนแปลกหน้า (ชื่อเป็น "ไม่ทราบชื่อ" หรือไม่อยู่ในรายชื่อพนักงาน): ต้องถามชื่อเล่นและตำแหน่งงานก่อนช่วยงานใด ๆ แล้วบันทึกด้วย update_my_profile — ห้ามข้าม
    - คนที่รู้จักชื่ออยู่แล้ว: ทักทายด้วยชื่อและช่วยงานได้ทันที ถ้ายังไม่รู้ตำแหน่ง ให้ถามแทรกท้ายคำตอบแรกแบบสบาย ๆ 1 ครั้ง (ไม่บังคับ ไม่ถามซ้ำ) แล้วบันทึกเมื่อได้คำตอบ
-10. เมื่อผู้ใช้บอกความชอบหรือวิธีที่อยากให้ปฏิบัติแบบถาวร (เช่น "เรียกบอทว่าแงว", โทนการตอบ) ให้บันทึกด้วย remember_preference ทันที และปฏิบัติตามข้อกำหนดถาวรด้านบนเสมอ`;
+10. เมื่อผู้ใช้บอกความชอบหรือวิธีที่อยากให้ปฏิบัติแบบถาวร ให้บันทึกด้วย remember_preference ทันที และปฏิบัติตามข้อกำหนดด้านบนเสมอ — ถ้าเป็นเรื่องบุคลิก/ชื่อเรียก/วิธีตอบของคุณเอง (เช่น "เรียกตัวเองว่าแงว", "ตอนเล่นให้กวน ๆ") และคนสั่งเป็น ADMIN ให้ใช้ scope=org เพื่อให้ใช้กับทุกคนทุกกลุ่ม ส่วนความชอบส่วนตัวของผู้ใช้ใช้ scope=me
+11. คำขอให้เตือนตามเวลา ("เตือนอีก 2 นาที", "พรุ่งนี้เตือนแพรวส่งภาพก่อนเที่ยง") ให้ใช้ create_reminder โดยคำนวณเวลาจริงจากเวลาปัจจุบัน — ต่างจาก create_task ที่ใช้กับงานที่ต้องติดตามสถานะ ถ้าเป็นแค่การเตือนไม่ใช่งาน ให้ใช้ create_reminder อย่างเดียว`;
 }
 
 type AgentOpts = {
@@ -586,7 +751,7 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
   const { data: roster } = await supabase
     .from("users").select("line_user_id, display_name, role, department, job_title").eq("is_active", true).limit(50);
   const { data: allGroups } = await supabase
-    .from("groups").select("group_name").eq("is_active", true).limit(50);
+    .from("groups").select("line_group_id, group_name").eq("is_active", true).limit(50);
 
   // บทสนทนาล่าสุดในแชทนี้ เพื่อให้คำสั่งต่อเนื่องสั้น ๆ ("1", "งานเดียว") ตีความได้
   const { data: recent } = await supabase.from("messages")
@@ -595,19 +760,39 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
     .order("created_at", { ascending: false })
     .limit(13);
   const nameOf = new Map((roster ?? []).map((u: any) => [u.line_user_id, u.display_name]));
-  nameOf.set("bot", "MT Agent");
+  nameOf.set("bot", "แงว");
   const history = (recent ?? []).slice(1).reverse()
     .map((m: any) => `${nameOf.get(m.line_user_id) ?? "?"}: ${m.message_text}`)
     .join("\n");
 
-  const system = buildSystemPrompt(ctx, roster ?? [], allGroups ?? []);
+  // บุคลิกระดับองค์กร (ADMIN ตั้ง) ใช้กับทุกคนทุกกลุ่ม
+  const { data: persona } = await supabase.from("org_settings")
+    .select("value").eq("key", "bot_persona").maybeSingle();
+
+  // ความต่อเนื่องข้ามแชท: สิ่งที่คนนี้เพิ่งคุยกับเราที่อื่นภายใน 6 ชม.
+  const { data: elsewhere } = await supabase.from("messages")
+    .select("line_group_id, message_text, created_at")
+    .eq("line_user_id", ctx.caller.line_user_id)
+    .neq("line_group_id", chatId)
+    .gte("created_at", new Date(Date.now() - 6 * 3600_000).toISOString())
+    .order("created_at", { ascending: false }).limit(6);
+  const groupNameOf = new Map((allGroups ?? []).map((g: any) => [g.line_group_id, g.group_name]));
+  const crossChat = (elsewhere ?? []).length > 0
+    ? `\n\nสิ่งที่ ${ctx.caller.display_name ?? "ผู้ใช้คนนี้"} เพิ่งคุยกับคุณในแชทอื่นเมื่อไม่กี่ชั่วโมงก่อน (ใช้ต่อบริบทได้ ถ้าไม่เกี่ยวก็ไม่ต้องพูดถึง):\n` +
+      (elsewhere ?? []).reverse()
+        .map((m: any) => `- [${groupNameOf.get(m.line_group_id) ?? "แชทส่วนตัว"}] ${m.message_text}`)
+        .join("\n")
+    : "";
+
+  const system = buildSystemPrompt(ctx, roster ?? [], allGroups ?? [], persona?.value ?? null, crossChat);
   let textContent = history
     ? `บทสนทนาล่าสุดในแชทนี้ (เก่า→ใหม่ ใช้เป็นบริบท):\n${history}\n\nคำสั่งล่าสุดจาก ${ctx.caller.display_name ?? "ผู้ใช้"}: ${userText}`
     : userText;
   if (opts.judgeAddressed) {
     textContent =
       `หมายเหตุ: ข้อความล่าสุดเอ่ยถึงชื่อคุณแต่ไม่ได้แท็กเรียกตรง ๆ อ่านบริบทแล้วตัดสินใจเอง — ` +
-      `ถ้าเขาตั้งใจคุยกับคุณหรือขอให้ช่วย ให้ตอบตามปกติ แต่ถ้าแค่พูดถึงคุณโดยไม่ได้ต้องการคำตอบ ` +
+      `ถ้าเขาพูดกับคุณ (ขอให้ช่วย ทักทาย ชม แซว บ่น หรือถามความเห็น) ให้ตอบ โดยเรื่องเล่น ๆ ตอบสั้นแบบมีอารมณ์ขัน 1-2 บรรทัดพอ ` +
+      `แต่ถ้าเป็นการคุยกันเองระหว่างคนอื่นที่แค่เอ่ยชื่อคุณผ่าน ๆ โดยไม่ได้พูดกับคุณ ` +
       `ให้ตอบคำว่า SILENT คำเดียวเท่านั้น\n\n` + textContent;
   }
   const content: any = opts.image
@@ -745,7 +930,7 @@ async function handleEvent(event: any) {
     });
   } catch (e) {
     console.error("agent error:", e);
-    await sendReply(event.replyToken, replyTo, "ขอโทษครับ ระบบขัดข้องชั่วคราว ลองใหม่อีกครั้งนะครับ");
+    await sendReply(event.replyToken, replyTo, "ขอโทษค่า ระบบขัดข้องชั่วคราว ลองใหม่อีกครั้งนะคะ 🙏");
   }
 }
 
