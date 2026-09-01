@@ -74,6 +74,28 @@ npx supabase functions deploy line-webhook
 (ถ้าจำเป็นต้องใช้ MCP จริง ๆ ต้องส่งภาษาไทยเป็น UTF-8 ตรง ๆ ห้าม escape เป็น `\uXXXX`
 เพราะตัวอักษรไทยจะกลายเป็น 6 ไบต์แทนที่จะเป็น 3 ทำให้ payload บวมเท่าตัว)
 
+## ดูว่าเงินหมดไปกับอะไร
+
+ทุกครั้งที่เรียกโมเดลจะถูกบันทึกลงตาราง `token_usage` พร้อมบอกว่าเป็นงานประเภทไหน
+(`chat` = คุยกับทีม, `eval` = รันข้อสอบ, `daily_summary` / `weekly_summary` / `extract_events` = งานตามเวลา)
+
+```sql
+select purpose,
+       count(*) as calls,
+       sum(iterations) as model_requests,
+       sum(input_tokens) as input,
+       sum(output_tokens) as output,
+       sum(cache_read_tokens) as cache_hits
+from token_usage
+where created_at > now() - interval '1 day'
+group by purpose
+order by input desc;
+```
+
+`iterations` คือจำนวนครั้งที่ยิงเข้าโมเดลเพื่อให้ได้คำตอบเดียว (คำตอบที่ต้องเรียก tool จะมากกว่า 1)
+ถ้า `cache_hits` เป็น 0 ตลอดแปลว่ายังไม่ได้เปิด prompt caching — คำสั่งระบบกับคำอธิบาย tool
+ถูกคิดเงินเต็มราคาซ้ำทุกครั้งทั้งที่เนื้อหาเหมือนเดิม
+
 ## อาการเสียที่เจอบ่อยและวิธีไล่
 
 **บอทตอบ "ขอโทษค่า ระบบขัดข้องชั่วคราว" กับทุกข้อความ** → เช็คเครดิต Anthropic ก่อนเป็นอย่างแรก

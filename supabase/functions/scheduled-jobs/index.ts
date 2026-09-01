@@ -34,6 +34,26 @@ function thaiDate(d: Date): string {
   return d.toLocaleString("th-TH", { timeZone: "Asia/Bangkok", dateStyle: "medium", timeStyle: "short" });
 }
 
+// เก็บยอด token ของงานเบื้องหลังด้วย จะได้เทียบได้ว่างานไหนกินเงินมากกว่ากัน
+async function logTokenUsage(purpose: string, model: string, chatId: string | null, response: any) {
+  const u = response?.usage ?? {};
+  try {
+    const { error } = await supabase.from("token_usage").insert({
+      purpose,
+      model,
+      chat_id: chatId,
+      input_tokens: u.input_tokens ?? 0,
+      output_tokens: u.output_tokens ?? 0,
+      cache_read_tokens: u.cache_read_input_tokens ?? 0,
+      cache_write_tokens: u.cache_creation_input_tokens ?? 0,
+      iterations: 1,
+    });
+    if (error) console.error("token usage log failed:", error.message);
+  } catch (e) {
+    console.error("token usage log failed:", e);
+  }
+}
+
 // ---------------------------------------------------------------- daily summary (18:00)
 
 async function dailySummary() {
@@ -78,6 +98,7 @@ async function dailySummary() {
           `งานที่เสร็จวันนี้: ${JSON.stringify(doneTasks ?? [])}`,
       }],
     });
+    await logTokenUsage("daily_summary", "claude-sonnet-5", g.line_group_id, response);
     const summary = response.content
       .filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
     if (!summary) continue;
@@ -205,6 +226,7 @@ async function weeklySummary() {
           `งานที่เลยกำหนดและยังค้าง: ${JSON.stringify(withOwner(overdue))}`,
       }],
     });
+    await logTokenUsage("weekly_summary", "claude-sonnet-5", g.line_group_id, response);
     const summary = response.content
       .filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
     if (!summary) continue;
@@ -331,6 +353,8 @@ async function extractEvents() {
             `บทสนทนาที่ต้องอ่าน:\n${transcript}`,
         }],
       });
+
+      await logTokenUsage("extract_events", "claude-sonnet-5", g.line_group_id, response);
 
       const call = (response.content ?? []).find((b: any) => b.type === "tool_use");
       const found = (call?.input?.events ?? []).filter((e: any) =>

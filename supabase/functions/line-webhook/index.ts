@@ -1084,7 +1084,18 @@ type AgentOpts = {
   // แต่โหมดข้อสอบไม่ได้บันทึกอะไร ถ้าตัดจะไปตัดคำตอบล่าสุดของบอททิ้ง
   // ทำให้ประวัติจบลงที่คำขอของผู้ใช้แบบไม่มีคำตอบ แล้วโมเดลนึกว่าเป็นงานค้างที่ต้องทำให้
   skipLatestMessage?: boolean;
+  purpose?: string; // ใช้แยกยอด token ว่าหมดไปกับอะไร: chat / eval / gate
 };
+
+// เก็บยอด token ทุกครั้งที่เรียกโมเดล ถ้าเก็บไม่ได้ต้องไม่ทำให้บอทตอบไม่ได้
+async function logTokenUsage(row: Record<string, unknown>) {
+  try {
+    const { error } = await supabase.from("token_usage").insert(row);
+    if (error) console.error("token usage log failed:", error.message);
+  } catch (e) {
+    console.error("token usage log failed:", e);
+  }
+}
 
 async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentOpts = {}): Promise<string> {
   const { data: roster } = await supabase
@@ -1155,6 +1166,9 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
   const content: any = blocks.length === 1 ? textContent : blocks;
   const messages: any[] = [{ role: "user", content }];
 
+  // นับ token รวมทุกรอบของคำตอบเดียว แล้วบันทึกครั้งเดียวตอนจบ ไม่ว่าจะจบด้วยทางไหน
+  const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, iterations: 0 };
+  try {
   for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
     const response: any = await (anthropic as any).messages.create({
       model: MODEL,
@@ -1164,6 +1178,13 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
       tools: TOOLS,
       messages,
     });
+
+    const u = response.usage ?? {};
+    usage.iterations++;
+    usage.input += u.input_tokens ?? 0;
+    usage.output += u.output_tokens ?? 0;
+    usage.cacheRead += u.cache_read_input_tokens ?? 0;
+    usage.cacheWrite += u.cache_creation_input_tokens ?? 0;
 
     if (response.stop_reason === "refusal") {
       return "ขออภัยครับ ผมไม่สามารถดำเนินการคำขอนี้ได้";
@@ -1204,6 +1225,21 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
     messages.push({ role: "user", content: toolResults });
   }
   return "งานนี้ซับซ้อนเกินรอบที่กำหนด ลองแบ่งคำสั่งเป็นขั้นสั้น ๆ นะครับ";
+  } finally {
+    if (usage.iterations > 0) {
+      await logTokenUsage({
+        purpose: opts.purpose ?? "chat",
+        model: MODEL,
+        chat_id: chatId,
+        user_id: ctx.caller?.id ?? null,
+        input_tokens: usage.input,
+        output_tokens: usage.output,
+        cache_read_tokens: usage.cacheRead,
+        cache_write_tokens: usage.cacheWrite,
+        iterations: usage.iterations,
+      });
+    }
+  }
 }
 
 // ---------------------------------------------------------------- Webhook
@@ -1335,7 +1371,7 @@ async function runEval(body: string): Promise<Response> {
   const started = Date.now();
   const startedIso = new Date().toISOString();
   try {
-    const answer = await runAgent(message, ctx, chatId, { toolLog, skipLatestMessage: false });
+    const answer = await runAgent(message, ctx, chatId, { toolLog, skipLatestMessage: false, purpose: "eval" });
 
     // เก็บกวาดของที่ข้อสอบสร้างไว้ ไม่ให้ไปรกรายการงานจริงของทีม
     // ยกเลิกแทนการลบ เพื่อให้ audit trail ยังครบ
