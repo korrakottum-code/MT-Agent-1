@@ -23,7 +23,8 @@ LINE Group → LINE OA → Webhook → Supabase Edge Function
 - [x] MVP 0.2 (บางส่วน) — `scheduled-jobs`: Daily Summary 18:00 + เตือนงานเช้า 09:00 ผ่าน pg_cron
 - [x] UX upgrade (1 ก.ย. 2026) — ความจำบทสนทนา (~12 ข้อความล่าสุดต่อแชท), DM ตอบโดยไม่ต้องแท็ก,
   เก็บคำตอบบอทลง messages, tools เพิ่ม: send_dm / rename_group / ค้นหา-สรุปข้ามกลุ่ม (MANAGER ขึ้นไป)
-  - รอทำต่อหลังใช้งานจริงสักพัก: Event Extraction (จับ TASK/DECISION/DEADLINE จากข้อความทั่วไป), Weekly Summary
+- [x] อ่านไฟล์เอกสาร (1 ก.ย. 2026) — PDF / Word / Excel / CSV / ข้อความ ส่งเข้าแชทแล้วให้บอทสรุปและแตกเป็นงานได้
+  - รอทำต่อหลังใช้งานจริงสักพัก: Event Extraction (จับ TASK/DECISION/DEADLINE จากข้อความทั่วไป)
 
 ## โครงสร้าง
 

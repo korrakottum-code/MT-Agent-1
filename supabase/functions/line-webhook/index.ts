@@ -69,20 +69,91 @@ async function fetchLineProfile(userId: string, groupId: string | null): Promise
   return profile.displayName ?? null;
 }
 
-// ดาวน์โหลดรูปที่ส่งใน LINE มาเป็น base64 เพื่อส่งให้โมเดลดู
-async function fetchImageContent(messageId: string): Promise<{ data: string; media_type: string } | null> {
+// ---------------------------------------------------------------- ไฟล์และรูป
+
+const MAX_FILE_BYTES = 8 * 1024 * 1024; // 8MB — เผื่อ base64 บวม 1.33 เท่าแล้วยังไม่ชน 32MB ของ API
+const MAX_TEXT_CHARS = 120_000;
+
+type FilePayload =
+  | { kind: "pdf"; name: string; data: string }
+  | { kind: "text"; name: string; text: string }
+  | { kind: "unsupported"; name: string; reason: string };
+
+async function downloadLineContent(messageId: string): Promise<{ buf: Uint8Array; contentType: string } | null> {
   const res = await fetch(`https://api-data.line.me/v2/bot/message/${messageId}/content`, {
     headers: { Authorization: `Bearer ${CHANNEL_ACCESS_TOKEN}` },
   });
   if (!res.ok) return null;
-  const mediaType = (res.headers.get("content-type") ?? "image/jpeg").split(";")[0];
-  const buf = new Uint8Array(await res.arrayBuffer());
+  const contentType = (res.headers.get("content-type") ?? "application/octet-stream").split(";")[0];
+  return { buf: new Uint8Array(await res.arrayBuffer()), contentType };
+}
+
+function toBase64(buf: Uint8Array): string {
   let binary = "";
   const chunk = 0x8000;
   for (let i = 0; i < buf.length; i += chunk) {
     binary += String.fromCharCode(...buf.subarray(i, i + chunk));
   }
-  return { data: btoa(binary), media_type: mediaType };
+  return btoa(binary);
+}
+
+// ดาวน์โหลดรูปที่ส่งใน LINE มาเป็น base64 เพื่อส่งให้โมเดลดู
+async function fetchImageContent(messageId: string): Promise<{ data: string; media_type: string } | null> {
+  const got = await downloadLineContent(messageId);
+  if (!got) return null;
+  return { data: toBase64(got.buf), media_type: got.contentType || "image/jpeg" };
+}
+
+// แปลงไฟล์ที่ส่งใน LINE ให้อยู่ในรูปที่โมเดลอ่านได้
+// PDF ส่งเป็นเอกสารตรง ๆ / ไฟล์ข้อความอ่านเป็นตัวอักษร / Word กับ Excel ถอดข้อความด้วยไลบรารี
+// ไลบรารีโหลดแบบ dynamic import ใน try เพื่อไม่ให้พังทั้ง function ถ้าโหลดไม่สำเร็จ
+async function extractFile(messageId: string, fileName: string): Promise<FilePayload> {
+  const ext = (fileName.split(".").pop() ?? "").toLowerCase();
+  const got = await downloadLineContent(messageId);
+  if (!got) return { kind: "unsupported", name: fileName, reason: "ดาวน์โหลดไฟล์จาก LINE ไม่สำเร็จ" };
+  const buf = got.buf;
+  if (buf.length > MAX_FILE_BYTES) {
+    return { kind: "unsupported", name: fileName, reason: `ไฟล์ใหญ่เกิน ${Math.round(MAX_FILE_BYTES / 1024 / 1024)}MB` };
+  }
+
+  if (ext === "pdf") return { kind: "pdf", name: fileName, data: toBase64(buf) };
+
+  if (["txt", "md", "csv", "tsv", "json", "log"].includes(ext)) {
+    const text = new TextDecoder().decode(buf).slice(0, MAX_TEXT_CHARS);
+    return { kind: "text", name: fileName, text };
+  }
+
+  if (ext === "docx") {
+    try {
+      const mammoth: any = await import("npm:mammoth@1.8.0");
+      const out = await (mammoth.default ?? mammoth).extractRawText({ arrayBuffer: buf.buffer });
+      return { kind: "text", name: fileName, text: String(out.value).slice(0, MAX_TEXT_CHARS) };
+    } catch (e) {
+      console.error("docx parse failed:", e);
+      return { kind: "unsupported", name: fileName, reason: "อ่านไฟล์ Word ไม่สำเร็จ ลองบันทึกเป็น PDF แล้วส่งใหม่" };
+    }
+  }
+
+  if (["xlsx", "xls"].includes(ext)) {
+    try {
+      const XLSX: any = await import("npm:xlsx@0.18.5");
+      const wb = XLSX.read(buf, { type: "array" });
+      const parts: string[] = [];
+      for (const sheet of wb.SheetNames) {
+        parts.push(`--- ชีท: ${sheet} ---\n${XLSX.utils.sheet_to_csv(wb.Sheets[sheet])}`);
+      }
+      return { kind: "text", name: fileName, text: parts.join("\n\n").slice(0, MAX_TEXT_CHARS) };
+    } catch (e) {
+      console.error("xlsx parse failed:", e);
+      return { kind: "unsupported", name: fileName, reason: "อ่านไฟล์ Excel ไม่สำเร็จ ลองบันทึกเป็น CSV หรือ PDF แล้วส่งใหม่" };
+    }
+  }
+
+  return {
+    kind: "unsupported",
+    name: fileName,
+    reason: `ยังอ่านไฟล์นามสกุล .${ext} ไม่ได้ (รองรับ PDF, Word, Excel, CSV, ข้อความ)`,
+  };
 }
 
 // ---------------------------------------------------------------- Identity
@@ -844,13 +915,15 @@ ${rosterText}
    - คนแปลกหน้า (ชื่อเป็น "ไม่ทราบชื่อ" หรือไม่อยู่ในรายชื่อพนักงาน): ต้องถามชื่อเล่นและตำแหน่งงานก่อนช่วยงานใด ๆ แล้วบันทึกด้วย update_my_profile — ห้ามข้าม
    - คนที่รู้จักชื่ออยู่แล้ว: ทักทายด้วยชื่อและช่วยงานได้ทันที ถ้ายังไม่รู้ตำแหน่ง ให้ถามแทรกท้ายคำตอบแรกแบบสบาย ๆ 1 ครั้ง (ไม่บังคับ ไม่ถามซ้ำ) แล้วบันทึกเมื่อได้คำตอบ
 10. เมื่อผู้ใช้บอกความชอบหรือวิธีที่อยากให้ปฏิบัติแบบถาวร ให้บันทึกด้วย remember_preference ทันที และปฏิบัติตามข้อกำหนดด้านบนเสมอ — ถ้าเป็นเรื่องบุคลิก/ชื่อเรียก/วิธีตอบของคุณเอง (เช่น "เรียกตัวเองว่าแงว", "ตอนเล่นให้กวน ๆ") และคนสั่งเป็น ADMIN ให้ใช้ scope=org เพื่อให้ใช้กับทุกคนทุกกลุ่ม ส่วนความชอบส่วนตัวของผู้ใช้ใช้ scope=me
+11. คำขอให้เตือนตามเวลา ("เตือนอีก 2 นาที", "พรุ่งนี้เตือนแพรวส่งภาพก่อนเที่ยง") ให้ใช้ create_reminder โดยคำนวณเวลาจริงจากเวลาปัจจุบัน — ต่างจาก create_task ที่ใช้กับงานที่ต้องติดตามสถานะ ถ้าเป็นแค่การเตือนไม่ใช่งาน ให้ใช้ create_reminder อย่างเดียว
 12. ADMIN จัดการพนักงานได้: ตั้งสิทธิ์/ตำแหน่ง/แผนก/หัวหน้าของคนอื่นด้วย manage_user, ปิดสถานะคนที่ลาออกด้วย set_user_active, และผูกบัญชีที่ลงทะเบียนล่วงหน้าเข้ากับบัญชี LINE จริงด้วย link_user เมื่อเจ้าตัวเข้ากลุ่มแล้ว — การเปลี่ยน role เป็นเรื่องสิทธิ์การเข้าถึงข้อมูล ให้ทวนยืนยันก่อน 1 ครั้ง
-11. คำขอให้เตือนตามเวลา ("เตือนอีก 2 นาที", "พรุ่งนี้เตือนแพรวส่งภาพก่อนเที่ยง") ให้ใช้ create_reminder โดยคำนวณเวลาจริงจากเวลาปัจจุบัน — ต่างจาก create_task ที่ใช้กับงานที่ต้องติดตามสถานะ ถ้าเป็นแค่การเตือนไม่ใช่งาน ให้ใช้ create_reminder อย่างเดียว`;
+13. ไฟล์เอกสารที่ผู้ใช้ส่งมา (PDF/Word/Excel/CSV/ข้อความ) จะถูกแนบมาให้อ่านได้เลย สรุปสาระสำคัญสั้น ๆ ชี้ให้เห็นงาน/กำหนดส่ง/มติที่ควรบันทึก แล้วถามยืนยันก่อนสร้างงานจริง ห้ามสร้างงานจากไฟล์เองโดยไม่ถาม`;
 }
 
 type AgentOpts = {
   image?: { data: string; media_type: string } | null;
   judgeAddressed?: boolean;
+  file?: FilePayload | null;
   toolLog?: string[]; // ใช้ตอนรันข้อสอบ เก็บชื่อ tool ที่ถูกเรียกจริง
 };
 
@@ -902,12 +975,25 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
       `แต่ถ้าเป็นการคุยกันเองระหว่างคนอื่นที่แค่เอ่ยชื่อคุณผ่าน ๆ โดยไม่ได้พูดกับคุณ ` +
       `ให้ตอบคำว่า SILENT คำเดียวเท่านั้น\n\n` + textContent;
   }
-  const content: any = opts.image
-    ? [
-        { type: "image", source: { type: "base64", media_type: opts.image.media_type, data: opts.image.data } },
-        { type: "text", text: textContent },
-      ]
-    : textContent;
+  if (opts.file?.kind === "text") {
+    textContent = `เนื้อหาไฟล์ "${opts.file.name}" ที่ผู้ใช้ส่งมา:\n${opts.file.text}\n\n---\n\n${textContent}`;
+  } else if (opts.file?.kind === "unsupported") {
+    textContent = `หมายเหตุ: ผู้ใช้ส่งไฟล์ "${opts.file.name}" มาแต่อ่านไม่ได้ (${opts.file.reason}) ` +
+      `บอกผู้ใช้ตรง ๆ อย่างเป็นมิตรและเสนอทางแก้\n\n${textContent}`;
+  }
+
+  const blocks: any[] = [];
+  if (opts.image) {
+    blocks.push({ type: "image", source: { type: "base64", media_type: opts.image.media_type, data: opts.image.data } });
+  }
+  if (opts.file?.kind === "pdf") {
+    blocks.push({
+      type: "document",
+      source: { type: "base64", media_type: "application/pdf", data: opts.file.data },
+    });
+  }
+  blocks.push({ type: "text", text: textContent });
+  const content: any = blocks.length === 1 ? textContent : blocks;
   const messages: any[] = [{ role: "user", content }];
 
   for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
@@ -975,9 +1061,12 @@ function isNameMention(text: string): boolean {
 async function handleEvent(event: any) {
   if (event.type !== "message") return;
   const msgType: string = event.message?.type ?? "";
-  if (msgType !== "text" && msgType !== "image") return;
+  if (!["text", "image", "file"].includes(msgType)) return;
 
-  const text: string = msgType === "text" ? event.message.text : "[ส่งรูปภาพ]";
+  const fileName: string = event.message?.fileName ?? "ไฟล์";
+  const text: string = msgType === "text"
+    ? event.message.text
+    : msgType === "image" ? "[ส่งรูปภาพ]" : `[ส่งไฟล์: ${fileName}]`;
   const lineUserId: string = event.source?.userId ?? "unknown";
   const lineGroupId: string | null = event.source?.groupId ?? null;
   // chatId ใช้ผูกบทสนทนา: กลุ่ม = groupId, แชทส่วนตัว = userId ของคู่สนทนา
@@ -997,18 +1086,19 @@ async function handleEvent(event: any) {
   // - ในกลุ่ม: ตอบเมื่อแท็ก หรือเอ่ยชื่อ (เอ่ยชื่อ → โมเดลตัดสินใจเองว่าควรตอบไหม)
   const tagged = msgType === "text" && isCallingAI(text);
   const named = msgType === "text" && isNameMention(text);
-  if (lineGroupId && msgType === "image") return; // รูปในกลุ่มแค่เก็บไว้ รอคนแท็กถามถึง
+  // รูปและไฟล์ในกลุ่มแค่เก็บไว้ก่อน รอให้คนแท็กถามถึง จะได้ไม่รบกวนทุกครั้งที่มีคนแชร์ไฟล์
+  if (lineGroupId && msgType !== "text") return;
   if (lineGroupId && !tagged && !named) return;
 
   const caller = await ensureUser(lineUserId, lineGroupId);
   const group = await ensureGroup(lineGroupId);
   const ctx: Ctx = { caller, group, lineGroupId };
 
-  // แนบรูป: ถ้าส่งรูปมาตรง ๆ (DM) หรือข้อความพูดถึงรูป → ดึงรูปล่าสุดในแชทมาให้ดู
+  // แนบรูป: ส่งรูปมาตรง ๆ (DM) หรือข้อความพูดถึงรูป → ดึงรูปล่าสุดในแชทมาให้ดู
   let image: { data: string; media_type: string } | null = null;
   if (msgType === "image") {
     image = await fetchImageContent(event.message.id);
-  } else if (/รูป|ภาพ|สกรีน|screenshot|image/i.test(text)) {
+  } else if (msgType === "text" && /รูป|ภาพ|สกรีน|screenshot|image/i.test(text)) {
     const { data: img } = await supabase.from("messages")
       .select("line_message_id")
       .eq("line_group_id", chatId)
@@ -1019,14 +1109,34 @@ async function handleEvent(event: any) {
     if (img?.line_message_id) image = await fetchImageContent(img.line_message_id);
   }
 
+  // แนบไฟล์: ส่งไฟล์มาตรง ๆ หรือข้อความพูดถึงไฟล์/เอกสาร → ดึงไฟล์ล่าสุดในแชทมาอ่าน
+  let file: FilePayload | null = null;
+  if (msgType === "file") {
+    file = await extractFile(event.message.id, fileName);
+  } else if (msgType === "text" && /ไฟล์|เอกสาร|สรุปประชุม|รายงาน|pdf|excel|word|ppt/i.test(text)) {
+    const { data: f } = await supabase.from("messages")
+      .select("line_message_id, message_text")
+      .eq("line_group_id", chatId)
+      .eq("message_type", "file")
+      .gte("created_at", new Date(Date.now() - 7 * 24 * 3600_000).toISOString())
+      .order("created_at", { ascending: false })
+      .limit(1).maybeSingle();
+    if (f?.line_message_id) {
+      const nameFromLog = String(f.message_text ?? "").replace(/^\[ส่งไฟล์:\s*/, "").replace(/\]$/, "");
+      file = await extractFile(f.line_message_id, nameFromLog || "ไฟล์");
+    }
+  }
+
   const question = msgType === "image"
     ? "ผู้ใช้ส่งรูปภาพนี้มา ช่วยดูรูปและตอบตามบริบทของบทสนทนา"
+    : msgType === "file"
+    ? `ผู้ใช้ส่งไฟล์ "${fileName}" มา อ่านเนื้อหาแล้วสรุปสั้น ๆ ว่าไฟล์นี้เกี่ยวกับอะไร มีงานหรือกำหนดส่งอะไรที่ควรบันทึกเข้าระบบบ้าง แล้วถามว่าให้สร้างงานให้เลยไหม (อย่าเพิ่งสร้างเองจนกว่าจะยืนยัน)`
     : text.replace(/@\s?(ai|mt\s?agent\s?1?)/i, "").trim() || "สวัสดี";
   const replyTo = lineGroupId ?? lineUserId;
   const judgeAddressed = Boolean(lineGroupId && !tagged && named);
 
   try {
-    const answer = await runAgent(question, ctx, chatId, { image, judgeAddressed });
+    const answer = await runAgent(question, ctx, chatId, { image, file, judgeAddressed });
     if (judgeAddressed && answer.trim().toUpperCase().startsWith("SILENT")) return;
     await sendReply(event.replyToken, replyTo, answer);
     // เก็บคำตอบของบอทด้วย เพื่อให้ summary/ความจำบทสนทนาเห็นครบทั้งสองฝั่ง
