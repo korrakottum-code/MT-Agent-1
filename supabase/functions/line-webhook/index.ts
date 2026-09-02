@@ -1387,6 +1387,17 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
         ...(result?.error ? { is_error: true } : {}),
       });
     }
+    // โมเดลบอกว่าจะเรียก tool แต่ไม่ได้ส่งคำสั่งเรียกมาสักตัว เกิดขึ้นได้จริงแม้จะไม่บ่อย
+    // ถ้าปล่อยผ่าน เราจะส่ง message เปล่ากลับไป แล้ว API ตอบ 400 ทำให้ทั้งเทิร์นพัง
+    // ทั้งที่เนื้อหาที่มันเขียนมาแล้วอาจใช้ตอบได้อยู่ — เอาเท่าที่มีไปตอบดีกว่าไม่ตอบเลย
+    if (toolResults.length === 0) {
+      const text = response.content
+        .filter((b: any) => b.type === "text")
+        .map((b: any) => b.text)
+        .join("\n");
+      console.error("model said tool_use but sent no tool call; answering with the text it had");
+      return text || "ขอโทษค่ะ แงวสะดุดกลางทาง ลองพิมพ์ใหม่อีกครั้งนะคะ 🙏";
+    }
     messages.push({ role: "user", content: toolResults });
   }
   return "งานนี้ซับซ้อนเกินรอบที่กำหนด ลองแบ่งคำสั่งเป็นขั้นสั้น ๆ นะครับ";
