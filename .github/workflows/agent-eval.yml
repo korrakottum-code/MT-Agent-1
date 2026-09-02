@@ -32,8 +32,10 @@ jobs:
         shell: pwsh
         env:
           TEST_KEY: ${{ secrets.CRON_SECRET }}
-          # push runs leave this empty, so the script's own default (sonnet) applies
-          EVAL_MODEL: ${{ inputs.model }}
+          # push = ด่านคัดกรองราคาถูก ใช้ haiku เสมอ (ถูกกว่า sonnet ~40% ต่อรอบ)
+          # sonnet แพงเกินกว่าจะรันทุก push — สั่งเองตอนจะปิดเฟสหรือก่อนเชื่อว่าอะไรเสร็จจริง
+          # เหตุผลเต็มอยู่ใน docs/HANDOFF.md หัวข้อผลการทดลองลดค่าใช้จ่าย
+          EVAL_MODEL: ${{ inputs.model || 'haiku' }}
           EVAL_CASES: ${{ inputs.cases }}
         run: |
           if (-not $env:TEST_KEY) {
