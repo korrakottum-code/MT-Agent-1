@@ -353,6 +353,15 @@ const TOOLS = [
     },
   },
   {
+    name: "create_admin_link",
+    description:
+      "สร้างลิงก์เข้า Admin Console ให้ ADMIN (เฉพาะ ADMIN เท่านั้น) ใช้เมื่อมีคนขอ 'ลิงก์ console' " +
+      "'เข้าหน้าจอแอดมิน' หรือ 'ขอลิงก์หลังบ้าน' — หน้าจอนี้ใช้ยืนยันรายการที่ระบบจับได้ทีละหลายอัน " +
+      "จัดการสิทธิ์พนักงาน และดูภาพรวมกับค่าใช้จ่าย " +
+      "ลิงก์จะถูกส่งไปทางแชทส่วนตัวเสมอ ไม่ส่งในกลุ่ม เพราะใครเห็นลิงก์ก็เข้าได้",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
     name: "set_user_active",
     description:
       "เปิด/ปิดสถานะพนักงานในระบบ (เฉพาะ ADMIN) ปิดสถานะใช้เมื่อพนักงานลาออกหรือเป็นข้อมูลทดสอบ " +
@@ -788,6 +797,45 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
         .select("id", { count: "exact", head: true })
         .eq("owner_user_id", target.id).in("status", ["TODO", "DOING"]);
       return { updated: data, cancelled_tasks: cancelledTasks, open_tasks_remaining: openLeft ?? 0 };
+    }
+
+    case "create_admin_link": {
+      if (ctx.caller.role !== "ADMIN") return { error: "เข้า Admin Console ได้เฉพาะ ADMIN" };
+      if (String(ctx.caller.line_user_id).startsWith("pending:")) {
+        return { error: "บัญชีนี้ยังไม่ได้ผูก LINE จริง ส่งลิงก์ให้ไม่ได้" };
+      }
+
+      // ลิงก์เก่าที่ยังไม่ถูกใช้ต้องตายทันที ไม่งั้นลิงก์ที่หลุดไปแล้วยังเข้าได้อยู่
+      await supabase.from("admin_sessions")
+        .update({ revoked_at: new Date().toISOString() })
+        .eq("user_id", ctx.caller.id).eq("kind", "LINK").is("used_at", null).is("revoked_at", null);
+
+      const token = crypto.randomUUID() + "." + crypto.randomUUID();
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+      const tokenHash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+
+      const { error } = await supabase.from("admin_sessions").insert({
+        user_id: ctx.caller.id,
+        kind: "LINK",
+        token_hash: tokenHash,
+        expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
+      });
+      if (error) return { error: error.message };
+
+      const link = `${Deno.env.get("SUPABASE_URL")}/functions/v1/admin-console?t=${token}`;
+      const sent = await lineApi("/v2/bot/message/push", {
+        to: ctx.caller.line_user_id,
+        messages: [{
+          type: "text",
+          text: `ลิงก์เข้า Admin Console ค่ะ 🐾\n${link}\n\n` +
+            `ใช้ได้ครั้งเดียวภายใน 15 นาที เปิดแล้วอยู่ได้ 8 ชั่วโมง\nอย่าส่งต่อให้ใครนะคะ ใครมีลิงก์ก็เข้าได้เลย`,
+        }],
+      });
+      if (!sent) {
+        return { error: "ส่งลิงก์ไม่สำเร็จ — ต้องเพิ่ม MT agent 1 เป็นเพื่อนใน LINE ก่อนถึงจะรับลิงก์ได้" };
+      }
+      // ไม่คืนตัวลิงก์ให้โมเดล กันไม่ให้มันเผลอพิมพ์ซ้ำลงในกลุ่ม
+      return { sent_to_dm: ctx.caller.display_name, valid_for: "15 นาที ใช้ได้ครั้งเดียว" };
     }
 
     case "manage_user": {

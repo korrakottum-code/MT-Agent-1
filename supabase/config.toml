@@ -1,0 +1,17 @@
+project_id = "ssjsjvcbulclnvlrkdsj"
+
+# ทั้งสองฟังก์ชันรับคนนอกที่ไม่มี JWT ของ Supabase จึงต้องปิด verify_jwt
+# ตั้งไว้ตรงนี้แทนการใส่ --no-verify-jwt ตอน deploy เพราะถ้าใครลืมใส่ flag
+# ฟังก์ชันจะเริ่มตอบ 401 เงียบ ๆ — LINE จะส่ง webhook ไม่เข้า และ console จะเปิดไม่ได้
+
+[functions.line-webhook]
+# LINE เซ็นด้วย x-line-signature ไม่ใช่ JWT — โค้ดตรวจลายเซ็นเองใน verifySignature()
+verify_jwt = false
+
+[functions.admin-console]
+# เบราว์เซอร์เปิดตรงจากลิงก์ที่ส่งทาง DM — สิทธิ์ตรวจด้วยตั๋วในตาราง admin_sessions
+verify_jwt = false
+
+[functions.scheduled-jobs]
+# pg_cron ยิงเข้ามาพร้อม CRON_SECRET ใน header
+verify_jwt = false

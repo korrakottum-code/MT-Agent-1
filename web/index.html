@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>MT Agent — Admin Console</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#161920; --line:#252a34; --text:#e6e8eb; --dim:#9aa4b2;
+    --accent:#5b9cf8; --ok:#3fb98c; --warn:#e0a33e; --bad:#e06c6c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans Thai",sans-serif;font-size:15px}
+  header{display:flex;align-items:center;gap:12px;padding:14px 20px;border-bottom:1px solid var(--line);
+    position:sticky;top:0;background:var(--bg);z-index:5;flex-wrap:wrap}
+  header h1{font-size:16px;margin:0;font-weight:600}
+  header .who{color:var(--dim);font-size:13px;margin-left:auto}
+  button{font:inherit;cursor:pointer;border-radius:7px;border:1px solid var(--line);
+    background:var(--panel);color:var(--text);padding:7px 13px}
+  button:hover{border-color:var(--accent)}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#08101f;font-weight:600}
+  button.danger:hover{border-color:var(--bad);color:var(--bad)}
+  button:disabled{opacity:.5;cursor:default}
+  nav{display:flex;gap:6px;padding:14px 20px 0}
+  nav button{border-radius:7px 7px 0 0;border-bottom:none}
+  nav button.on{background:var(--panel);border-color:var(--line);color:var(--accent)}
+  main{padding:14px 20px 60px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:12px}
+  .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:14px}
+  .tile{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
+  .tile .n{font-size:26px;font-weight:600;line-height:1.2}
+  .tile .l{color:var(--dim);font-size:12px;margin-top:4px}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .grow{flex:1;min-width:0}
+  .tag{font-size:11px;padding:2px 8px;border-radius:99px;border:1px solid var(--line);color:var(--dim)}
+  .tag.TASK{color:var(--accent);border-color:var(--accent)}
+  .tag.DECISION{color:var(--ok);border-color:var(--ok)}
+  .tag.DEADLINE{color:var(--warn);border-color:var(--warn)}
+  .muted{color:var(--dim);font-size:13px}
+  .excerpt{color:var(--dim);font-size:13px;border-left:2px solid var(--line);padding-left:10px;
+    margin-top:8px;white-space:pre-wrap;line-height:1.6}
+  table{width:100%;border-collapse:collapse}
+  th,td{text-align:left;padding:9px 8px;border-bottom:1px solid var(--line);font-size:14px;vertical-align:middle}
+  th{color:var(--dim);font-weight:500;font-size:12px}
+  select,input[type=text]{font:inherit;background:var(--bg);color:var(--text);
+    border:1px solid var(--line);border-radius:6px;padding:5px 8px}
+  .off{opacity:.45}
+  #toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);background:var(--panel);
+    border:1px solid var(--line);border-radius:8px;padding:10px 16px;display:none;max-width:90vw;z-index:9}
+  #toast.bad{border-color:var(--bad);color:var(--bad)}
+  .empty{color:var(--dim);text-align:center;padding:34px 10px;line-height:1.8}
+  #gate{display:grid;place-items:center;min-height:70vh;text-align:center;padding:24px}
+  #gate code{background:var(--panel);padding:2px 7px;border-radius:5px}
+  #app[hidden]{display:none}
+</style>
+</head>
+<body>
+
+<div id="gate">
+  <div style="max-width:440px">
+    <h1 style="font-size:20px;margin:0 0 14px">🔒 ต้องเข้าผ่านลิงก์จากแชท</h1>
+    <p class="muted" style="line-height:1.9;margin:0">
+      พิมพ์ในแชทกับแงวว่า <code>ขอลิงก์ console</code><br>
+      บอทจะส่งลิงก์ให้ทางแชทส่วนตัว ใช้ได้ครั้งเดียวภายใน 15 นาที<br>
+      เข้าได้เฉพาะ ADMIN เท่านั้น
+    </p>
+  </div>
+</div>
+
+<div id="app" hidden>
+  <header>
+    <h1>🐾 MT Agent — Admin Console</h1>
+    <span class="who" id="who"></span>
+    <button id="logout">ออกจากระบบ</button>
+  </header>
+  <nav>
+    <button data-tab="events" class="on">คิวยืนยัน <span id="badge"></span></button>
+    <button data-tab="users">พนักงาน</button>
+    <button data-tab="dash">ภาพรวม</button>
+  </nav>
+  <main>
+    <div id="events"></div>
+    <div id="users" hidden></div>
+    <div id="dash" hidden></div>
+  </main>
+</div>
+<div id="toast"></div>
+
+<script>
+const API = "https://ssjsjvcbulclnvlrkdsj.supabase.co/functions/v1/admin-console";
+let DATA = null;
+
+// token มาทาง fragment ซึ่งไม่ถูกส่งไปเซิร์ฟเวอร์ใด ๆ — ย้ายเข้า sessionStorage
+// แล้วล้าง URL ทันที จะได้ไม่ค้างอยู่ในช่อง address ให้คนข้าง ๆ เห็นหรือถูก bookmark ไป
+(function grabToken(){
+  const m = location.hash.match(/(?:^|[#&])s=([^&]+)/);
+  if (m) {
+    try { sessionStorage.setItem("mt_admin", decodeURIComponent(m[1])); } catch (_) {}
+    history.replaceState(null, "", location.pathname + location.search);
+  }
+})();
+
+const token = () => { try { return sessionStorage.getItem("mt_admin"); } catch (_) { return null; } };
+
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+
+const thaiDate = (iso) => iso
+  ? new Date(iso).toLocaleString("th-TH", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Bangkok" })
+  : "";
+
+function toast(msg, bad) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.className = bad ? "bad" : "";
+  t.style.display = "block";
+  clearTimeout(t._h);
+  t._h = setTimeout(() => { t.style.display = "none"; }, 3200);
+}
+
+function lockOut(reason) {
+  try { sessionStorage.removeItem("mt_admin"); } catch (_) {}
+  document.getElementById("app").hidden = true;
+  const g = document.getElementById("gate");
+  g.style.display = "grid";
+  if (reason) g.querySelector("h1").textContent = "🔒 " + reason;
+}
+
+async function api(path, options) {
+  const t = token();
+  if (!t) { lockOut(); return null; }
+  const res = await fetch(API + path, {
+    ...options,
+    headers: { ...(options && options.headers), authorization: "Bearer " + t },
+  });
+  if (res.status === 401) { lockOut("เซสชันหมดอายุแล้ว"); return null; }
+  return res.json();
+}
+
+async function load() {
+  const out = await api("/data");
+  if (!out) return;
+  DATA = out;
+  document.getElementById("gate").style.display = "none";
+  document.getElementById("app").hidden = false;
+  document.getElementById("who").textContent = DATA.me.display_name + " · ADMIN";
+  render();
+}
+
+async function act(payload, label) {
+  const out = await api("/action", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!out) return null;
+  if (out.error) { toast(out.error, true); return null; }
+  toast(label);
+  if (!out.logout) await load();
+  return out;
+}
+
+// ---------------------------------------------------------------- คิวยืนยัน
+
+function renderEvents() {
+  const list = DATA.events;
+  document.getElementById("badge").textContent = list.length ? "(" + list.length + ")" : "";
+  if (!list.length) {
+    return "<div class='empty'>ไม่มีรายการรอยืนยัน 🎉<br>" +
+      "<span style='font-size:13px'>ระบบอ่านบทสนทนาในกลุ่มทุก 3 ชั่วโมง " +
+      "กลุ่มที่คนคุยกันน้อยกว่า 3 ข้อความจะถูกข้าม</span></div>";
+  }
+  const people = DATA.users.filter((u) => u.is_active);
+  return list.map((e) => {
+    const owner = people.map((u) =>
+      "<option value='" + u.id + "'" + (u.id === e.owner_user_id ? " selected" : "") + ">" +
+      esc(u.display_name) + "</option>").join("");
+    return "<div class='card' data-ev='" + esc(e.id) + "'>" +
+      "<div class='row'>" +
+        "<span class='tag " + esc(e.type) + "'>" + esc(e.type) + "</span>" +
+        "<b class='grow'>" + esc(e.title) + "</b>" +
+        "<span class='muted'>" + esc(e.group_name) + "</span>" +
+      "</div>" +
+      (e.detail ? "<div class='muted' style='margin-top:6px'>" + esc(e.detail) + "</div>" : "") +
+      (e.source_excerpt ? "<div class='excerpt'>" + esc(e.source_excerpt) + "</div>" : "") +
+      "<div class='row' style='margin-top:10px'><span class='muted'>" +
+        (e.due_at ? "⏰ " + thaiDate(e.due_at) + " · " : "") +
+        "มั่นใจ " + Math.round((e.confidence || 0) * 100) + "% · จับได้ " + thaiDate(e.created_at) +
+      "</span></div>" +
+      "<div class='row' style='margin-top:10px'>" +
+        (e.type === "DECISION"
+          ? "<span class='muted'>ข้อตกลง — ยืนยันแล้วเก็บเป็นความจำองค์กร ไม่สร้างเป็นงาน</span>"
+          : "<label class='muted'>มอบให้ <select class='owner'>" + owner + "</select></label>") +
+        "<span class='grow'></span>" +
+        "<button class='primary go'>ยืนยัน</button>" +
+        "<button class='danger no'>ปัดทิ้ง</button>" +
+      "</div></div>";
+  }).join("");
+}
+
+// ---------------------------------------------------------------- พนักงาน
+
+function renderUsers() {
+  const rows = DATA.users.map((u) => {
+    const pending = String(u.line_user_id || "").startsWith("pending:");
+    const roles = ["EMPLOYEE", "MANAGER", "EXECUTIVE", "ADMIN"].map((r) =>
+      "<option value='" + r + "'" + (r === u.role ? " selected" : "") + ">" + r + "</option>").join("");
+    return "<tr data-u='" + esc(u.id) + "' class='" + (u.is_active ? "" : "off") + "'>" +
+      "<td><b>" + esc(u.display_name) + "</b>" +
+        (pending ? " <span class='tag'>ยังไม่ผูก LINE</span>" : "") + "</td>" +
+      "<td><select class='role'>" + roles + "</select></td>" +
+      "<td><input type='text' class='job' value='" + esc(u.job_title) + "' placeholder='ตำแหน่ง' size='16'></td>" +
+      "<td><input type='text' class='dept' value='" + esc(u.department) + "' placeholder='แผนก' size='12'></td>" +
+      "<td style='text-align:right;white-space:nowrap'>" +
+        "<button class='save'>บันทึก</button> " +
+        "<button class='" + (u.is_active ? "danger" : "") + " toggle'>" +
+          (u.is_active ? "ปิดใช้งาน" : "เปิดใช้งาน") + "</button>" +
+      "</td></tr>";
+  }).join("");
+  return "<div class='card'><table>" +
+    "<tr><th>ชื่อ</th><th>สิทธิ์</th><th>ตำแหน่ง</th><th>แผนก</th><th></th></tr>" + rows +
+    "</table></div><p class='muted'>เปลี่ยนสิทธิ์หรือแก้ตำแหน่งแล้วกดบันทึก · " +
+    "ทุกการเปลี่ยนแปลงถูกบันทึกลง audit log</p>";
+}
+
+// ---------------------------------------------------------------- ภาพรวม
+
+function renderDash() {
+  const s = DATA.stats;
+  const tile = (n, l) => "<div class='tile'><div class='n'>" + n + "</div><div class='l'>" + l + "</div></div>";
+  const spend = Object.entries(s.spend_by_purpose).sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => "<tr><td>" + esc(k) + "</td><td style='text-align:right'>$" + v.toFixed(4) + "</td></tr>")
+    .join("");
+  return "<div class='tiles'>" +
+      tile(s.events_new, "รอยืนยัน") + tile(s.tasks_open, "งานค้าง") +
+      tile(s.tasks_overdue, "เลยกำหนด") + tile(s.tasks_done, "งานเสร็จ") +
+      tile(s.users_active, "พนักงาน") + tile(s.groups_active, "กลุ่ม") +
+    "</div><div class='card'><b>ค่าใช้จ่ายสะสม $" + s.spend_usd.toFixed(4) + "</b>" +
+      "<table style='margin-top:8px'><tr><th>ประเภทงาน</th>" +
+      "<th style='text-align:right'>ค่าใช้จ่าย</th></tr>" + spend + "</table>" +
+      "<p class='muted' style='margin-bottom:0'>คำนวณจากราคา sonnet $2/$10 และ haiku $1/$5 ต่อล้าน token " +
+      "(cache อ่าน 0.1 เท่า เขียน 1.25 เท่า) เป็นค่าประมาณ ยอดจริงดูที่ Anthropic Console</p></div>";
+}
+
+function render() {
+  document.getElementById("events").innerHTML = renderEvents();
+  document.getElementById("users").innerHTML = renderUsers();
+  document.getElementById("dash").innerHTML = renderDash();
+}
+
+// ---------------------------------------------------------------- เหตุการณ์
+
+document.querySelectorAll("nav button").forEach((b) => {
+  b.onclick = () => {
+    document.querySelectorAll("nav button").forEach((x) => x.classList.remove("on"));
+    b.classList.add("on");
+    ["events", "users", "dash"].forEach((id) => {
+      document.getElementById(id).hidden = id !== b.dataset.tab;
+    });
+  };
+});
+
+document.getElementById("logout").onclick = async () => {
+  await act({ action: "logout" }, "ออกจากระบบแล้ว");
+  lockOut();
+};
+
+document.addEventListener("click", async (e) => {
+  const card = e.target.closest("[data-ev]");
+  if (card) {
+    const id = card.dataset.ev;
+    const sel = card.querySelector(".owner");
+    if (e.target.classList.contains("go")) {
+      e.target.disabled = true;
+      await act({ action: "confirm_event", event_id: id, owner_user_id: sel ? sel.value : null }, "ยืนยันแล้ว");
+    } else if (e.target.classList.contains("no")) {
+      e.target.disabled = true;
+      await act({ action: "dismiss_event", event_id: id }, "ปัดทิ้งแล้ว");
+    }
+    return;
+  }
+
+  const tr = e.target.closest("[data-u]");
+  if (!tr) return;
+  const id = tr.dataset.u;
+  const before = DATA.users.find((u) => u.id === id);
+  if (e.target.classList.contains("save")) {
+    e.target.disabled = true;
+    const role = tr.querySelector(".role").value;
+    if (role !== before.role) {
+      const r = await act({ action: "set_user_role", user_id: id, role }, "เปลี่ยนสิทธิ์แล้ว");
+      if (!r) { e.target.disabled = false; return; }
+    }
+    await act({
+      action: "set_user_profile", user_id: id,
+      job_title: tr.querySelector(".job").value,
+      department: tr.querySelector(".dept").value,
+    }, "บันทึกแล้ว");
+  } else if (e.target.classList.contains("toggle")) {
+    if (before.is_active && !confirm("ปิดใช้งาน " + before.display_name + " ?")) return;
+    e.target.disabled = true;
+    await act({ action: "set_user_active", user_id: id, active: !before.is_active }, "อัปเดตแล้ว");
+  }
+});
+
+if (token()) load();
+</script>
+</body>
+</html>

@@ -1,0 +1,39 @@
+name: Deploy admin console
+
+# หน้า Admin Console อยู่บน GitHub Pages เพราะ Supabase Edge Functions
+# เขียนทับ content-type ของ text/html เป็น text/plain (กันเอาโดเมนไปโฮสต์หน้าหลอกลวง)
+# หน้าเว็บจึงเรนเดอร์ไม่ได้ถ้าเสิร์ฟจากที่นั่น — API ยังอยู่ที่ Supabase เหมือนเดิม
+#
+# ในโฟลเดอร์ web/ ไม่มีความลับใด ๆ มีแต่โค้ดหน้าจอ ทุกสิทธิ์ตรวจที่ฝั่ง API
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - ".github/workflows/deploy-console.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: web
+      - id: deploy
+        uses: actions/deploy-pages@v4
