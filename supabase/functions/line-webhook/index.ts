@@ -273,12 +273,18 @@ const TOOLS = [
   },
   {
     name: "search_messages",
-    description: "ค้นหาข้อความเก่าด้วยคำค้น ค่าเริ่มต้นค้นเฉพาะกลุ่มนี้ scope=all_groups ค้นทุกกลุ่ม (MANAGER ขึ้นไป)",
+    description:
+      "ค้นหาข้อความเก่าด้วยคำค้น ค่าเริ่มต้นค้นเฉพาะกลุ่มนี้ scope=all_groups ค้นทุกกลุ่ม (MANAGER ขึ้นไป) " +
+      "**ถ้ากำลังคุยในแชทส่วนตัว ต้องใส่ scope=all_groups เสมอ** เพราะไม่มีกลุ่มปัจจุบันให้ค้น",
     input_schema: {
       type: "object",
       properties: {
         query: { type: "string" },
-        scope: { type: "string", enum: ["this_group", "all_groups"] },
+        scope: {
+          type: "string",
+          enum: ["this_group", "all_groups"],
+          description: "ค่าเริ่มต้น this_group · ในแชทส่วนตัวต้องใส่ all_groups (ต้อง MANAGER ขึ้นไป)",
+        },
         limit: { type: "integer" },
       },
       required: ["query"],
@@ -287,12 +293,17 @@ const TOOLS = [
   {
     name: "get_group_summary",
     description:
-      "ดึงข้อความของกลุ่มตามช่วงเวลา (ชั่วโมงย้อนหลัง) เพื่อนำมาสรุป พร้อมสถิติงานของกลุ่ม ระบุ group_name เพื่อดูกลุ่มอื่น (MANAGER ขึ้นไป)",
+      "ดึงข้อความของกลุ่มตามช่วงเวลา (ชั่วโมงย้อนหลัง) เพื่อนำมาสรุป พร้อมสถิติงานของกลุ่ม ระบุ group_name เพื่อดูกลุ่มอื่น (MANAGER ขึ้นไป) " +
+      "**ถ้ากำลังคุยในแชทส่วนตัว ต้องใส่ group_name เสมอ** เพราะไม่มีกลุ่มปัจจุบันให้สรุป " +
+      "ถ้าผู้ใช้ไม่ได้บอกว่ากลุ่มไหน ให้ถามก่อนว่าจะสรุปกลุ่มไหน อย่าเดาเอง",
     input_schema: {
       type: "object",
       properties: {
         hours_back: { type: "integer", description: "ย้อนหลังกี่ชั่วโมง เช่น 24 = วันนี้" },
-        group_name: { type: "string", description: "ชื่อกลุ่มอื่น ไม่ระบุ = กลุ่มปัจจุบัน" },
+        group_name: {
+          type: "string",
+          description: "ชื่อกลุ่มอื่น · ในกลุ่มไม่ระบุ = กลุ่มปัจจุบัน · ในแชทส่วนตัวต้องระบุเสมอ",
+        },
       },
       required: ["hours_back"],
     },
@@ -469,14 +480,19 @@ const TOOLS = [
     description:
       "ดูสิ่งที่ระบบอ่านบทสนทนาแล้วจับได้เอง (งานที่ถูกมอบหมาย / ข้อตกลง / กำหนดส่ง) ซึ่งยังไม่ได้ยืนยัน " +
       "ใช้ตอนถูกถามว่า 'จับอะไรไว้บ้าง' 'มีอะไรรอยืนยันไหม' หรือถามย้อนว่า 'เคยตกลงอะไรกันเรื่องนี้' " +
-      "ใส่ query เพื่อค้นด้วยคำ และใส่ status=CONVERTED เพื่อดูข้อตกลงเก่าที่ยืนยันแล้ว",
+      "ใส่ query เพื่อค้นด้วยคำ และใส่ status=CONVERTED เพื่อดูข้อตกลงเก่าที่ยืนยันแล้ว " +
+      "**ถ้ากำลังคุยในแชทส่วนตัว ต้องใส่ scope=all_groups เสมอ** เพราะไม่มีกลุ่มปัจจุบันให้อ้างถึง",
     input_schema: {
       type: "object",
       properties: {
         query: { type: "string", description: "คำค้นในชื่อหรือรายละเอียด ไม่ระบุ = เอาทั้งหมด" },
         type: { type: "string", enum: ["TASK", "DECISION", "DEADLINE"] },
         status: { type: "string", enum: ["NEW", "CONVERTED", "DISMISSED"], description: "ค่าเริ่มต้น NEW" },
-        scope: { type: "string", enum: ["this_group", "all_groups"], description: "all_groups ต้อง MANAGER ขึ้นไป" },
+        scope: {
+          type: "string",
+          enum: ["this_group", "all_groups"],
+          description: "ค่าเริ่มต้น this_group · ในแชทส่วนตัวต้องใส่ all_groups (ต้อง MANAGER ขึ้นไป)",
+        },
         limit: { type: "integer" },
       },
     },
