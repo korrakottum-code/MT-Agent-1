@@ -78,9 +78,35 @@ CRON_SECRET              (ค่าเดียวกันนี้ฝังอ
 **ไม่มี `ANTHROPIC_WORKSPACE_ID` แล้ว** — ตั้งแต่ commit `47a7e50` โค้ดส่ง workspace header
 เฉพาะเมื่อมีค่านี้ พอ key เป็นแบบ org-level ก็ไม่ต้องตั้งอีกต่อไป อย่าใส่กลับเข้าไปโดยไม่จำเป็น
 
+## Admin Console
+
+https://korrakottum-code.github.io/MT-Agent-1/ — ทำสิ่งที่ทำในแชทได้อยู่แล้ว แต่ทีละหลายรายการได้เร็วกว่า
+มี 3 แท็บ: คิวยืนยัน events · จัดการสิทธิ์/ตำแหน่งพนักงาน · ภาพรวมกับค่าใช้จ่ายสะสม
+
+**วิธีเข้า** พิมพ์ในแชทว่า `ขอลิงก์ console` (ต้องเป็น ADMIN) บอทจะ DM ลิงก์ให้
+ใช้ได้ครั้งเดียวภายใน 15 นาที เปิดแล้วอยู่ได้ 8 ชั่วโมง
+
+**ทำไมหน้าเว็บไม่ได้อยู่กับ API** — Supabase เขียนทับ `content-type: text/html` เป็น `text/plain`
+พร้อมใส่ `nosniff` บนโดเมน `*.supabase.co/functions/v1/*` (กันเอาโดเมนไปโฮสต์หน้าหลอกลวง)
+เบราว์เซอร์จึงแสดงเป็นข้อความดิบ ส่วน `application/json` ผ่านปกติ — API จึงยังอยู่ที่ Supabase ได้
+**อย่าเสียเวลาลองย้ายหน้าเว็บกลับไปที่ Edge Function มันไม่มีทางเรนเดอร์ได้** เว้นแต่จะซื้อ custom domain
+
+**ทำไมไม่ใช้คุกกี้** — หน้าเว็บคนละโดเมนกับ API คุกกี้จึงเป็น third-party ซึ่ง Safari บล็อกโดยปริยาย
+ใช้ bearer token ที่ส่งต่อทาง URL fragment (`#s=...`) แทน — fragment ไม่ถูกส่งไปเซิร์ฟเวอร์
+จึงไม่โผล่ใน log ของ GitHub และไม่ติดไปกับ Referer หน้าเว็บย้ายเข้า sessionStorage แล้วล้าง URL ทันที
+ผลพลอยได้คือ CSRF ทำไม่ได้เลย เพราะไม่มี credential ที่เบราว์เซอร์แนบให้เอง
+
+**ด่านความปลอดภัย** — เก็บเฉพาะ SHA-256 ของ token · ขอลิงก์ใหม่จะเพิกถอนลิงก์เก่าที่ยังไม่ถูกใช้ ·
+อ่าน role สดทุก request (ถอด ADMIN แล้ว session ตายทันที) · ไม่คืนตัวลิงก์ให้โมเดล กันมันพิมพ์ซ้ำลงกลุ่ม ·
+ทุกการกระทำลง `audit_logs` · ปิดใช้งาน/ลดสิทธิ์ตัวเองไม่ได้ กัน ADMIN คนสุดท้ายล็อกตัวเองออก
+
+หน้าเว็บอยู่ที่ `web/index.html` deploy ขึ้น GitHub Pages อัตโนมัติเมื่อ push
+ในนั้นไม่มีความลับ มีแต่โค้ดหน้าจอ ทุกสิทธิ์ตรวจที่ฝั่ง API
+
 ## สิ่งที่ deploy อยู่บนคลาวด์
 
-- Edge Function `line-webhook` — รับ LINE webhook + AI agent (โมเดล `claude-sonnet-5`) — 20 tools
+- Edge Function `admin-console` — API ของ Admin Console (ไม่ได้เสิร์ฟหน้าเว็บ ดูหัวข้อด้านบน)
+- Edge Function `line-webhook` — รับ LINE webhook + AI agent (โมเดล `claude-sonnet-5`) — 21 tools
 - Edge Function `scheduled-jobs` — v7, 5 งานตามเวลา
 - pg_cron 5 ตัว (เวลาใน cron เป็น UTC, ไทย = UTC+7):
   `daily-summary` 11:00 · `morning-reminder` 02:00 · `weekly-summary` จันทร์ 02:00 ·
