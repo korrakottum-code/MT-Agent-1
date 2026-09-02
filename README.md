@@ -48,6 +48,14 @@ LINE_CHANNEL_ACCESS_TOKEN
 ANTHROPIC_API_KEY
 ```
 
+ตั้งเพิ่มเฉพาะตอนจะเอาโมเดลค่ายอื่นมาเทียบ (ใช้กับข้อสอบเท่านั้น ไม่แตะโมเดลที่ทีมใช้จริง)
+รายละเอียดอยู่ใน [docs/HANDOFF.md](docs/HANDOFF.md)
+
+```text
+OPENAI_API_KEY + EVAL_LUNA_MODEL
+GEMINI_API_KEY + EVAL_GEMINI_MODEL
+```
+
 ## MVP 0.1 — คำสั่งที่ต้องใช้งานได้
 
 ```text

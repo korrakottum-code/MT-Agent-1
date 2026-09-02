@@ -5,14 +5,16 @@
 param(
   [Parameter(Mandatory = $true)][string]$TestKey,
   [string]$Url = "https://ssjsjvcbulclnvlrkdsj.supabase.co/functions/v1/line-webhook",
-  [string]$CasesPath = "$PSScriptRoot\cases.json",
+  [string]$CasesPath = (Join-Path $PSScriptRoot "cases.json"),
   [string]$Only = "",
   # haiku = cheap gate for routine checks. sonnet = what production actually runs,
   # so use it before calling a phase done. A haiku pass is evidence, not proof.
-  [ValidateSet("haiku", "sonnet")][string]$Model = "sonnet"
+  # luna / gemini-flash are the cross-vendor models, eval only - see run-compare.ps1.
+  [ValidateSet("haiku", "sonnet", "luna", "gemini-flash")][string]$Model = "sonnet"
 )
 
 $OutputEncoding = [Text.UTF8Encoding]::new($false)
+. (Join-Path $PSScriptRoot "assert-case.ps1")
 $cases = Get-Content $CasesPath -Raw -Encoding UTF8 | ConvertFrom-Json
 if ($Only) { $cases = $cases | Where-Object { $_.id -like "*$Only*" } }
 
@@ -54,33 +56,7 @@ foreach ($c in $cases) {
   }
   $requestErrors = 0
 
-  $problems = @()
-  $answer = [string]$res.answer
-  $tools = @($res.tools_called)
-
-  foreach ($t in @($c.expect_tools)) {
-    if ($t -and $tools -notcontains $t) {
-      $problems += "missing tool '$t' (called: $($tools -join ', '))"
-    }
-  }
-  if ($c.expect_tools_any) {
-    $hit = @($c.expect_tools_any | Where-Object { $tools -contains $_ })
-    if ($hit.Count -eq 0) {
-      $problems += "no data-checking tool called (called: $($tools -join ', '))"
-    }
-  }
-  foreach ($t in @($c.forbid_tools)) {
-    if ($t -and $tools -contains $t) { $problems += "forbidden tool '$t' was called" }
-  }
-  if ($c.expect_answer_matches -and $answer -notmatch $c.expect_answer_matches) {
-    $problems += "answer does not match /$($c.expect_answer_matches)/"
-  }
-  if ($c.forbid_answer_matches -and $answer -match $c.forbid_answer_matches) {
-    $problems += "answer contains forbidden /$($c.forbid_answer_matches)/"
-  }
-  if ($c.min_answer_length -and $answer.Length -lt $c.min_answer_length) {
-    $problems += "answer too short ($($answer.Length) chars)"
-  }
+  $problems = @(Test-AgentCase -Case $c -Response $res)
 
   if ($problems.Count -eq 0) {
     Write-Host "[PASS] $($c.id)  ($($res.ms) ms)" -ForegroundColor Green
@@ -88,7 +64,7 @@ foreach ($c in $cases) {
   } else {
     Write-Host "[FAIL] $($c.id) - $($c.why)" -ForegroundColor Red
     foreach ($p in $problems) { Write-Host "       $p" -ForegroundColor Yellow }
-    $flat = ($answer -replace "`r?`n", ' ')
+    $flat = ([string]$res.answer -replace "`r?`n", ' ')
     if ($flat.Length -gt 180) { $flat = $flat.Substring(0, 180) + '...' }
     Write-Host "       got: $flat" -ForegroundColor DarkGray
     $fail++; $failed += $c.id

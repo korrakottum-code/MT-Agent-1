@@ -2,6 +2,7 @@
 // LINE → verify signature → เก็บ message → resolve identity → Claude + Tools → ตอบกลับ
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import Anthropic from "npm:@anthropic-ai/sdk";
+import { callOpenAICompatible, type ModelSpec } from "./openai-compat.ts";
 
 const CHANNEL_SECRET = Deno.env.get("LINE_CHANNEL_SECRET") ?? "";
 const CHANNEL_ACCESS_TOKEN = Deno.env.get("LINE_CHANNEL_ACCESS_TOKEN") ?? "";
@@ -1163,14 +1164,70 @@ type AgentOpts = {
   // ทำให้ประวัติจบลงที่คำขอของผู้ใช้แบบไม่มีคำตอบ แล้วโมเดลนึกว่าเป็นงานค้างที่ต้องทำให้
   skipLatestMessage?: boolean;
   purpose?: string; // ใช้แยกยอด token ว่าหมดไปกับอะไร: chat / eval / gate
-  model?: string;   // ใช้ตอนรันข้อสอบด้วยโมเดลถูกกว่า ปกติไม่ต้องส่ง
+  spec?: ModelSpec; // ใช้ตอนรันข้อสอบด้วยโมเดลอื่น ปกติไม่ต้องส่ง ใช้ของ production
+  // ถังให้ยอด token ไหลออกไปถึงผู้เรียก ใช้ตอนเทียบโมเดลว่ารอบหนึ่งเสียเงินเท่าไร
+  // ไม่ใส่ก็ได้ ยอดยังถูกบันทึกลง token_usage เหมือนเดิมทุกกรณี
+  usageOut?: Record<string, number>;
 };
 
 // โมเดลที่ยอมให้ข้อสอบเลือกได้ ไม่รับค่าอิสระ กันพิมพ์ผิดแล้วไปเรียกโมเดลที่ไม่มีจริง
-const EVAL_MODELS: Record<string, string> = {
-  haiku: "claude-haiku-4-5-20251001",
-  sonnet: "claude-sonnet-5",
+// โมเดลนอกค่าย Anthropic คุยผ่านหน้าตาแบบ OpenAI chat completions ซึ่งเป็นภาษากลาง
+// ที่ทั้ง OpenAI และ Gemini (endpoint โหมด openai) รับได้ ตัวแปลอยู่ที่ toOpenAIMessages
+//
+// ชื่อรุ่นจริงไม่ฝังในโค้ด ต้องตั้งเป็น secret เพราะชื่อรุ่นเปลี่ยนบ่อยกว่าโค้ด
+// และเดาผิดทีเดียวคือรันข้อสอบทั้งชุดทิ้ง — ขาดตัวไหน endpoint บอกตรง ๆ ว่าต้องตั้งอะไร
+
+const EVAL_MODELS: Record<string, () => ModelSpec> = {
+  haiku: () => ({ provider: "anthropic", model: "claude-haiku-4-5-20251001", keyEnv: "ANTHROPIC_API_KEY" }),
+  sonnet: () => ({ provider: "anthropic", model: "claude-sonnet-5", keyEnv: "ANTHROPIC_API_KEY" }),
+  luna: () => ({
+    provider: "openai",
+    model: Deno.env.get("EVAL_LUNA_MODEL") ?? "",
+    baseURL: Deno.env.get("EVAL_LUNA_BASE_URL") ?? "https://api.openai.com/v1",
+    keyEnv: "OPENAI_API_KEY",
+  }),
+  "gemini-flash": () => ({
+    provider: "openai",
+    model: Deno.env.get("EVAL_GEMINI_MODEL") ?? "",
+    // โหมดเข้ากันได้กับ OpenAI ของ Gemini — ถ้า Google ย้าย path เปลี่ยนที่ secret ได้เลย
+    baseURL: Deno.env.get("EVAL_GEMINI_BASE_URL") ?? "https://generativelanguage.googleapis.com/v1beta/openai",
+    keyEnv: "GEMINI_API_KEY",
+  }),
 };
+
+// บอกให้ชัดว่าขาดอะไร แทนที่จะปล่อยให้ยิงไปแล้วได้ 401 กลับมาแบบงง ๆ
+function resolveEvalModel(key: string): { spec?: ModelSpec; error?: string } {
+  const make = EVAL_MODELS[key];
+  if (!make) {
+    return { error: `ไม่รู้จักโมเดล "${key}" (ใช้ได้: ${Object.keys(EVAL_MODELS).join(", ")})` };
+  }
+  const spec = make();
+  if (!spec.model) {
+    const envName = key === "luna" ? "EVAL_LUNA_MODEL" : "EVAL_GEMINI_MODEL";
+    return { error: `โมเดล "${key}" ยังไม่ได้เชื่อม — ตั้ง secret ${envName} เป็นชื่อรุ่นจริงก่อน` };
+  }
+  if (!Deno.env.get(spec.keyEnv)) {
+    return { error: `โมเดล "${key}" ยังไม่ได้เชื่อม — ตั้ง secret ${spec.keyEnv} ก่อน` };
+  }
+  return { spec };
+}
+
+const PROD_SPEC: ModelSpec = { provider: "anthropic", model: MODEL, keyEnv: "ANTHROPIC_API_KEY" };
+
+// ทางเข้าเดียวของการยิงเข้าโมเดล ไม่ว่าจะค่ายไหน
+async function createMessage(spec: ModelSpec, req: any): Promise<any> {
+  if (spec.provider === "openai") return await callOpenAICompatible(spec, req);
+  // Haiku 4.5 ไม่รับ output_config.effort ถ้าส่งไปจะได้ 400 กลับมา
+  const supportsEffort = !spec.model.includes("haiku");
+  return await (anthropic as any).messages.create({
+    model: spec.model,
+    max_tokens: req.max_tokens,
+    ...(supportsEffort ? { output_config: { effort: "medium" } } : {}),
+    system: req.system,
+    tools: req.tools,
+    messages: req.messages,
+  });
+}
 
 // เก็บยอด token ทุกครั้งที่เรียกโมเดล ถ้าเก็บไม่ได้ต้องไม่ทำให้บอทตอบไม่ได้
 async function logTokenUsage(row: Record<string, unknown>) {
@@ -1272,16 +1329,13 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
 
   // นับ token รวมทุกรอบของคำตอบเดียว แล้วบันทึกครั้งเดียวตอนจบ ไม่ว่าจะจบด้วยทางไหน
   const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, iterations: 0 };
-  const model = opts.model ?? MODEL;
-  // Haiku 4.5 ไม่รับ output_config.effort ถ้าส่งไปจะได้ 400 กลับมา
-  const supportsEffort = !model.includes("haiku");
+  const spec = opts.spec ?? PROD_SPEC;
+  const model = spec.model;
 
   try {
   for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
-    const response: any = await (anthropic as any).messages.create({
-      model,
+    const response: any = await createMessage(spec, {
       max_tokens: 4096,
-      ...(supportsEffort ? { output_config: { effort: "medium" } } : {}),
       system,
       tools: TOOLS,
       messages,
@@ -1334,6 +1388,7 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
   }
   return "งานนี้ซับซ้อนเกินรอบที่กำหนด ลองแบ่งคำสั่งเป็นขั้นสั้น ๆ นะครับ";
   } finally {
+    if (opts.usageOut) Object.assign(opts.usageOut, usage);
     if (usage.iterations > 0) {
       await logTokenUsage({
         purpose: opts.purpose ?? "chat",
@@ -1492,13 +1547,8 @@ async function handleEvent(event: any) {
 // ใช้ตรวจว่าการแก้แต่ละครั้งทำให้พฤติกรรมเดิมพังหรือไม่ ก่อนปล่อยให้ทีมใช้
 async function runEval(body: string): Promise<Response> {
   const { as_user, message, in_group, model: modelKey, judge } = JSON.parse(body);
-  const evalModel = EVAL_MODELS[String(modelKey ?? "sonnet").toLowerCase()];
-  if (!evalModel) {
-    return Response.json(
-      { error: `ไม่รู้จักโมเดล "${modelKey}" (ใช้ได้: ${Object.keys(EVAL_MODELS).join(", ")})` },
-      { status: 400 },
-    );
-  }
+  const { spec: evalSpec, error: modelError } = resolveEvalModel(String(modelKey ?? "sonnet").toLowerCase());
+  if (!evalSpec) return Response.json({ error: modelError }, { status: 400 });
   const { data: caller } = await supabase.from("users").select("*")
     .ilike("display_name", `%${as_user}%`).eq("is_active", true).maybeSingle();
   if (!caller) return Response.json({ error: `ไม่พบผู้ใช้ "${as_user}"` }, { status: 400 });
@@ -1514,13 +1564,14 @@ async function runEval(body: string): Promise<Response> {
   const chatId = group?.line_group_id ?? caller.line_user_id;
 
   const toolLog: string[] = [];
+  const usage: Record<string, number> = {};
   const started = Date.now();
   const startedIso = new Date().toISOString();
   try {
     // judge = จำลองกรณีที่ในกลุ่มไม่ได้แท็กบอท แล้วต้องให้โมเดลตัดสินเองว่าจะตอบหรือเงียบ
     // ข้อสอบตรวจได้ด้วยการดูว่าคำตอบขึ้นต้นด้วย SILENT หรือไม่
     const answer = await runAgent(message, ctx, chatId, {
-      toolLog, skipLatestMessage: false, purpose: "eval", model: evalModel,
+      toolLog, usageOut: usage, skipLatestMessage: false, purpose: "eval", spec: evalSpec,
       judgeAddressed: judge === "named" || judge === "follow_up" ? judge : null,
     });
 
@@ -1546,8 +1597,13 @@ async function runEval(body: string): Promise<Response> {
 
     return Response.json({
       as_user: caller.display_name, role: caller.role,
-      group: group?.group_name ?? null, model: evalModel,
+      group: group?.group_name ?? null, model: evalSpec.model,
       message, answer, tools_called: toolLog, cleaned, ms: Date.now() - started,
+      usage: {
+        input: usage.input ?? 0, output: usage.output ?? 0,
+        cache_read: usage.cacheRead ?? 0, cache_write: usage.cacheWrite ?? 0,
+        iterations: usage.iterations ?? 0,
+      },
     });
   } catch (e) {
     return Response.json({ error: String(e), tools_called: toolLog }, { status: 500 });

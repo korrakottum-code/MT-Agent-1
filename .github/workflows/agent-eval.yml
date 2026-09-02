@@ -14,12 +14,12 @@ on:
       model:
         description: "Model to run the eval against"
         type: choice
-        options: [sonnet, haiku]
+        options: [sonnet, haiku, luna, gemini-flash]
         default: sonnet
       cases:
         description: "Which case file to run"
         type: choice
-        options: ["tests/cases.json", "tests/cases-judge.json"]
+        options: ["tests/cases.json", "tests/cases-judge.json", "tests/cases-compare.json"]
         default: "tests/cases.json"
 
 jobs:

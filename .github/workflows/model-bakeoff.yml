@@ -1,0 +1,54 @@
+name: Model bake-off
+
+# เทียบหลายโมเดลด้วยข้อสอบชุดเดียวกัน สั่งเองเท่านั้น ไม่ผูกกับ push
+# เพราะรอบหนึ่งยิงเข้าโมเดลหลายสิบครั้ง แพงกว่าข้อสอบปกติหลายเท่า
+# ใช้ CRON_SECRET ตัวเดียวกับ agent-eval.yml จึงไม่ต้องมีค่าใด ๆ ในเครื่องคนสั่ง
+on:
+  workflow_dispatch:
+    inputs:
+      models:
+        description: "Models to compare (comma separated)"
+        default: "luna,gemini-flash,haiku"
+      repeat:
+        description: "Runs per case - 3 before deciding anything, models are not deterministic"
+        default: "1"
+      only:
+        description: "Run only cases whose id contains this (blank = all)"
+        default: ""
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run bake-off
+        shell: pwsh
+        env:
+          TEST_KEY: ${{ secrets.CRON_SECRET }}
+          MODELS: ${{ inputs.models }}
+          REPEAT: ${{ inputs.repeat }}
+          ONLY: ${{ inputs.only }}
+        run: |
+          if (-not $env:TEST_KEY) {
+            Write-Host "::error::CRON_SECRET repository secret is not set - add it in Settings > Secrets and variables > Actions"
+            exit 1
+          }
+          # ห้ามใช้ชื่อ $args มันเป็นตัวแปรสงวนของ PowerShell
+          $runArgs = @{ TestKey = $env:TEST_KEY; Models = $env:MODELS; Repeat = [int]$env:REPEAT }
+          if ($env:ONLY) { $runArgs.Only = $env:ONLY }
+          ./tests/run-compare.ps1 @runArgs
+
+      - name: Show the report in the run summary
+        if: always()
+        shell: pwsh
+        run: |
+          $md = Get-ChildItem tests/results -Filter *.md -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if ($md) { Get-Content $md.FullName -Raw -Encoding UTF8 >> $env:GITHUB_STEP_SUMMARY }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bakeoff-results
+          path: tests/results/
