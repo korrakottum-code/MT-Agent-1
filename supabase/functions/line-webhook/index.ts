@@ -1117,11 +1117,13 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
     .from("groups").select("line_group_id, group_name").eq("is_active", true).limit(50);
 
   // บทสนทนาล่าสุดในแชทนี้ เพื่อให้คำสั่งต่อเนื่องสั้น ๆ ("1", "งานเดียว") ตีความได้
+  // ดึงเกินมา 1 เพราะข้อความที่กำลังตอบถูกบันทึกไปแล้ว ต้องตัดทิ้ง — ได้ประวัติจริง 20 ข้อความ
+  // ประวัติเป็นส่วนที่ cache ไม่ได้ (เปลี่ยนทุกครั้ง) จึงเป็นก้อนที่โดนคิดเงินเต็มราคาหนักที่สุด
   const { data: recent } = await supabase.from("messages")
     .select("line_user_id, message_text")
     .eq("line_group_id", chatId)
     .order("created_at", { ascending: false })
-    .limit(31);
+    .limit(21);
   const nameOf = new Map((roster ?? []).map((u: any) => [u.line_user_id, u.display_name]));
   nameOf.set("bot", "แงว");
   const history = (recent ?? []).slice(opts.skipLatestMessage === false ? 0 : 1).reverse()

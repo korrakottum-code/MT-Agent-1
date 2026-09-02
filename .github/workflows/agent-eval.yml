@@ -10,6 +10,12 @@ on:
       - "tests/**"
       - ".github/workflows/agent-eval.yml"
   workflow_dispatch:
+    inputs:
+      model:
+        description: "Model to run the eval against"
+        type: choice
+        options: [sonnet, haiku]
+        default: sonnet
 
 jobs:
   eval:
@@ -21,9 +27,15 @@ jobs:
         shell: pwsh
         env:
           TEST_KEY: ${{ secrets.CRON_SECRET }}
+          # push runs leave this empty, so the script's own default (sonnet) applies
+          EVAL_MODEL: ${{ inputs.model }}
         run: |
           if (-not $env:TEST_KEY) {
             Write-Host "::error::CRON_SECRET repository secret is not set - add it in Settings > Secrets and variables > Actions"
             exit 1
           }
-          ./tests/run-eval.ps1 -TestKey $env:TEST_KEY
+          if ($env:EVAL_MODEL) {
+            ./tests/run-eval.ps1 -TestKey $env:TEST_KEY -Model $env:EVAL_MODEL
+          } else {
+            ./tests/run-eval.ps1 -TestKey $env:TEST_KEY
+          }
