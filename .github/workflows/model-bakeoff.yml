@@ -15,6 +15,9 @@ on:
       only:
         description: "Run only cases whose id contains this (blank = all)"
         default: ""
+      cases:
+        description: "Case files, comma separated (blank = compare + judge)"
+        default: ""
 
 jobs:
   compare:
@@ -29,6 +32,7 @@ jobs:
           MODELS: ${{ inputs.models }}
           REPEAT: ${{ inputs.repeat }}
           ONLY: ${{ inputs.only }}
+          CASES: ${{ inputs.cases }}
         run: |
           if (-not $env:TEST_KEY) {
             Write-Host "::error::CRON_SECRET repository secret is not set - add it in Settings > Secrets and variables > Actions"
@@ -37,6 +41,7 @@ jobs:
           # ห้ามใช้ชื่อ $args มันเป็นตัวแปรสงวนของ PowerShell
           $runArgs = @{ TestKey = $env:TEST_KEY; Models = $env:MODELS; Repeat = [int]$env:REPEAT }
           if ($env:ONLY) { $runArgs.Only = $env:ONLY }
+          if ($env:CASES) { $runArgs.CasesPath = $env:CASES }
           ./tests/run-compare.ps1 @runArgs
 
       - name: Show the report in the run summary

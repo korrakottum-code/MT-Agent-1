@@ -90,8 +90,37 @@ export function fromOpenAIResponse(data: any): any {
   };
 }
 
+// พารามิเตอร์ที่บางเจ้าต้องปรับก่อนถึงจะยอมทำงาน รู้ได้จาก error ที่มันตอบกลับมาเท่านั้น
+// จึงลองแบบมาตรฐานก่อน แล้วปรับตามที่มันบอก ดีกว่าฮาร์ดโค้ดข้อยกเว้นรายเจ้าไว้ล่วงหน้า
+// ซึ่งจะผิดทันทีที่เขาเปลี่ยนรุ่น
+type Fix = "max_tokens" | "no_reasoning";
+
+function applyFix(body: any, fix: Fix): any {
+  if (fix === "max_tokens") {
+    const { max_completion_tokens, ...rest } = body;
+    return { ...rest, max_tokens: max_completion_tokens };
+  }
+  // gpt-5.x ไม่ยอมให้ใช้ tool บน /v1/chat/completions ถ้า reasoning_effort ไม่ใช่ none
+  return { ...body, reasoning_effort: "none" };
+}
+
+function detectFix(detail: string, applied: Fix[]): Fix | null {
+  if (detail.includes("max_completion_tokens") && !applied.includes("max_tokens")) return "max_tokens";
+  if (detail.includes("reasoning_effort") && !applied.includes("no_reasoning")) return "no_reasoning";
+  return null;
+}
+
+// จำไว้ว่ารุ่นนี้ต้องปรับอะไรบ้าง คำตอบเดียวยิงเข้าโมเดลได้ถึง 8 รอบ
+// ถ้าไม่จำ ทุกรอบจะต้องเสีย 400 หนึ่งครั้งเพื่อเรียนรู้เรื่องเดิมซ้ำ ๆ
+const learnedFixes = new Map<string, Fix[]>();
+
+// สำหรับข้อสอบเท่านั้น ให้แต่ละเคสเริ่มจากศูนย์เหมือนโมเดลที่เพิ่งเจอครั้งแรก
+export function _resetLearnedFixes() {
+  learnedFixes.clear();
+}
+
 export async function callOpenAICompatible(spec: ModelSpec, req: any): Promise<any> {
-  const body: any = {
+  const base: any = {
     model: spec.model,
     max_completion_tokens: req.max_tokens,
     messages: toOpenAIMessages(req.system, req.messages),
@@ -111,17 +140,19 @@ export async function callOpenAICompatible(spec: ModelSpec, req: any): Promise<a
       body: JSON.stringify(payload),
     });
 
-  let res = await send(body);
-  // ชื่อพารามิเตอร์จำกัดความยาวคำตอบยังไม่ตรงกันทุกเจ้า ตัวไหนไม่รู้จัก max_completion_tokens
-  // ให้ลองแบบเก่าอีกรอบ ดีกว่าให้คนมานั่งเดาว่าทำไม 400
-  if (res.status === 400) {
+  const applied = [...(learnedFixes.get(spec.model) ?? [])];
+  let payload = applied.reduce(applyFix, base);
+  let res = await send(payload);
+
+  // ปรับได้อย่างมาก 2 อย่าง เท่ากับจำนวนอาการที่รู้จัก เกินนั้นคือเรื่องที่เดาเองไม่ได้
+  for (let i = 0; i < 2 && res.status === 400; i++) {
     const detail = await res.text();
-    if (detail.includes("max_completion_tokens")) {
-      const { max_completion_tokens, ...rest } = body;
-      res = await send({ ...rest, max_tokens: max_completion_tokens });
-    } else {
-      throw new Error(`${spec.model} ตอบ 400: ${detail.slice(0, 400)}`);
-    }
+    const fix = detectFix(detail, applied);
+    if (!fix) throw new Error(`${spec.model} ตอบ 400: ${detail.slice(0, 400)}`);
+    applied.push(fix);
+    learnedFixes.set(spec.model, applied);
+    payload = applyFix(payload, fix);
+    res = await send(payload);
   }
   if (!res.ok) throw new Error(`${spec.model} ตอบ ${res.status}: ${(await res.text()).slice(0, 400)}`);
   return fromOpenAIResponse(await res.json());

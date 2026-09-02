@@ -4,7 +4,12 @@
 // จุดประสงค์: ถ้าตัวแปลพัง ผลเทียบโมเดลจะโกหกว่า "โมเดลนี้เรียก tool ไม่เป็น"
 // ทั้งที่ความจริงคือเราแปลคำขอผิดเอง ข้อสอบชุดนี้กันไม่ให้สรุปผิดแบบนั้น
 import { assertEquals, assertRejects, assertThrows } from "jsr:@std/assert@1";
-import { callOpenAICompatible, fromOpenAIResponse, toOpenAIMessages } from "./openai-compat.ts";
+import {
+  _resetLearnedFixes,
+  callOpenAICompatible,
+  fromOpenAIResponse,
+  toOpenAIMessages,
+} from "./openai-compat.ts";
 
 const SYSTEM = [
   { type: "text", text: "กฎ", cache_control: { type: "ephemeral" } },
@@ -144,6 +149,7 @@ const REQ = {
 };
 
 function stubFetch(handler: (url: string, body: any) => Response) {
+  _resetLearnedFixes();
   const real = globalThis.fetch;
   globalThis.fetch = ((url: any, init: any) =>
     Promise.resolve(handler(String(url), JSON.parse(String(init.body))))) as any;
@@ -195,4 +201,76 @@ Deno.test("400 เรื่องอื่นต้องโยน error พร�
     await assertRejects(() => callOpenAICompatible(SPEC, REQ), Error, "model not found");
   } finally { restore(); }
   assertEquals(calls, 1);
+});
+
+Deno.test("รุ่นที่ห้ามใช้ tool ตอน reasoning_effort ไม่ใช่ none ต้องถอยมาตั้ง none ให้เอง", async () => {
+  // อาการจริงของ gpt-5.6-luna วันที่เชื่อมครั้งแรก ถ้าไม่ปรับให้ = เรียก tool ไม่ได้เลยทั้งชุด
+  const bodies: any[] = [];
+  const restore = stubFetch((_url, body) => {
+    bodies.push(body);
+    if (body.reasoning_effort !== "none") {
+      return new Response(
+        '{"error":{"message":"Function tools with reasoning_effort are not supported for gpt-5.6-luna in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to \'none\'.","param":"reasoning_effort"}}',
+        { status: 400 },
+      );
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+  });
+  try {
+    const r = await callOpenAICompatible(SPEC, REQ);
+    assertEquals(r.content[0].text, "ok");
+  } finally { restore(); }
+  assertEquals(bodies.length, 2);
+  assertEquals(bodies[1].reasoning_effort, "none");
+  assertEquals(bodies[1].tools.length, 1);
+});
+
+Deno.test("อาการเดิมของรุ่นเดิมต้องจำได้ ไม่เสีย 400 ซ้ำทุกรอบของคำตอบเดียว", async () => {
+  const bodies: any[] = [];
+  const restore = stubFetch((_url, body) => {
+    bodies.push(body);
+    if (body.reasoning_effort !== "none") {
+      return new Response('{"error":{"param":"reasoning_effort"}}', { status: 400 });
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+  });
+  try {
+    await callOpenAICompatible(SPEC, REQ);   // รอบแรก เรียนรู้
+    await callOpenAICompatible(SPEC, REQ);   // รอบสอง ต้องยิงตรงเลย
+  } finally { restore(); }
+  assertEquals(bodies.length, 3);
+  assertEquals(bodies[2].reasoning_effort, "none");
+});
+
+Deno.test("ปรับได้สองอย่างพร้อมกัน ถ้าเจ้านั้นบ่นทีละเรื่อง", async () => {
+  const bodies: any[] = [];
+  const restore = stubFetch((_url, body) => {
+    bodies.push(body);
+    if ("max_completion_tokens" in body) {
+      return new Response('{"error":{"message":"Unsupported parameter: max_completion_tokens"}}', { status: 400 });
+    }
+    if (body.reasoning_effort !== "none") {
+      return new Response('{"error":{"param":"reasoning_effort"}}', { status: 400 });
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+  });
+  try {
+    const r = await callOpenAICompatible(SPEC, REQ);
+    assertEquals(r.content[0].text, "ok");
+  } finally { restore(); }
+  assertEquals(bodies.length, 3);
+  assertEquals(bodies[2].max_tokens, 4096);
+  assertEquals(bodies[2].reasoning_effort, "none");
+});
+
+Deno.test("400 ที่ปรับแล้วยังไม่หาย ต้องเลิกลอง ไม่ใช่วนไปเรื่อย", async () => {
+  let calls = 0;
+  const restore = stubFetch(() => {
+    calls++;
+    return new Response('{"error":{"param":"reasoning_effort"}}', { status: 400 });
+  });
+  try {
+    await assertRejects(() => callOpenAICompatible(SPEC, REQ), Error, "400");
+  } finally { restore(); }
+  assertEquals(calls, 2);
 });
