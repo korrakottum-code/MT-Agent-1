@@ -106,7 +106,7 @@ https://korrakottum-code.github.io/MT-Agent-1/ — ทำสิ่งที่�
 ## สิ่งที่ deploy อยู่บนคลาวด์
 
 - Edge Function `admin-console` — API ของ Admin Console (ไม่ได้เสิร์ฟหน้าเว็บ ดูหัวข้อด้านบน)
-- Edge Function `line-webhook` — รับ LINE webhook + AI agent (โมเดล `claude-sonnet-5`) — 21 tools
+- Edge Function `line-webhook` — รับ LINE webhook + AI agent (โมเดล `claude-sonnet-5`) — 22 tools
 - Edge Function `scheduled-jobs` — v7, 5 งานตามเวลา
 - pg_cron 5 ตัว (เวลาใน cron เป็น UTC, ไทย = UTC+7):
   `daily-summary` 11:00 · `morning-reminder` 02:00 · `weekly-summary` จันทร์ 02:00 ·
