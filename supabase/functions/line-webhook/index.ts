@@ -22,6 +22,9 @@ const anthropic = new Anthropic({
 });
 const MODEL = "claude-sonnet-5";
 const MAX_TOOL_ITERATIONS = 8;
+// นานแค่ไหนหลังบอทพูด ที่ยังนับว่าข้อความถัดมาน่าจะคุยกับบอทอยู่
+// ตั้งสั้นไว้เพราะทุกข้อความในหน้าต่างนี้ต้องเสียค่าเรียกโมเดลเพื่อตัดสินว่าจะตอบหรือเงียบ
+const FOLLOW_UP_WINDOW_MS = 3 * 60_000;
 
 // ---------------------------------------------------------------- LINE helpers
 
@@ -1151,7 +1154,8 @@ ${rosterText}
 
 type AgentOpts = {
   image?: { data: string; media_type: string } | null;
-  judgeAddressed?: boolean;
+  // "named" = เอ่ยชื่อลอย ๆ อาจแค่พูดถึง / "follow_up" = ไม่ได้เอ่ยชื่อ แต่บอทเพิ่งพูดจบ
+  judgeAddressed?: "named" | "follow_up" | null;
   file?: FilePayload | null;
   toolLog?: string[]; // ใช้ตอนรันข้อสอบ เก็บชื่อ tool ที่ถูกเรียกจริง
   // ปกติข้อความที่เพิ่งเข้ามาถูกบันทึกลง messages ไปแล้ว จึงต้องตัดตัวล่าสุดออกจากประวัติกันซ้ำ
@@ -1227,11 +1231,17 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
     ? `บทสนทนาล่าสุดในแชทนี้ (เก่า→ใหม่ ใช้เป็นบริบท):\n${history}\n\nคำสั่งล่าสุดจาก ${ctx.caller.display_name ?? "ผู้ใช้"}: ${userText}`
     : userText;
   if (opts.judgeAddressed) {
-    textContent =
-      `หมายเหตุ: ข้อความล่าสุดเอ่ยถึงชื่อคุณแต่ไม่ได้แท็กเรียกตรง ๆ อ่านบริบทแล้วตัดสินใจเอง — ` +
-      `ถ้าเขาพูดกับคุณ (ขอให้ช่วย ทักทาย ชม แซว บ่น หรือถามความเห็น) ให้ตอบ โดยเรื่องเล่น ๆ ตอบสั้นแบบมีอารมณ์ขัน 1-2 บรรทัดพอ ` +
-      `แต่ถ้าเป็นการคุยกันเองระหว่างคนอื่นที่แค่เอ่ยชื่อคุณผ่าน ๆ โดยไม่ได้พูดกับคุณ ` +
-      `ให้ตอบคำว่า SILENT คำเดียวเท่านั้น\n\n` + textContent;
+    const common =
+      `ถ้าเขาพูดกับคุณ (ขอให้ช่วย ถาม ทักทาย ชม แซว บ่น หรือถามความเห็น) ให้ตอบ ` +
+      `โดยเรื่องเล่น ๆ ตอบสั้นแบบมีอารมณ์ขัน 1-2 บรรทัดพอ ` +
+      `ถ้าไม่ได้พูดกับคุณ ให้ตอบคำว่า SILENT คำเดียวเท่านั้น`;
+    textContent = (opts.judgeAddressed === "follow_up"
+      ? `หมายเหตุ: คุณเพิ่งตอบไปในแชทนี้เมื่อครู่ ข้อความล่าสุดไม่ได้แท็กคุณแต่มาต่อทันที ` +
+        `คนมักถามต่อโดยไม่แท็กซ้ำ ถ้ามันอ่านเป็นคำถามหรือคำสั่งที่ต่อจากเรื่องที่คุยกับคุณอยู่ ให้ถือว่าพูดกับคุณ ` +
+        `แต่ถ้าเขาหันไปคุยกับคนอื่นหรือเปลี่ยนเรื่องกันเองแล้ว ให้เงียบ — ${common}`
+      : `หมายเหตุ: ข้อความล่าสุดเอ่ยถึงชื่อคุณแต่ไม่ได้แท็กเรียกตรง ๆ อ่านบริบทแล้วตัดสินใจเอง — ` +
+        `ถ้าเป็นการคุยกันเองระหว่างคนอื่นที่แค่เอ่ยชื่อคุณผ่าน ๆ โดยไม่ได้พูดกับคุณ ให้เงียบ — ${common}`
+    ) + `\n\n` + textContent;
   }
   if (opts.file?.kind === "text") {
     textContent = `เนื้อหาไฟล์ "${opts.file.name}" ที่ผู้ใช้ส่งมา:\n${opts.file.text}\n\n---\n\n${textContent}`;
@@ -1345,6 +1355,16 @@ function isNameMention(text: string): boolean {
   return /(แงว|เอ็มที|mt\s?agent)/i.test(text);
 }
 
+// ข้อความที่มีแค่ชื่อบอทล้วน ๆ ("แงว", "แงวๆ", "แงว?") คือการเรียกตรง ๆ
+// เคยปล่อยให้โมเดลตัดสินแล้วมันตอบ SILENT ใส่คนที่เรียกชื่อจริง ๆ — เรียกชื่อคือเรียก ไม่ต้องตีความ
+function isBareName(text: string): boolean {
+  if (!isNameMention(text)) return false;
+  const leftover = text
+    .replace(/(แงว|เอ็มที|mt\s?agent)/gi, "")
+    .replace(/[\s\p{P}\p{S}ๆฯ]/gu, "");
+  return leftover.length === 0;
+}
+
 async function handleEvent(event: any) {
   if (event.type !== "message") return;
   const msgType: string = event.message?.type ?? "";
@@ -1370,12 +1390,28 @@ async function handleEvent(event: any) {
 
   // เงื่อนไขการตอบ:
   // - แชทส่วนตัว: ตอบทุกข้อความและทุกรูป
-  // - ในกลุ่ม: ตอบเมื่อแท็ก หรือเอ่ยชื่อ (เอ่ยชื่อ → โมเดลตัดสินใจเองว่าควรตอบไหม)
-  const tagged = msgType === "text" && isCallingAI(text);
+  // - ในกลุ่ม: ตอบเมื่อแท็ก เรียกชื่อล้วน ๆ เอ่ยชื่อ หรือกำลังคุยต่อจากที่บอทเพิ่งพูด
+  //   (สองอย่างหลัง → โมเดลอ่านบริบทแล้วตัดสินใจเองว่าควรตอบไหม)
+  const tagged = msgType === "text" && (isCallingAI(text) || isBareName(text));
   const named = msgType === "text" && isNameMention(text);
   // รูปและไฟล์ในกลุ่มแค่เก็บไว้ก่อน รอให้คนแท็กถามถึง จะได้ไม่รบกวนทุกครั้งที่มีคนแชร์ไฟล์
   if (lineGroupId && msgType !== "text") return;
-  if (lineGroupId && !tagged && !named) return;
+
+  // ถามต่อจากคำตอบของบอทโดยไม่แท็กซ้ำเป็นเรื่องปกติของการคุยกัน — ถ้าบอทเป็นคนพูดล่าสุด
+  // และเพิ่งพูดไปไม่นาน ให้โมเดลอ่านบริบทแล้วตัดสินใจ ไม่ใช่เงียบใส่ไปเลย
+  // ผูกกับ "บอทพูดล่าสุด" ไม่ใช่แค่ช่วงเวลา เพราะพอมีคนอื่นพูดแทรก บทสนทนาก็เปลี่ยนมือไปแล้ว
+  let followUp = false;
+  if (lineGroupId && msgType === "text" && !tagged && !named) {
+    const { data: prev } = await supabase.from("messages")
+      .select("line_user_id, created_at")
+      .eq("line_group_id", chatId)
+      .neq("line_message_id", event.message.id)
+      .order("created_at", { ascending: false }).limit(1).maybeSingle();
+    followUp = Boolean(prev && prev.line_user_id === "bot" &&
+      Date.now() - new Date(prev.created_at).getTime() < FOLLOW_UP_WINDOW_MS);
+  }
+
+  if (lineGroupId && !tagged && !named && !followUp) return;
 
   const caller = await ensureUser(lineUserId, lineGroupId);
   const group = await ensureGroup(lineGroupId);
@@ -1420,7 +1456,8 @@ async function handleEvent(event: any) {
     ? `ผู้ใช้ส่งไฟล์ "${fileName}" มา อ่านเนื้อหาแล้วสรุปสั้น ๆ ว่าไฟล์นี้เกี่ยวกับอะไร มีงานหรือกำหนดส่งอะไรที่ควรบันทึกเข้าระบบบ้าง แล้วถามว่าให้สร้างงานให้เลยไหม (อย่าเพิ่งสร้างเองจนกว่าจะยืนยัน)`
     : text.replace(/@\s?(ai|mt\s?agent\s?1?)/i, "").trim() || "สวัสดี";
   const replyTo = lineGroupId ?? lineUserId;
-  const judgeAddressed = Boolean(lineGroupId && !tagged && named);
+  const judgeAddressed: "named" | "follow_up" | null =
+    !lineGroupId || tagged ? null : named ? "named" : followUp ? "follow_up" : null;
   // อ้างข้อความต้นทางเฉพาะในกลุ่ม จะได้รู้ว่าบอทตอบเรื่องไหนตอนหลายคนคุยกันพร้อมกัน
   const quoteToken: string | null = lineGroupId ? (event.message?.quoteToken ?? null) : null;
 
