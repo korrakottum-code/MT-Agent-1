@@ -107,7 +107,12 @@ Deno.test("คำตอบที่เรียก tool กลายเป็น
     }],
   });
   assertEquals(r.stop_reason, "tool_use");
-  assertEquals(r.content, [{ type: "tool_use", id: "call_1", name: "create_task", input: { title: "ทำสไลด์" } }]);
+  // ตรวจเฉพาะฟิลด์ที่ลูป tool ใช้จริง ส่วน _raw เป็นของภายในไว้ส่งคืนเจ้าของ
+  const block = r.content[0];
+  assertEquals(block.type, "tool_use");
+  assertEquals(block.id, "call_1");
+  assertEquals(block.name, "create_task");
+  assertEquals(block.input, { title: "ทำสไลด์" });
 });
 
 Deno.test("arguments ที่ไม่ใช่ JSON ต้องไม่ทำทั้งเทิร์นล่ม ให้ tool ตอบ error กลับไปแทน", () => {
@@ -285,4 +290,29 @@ Deno.test("token ที่อ่านจาก cache ต้องไม่ถ�
   assertEquals(r.usage.input_tokens, 7429);
   assertEquals(r.usage.cache_read_input_tokens, 7294);
   assertEquals(r.usage.input_tokens + r.usage.cache_read_input_tokens, 14723);
+});
+
+Deno.test("ของแถมที่เจ้านั้นแนบมากับ tool call ต้องถูกส่งคืนครบ ไม่ใช่ประกอบขึ้นใหม่", () => {
+  // อาการจริงของ gemini-3.7-flash: ขาด thought_signature แล้ว 400 ตั้งแต่รอบที่สอง
+  const call = {
+    id: "call_1",
+    type: "function",
+    function: { name: "create_task", arguments: '{"title":"ทำสไลด์"}' },
+    extra_content: { google: { thought_signature: "sig-abc" } },
+  };
+  const r = fromOpenAIResponse({ choices: [{ message: { tool_calls: [call] } }] });
+  const back = toOpenAIMessages(SYSTEM, [{ role: "assistant", content: r.content }]);
+  assertEquals(back[1].tool_calls, [call]);
+});
+
+Deno.test("tool_use ที่ไม่มีของแถม ยังประกอบขึ้นใหม่ได้เหมือนเดิม", () => {
+  const back = toOpenAIMessages(SYSTEM, [{
+    role: "assistant",
+    content: [{ type: "tool_use", id: "tu_1", name: "get_my_tasks", input: { status: "TODO" } }],
+  }]);
+  assertEquals(back[1].tool_calls, [{
+    id: "tu_1",
+    type: "function",
+    function: { name: "get_my_tasks", arguments: '{"status":"TODO"}' },
+  }]);
 });

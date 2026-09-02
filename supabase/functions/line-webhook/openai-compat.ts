@@ -21,11 +21,17 @@ export function toOpenAIMessages(system: any[], messages: any[]): any[] {
     if (m.role === "assistant") {
       const blocks = Array.isArray(m.content) ? m.content : [{ type: "text", text: m.content }];
       const text = blocks.filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
-      const calls = blocks.filter((b: any) => b.type === "tool_use").map((b: any) => ({
-        id: b.id,
-        type: "function",
-        function: { name: b.name, arguments: JSON.stringify(b.input ?? {}) },
-      }));
+      // ส่งคืนก้อนเดิมที่เขาให้มาทั้งก้อนถ้ามี ไม่ใช่ประกอบขึ้นใหม่จากชื่อกับ arguments
+      // Gemini 3 แนบ thought_signature มากับ tool call แล้วบังคับให้ส่งกลับไปด้วย
+      // ถ้าประกอบใหม่ ฟิลด์นั้นหายและมันตอบ 400 ตั้งแต่รอบที่สองของทุกคำตอบที่ใช้ tool
+      // การคืนของเดิมทั้งก้อนกันปัญหาคลาสนี้ทั้งหมด ไม่ต้องรู้ว่าแต่ละเจ้าแนบอะไรมาบ้าง
+      const calls = blocks.filter((b: any) => b.type === "tool_use").map((b: any) =>
+        b._raw ?? {
+          id: b.id,
+          type: "function",
+          function: { name: b.name, arguments: JSON.stringify(b.input ?? {}) },
+        }
+      );
       out.push({ role: "assistant", content: text || null, ...(calls.length ? { tool_calls: calls } : {}) });
       continue;
     }
@@ -72,7 +78,8 @@ export function fromOpenAIResponse(data: any): any {
     let input: any = {};
     // โมเดลส่ง arguments มาเป็นสตริง JSON บางทีก็พัง ให้ tool ตอบ error กลับไปดีกว่าทั้งเทิร์นล่ม
     try { input = JSON.parse(call.function?.arguments || "{}"); } catch { input = {}; }
-    content.push({ type: "tool_use", id: call.id, name: call.function?.name, input });
+    // _raw คือก้อนดิบของเจ้านั้น เก็บไว้ส่งคืนตอนต่อบทสนทนา ส่วนที่เหลือของระบบไม่ต้องรู้จักมัน
+    content.push({ type: "tool_use", id: call.id, name: call.function?.name, input, _raw: call });
   }
   const stop = msg.refusal || choice.finish_reason === "content_filter"
     ? "refusal"
