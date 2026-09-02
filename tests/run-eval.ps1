@@ -22,6 +22,9 @@ $pass = 0; $fail = 0; $failed = @(); $requestErrors = 0
 foreach ($c in $cases) {
   $payload = @{ as_user = $c.as_user; message = $c.message; model = $Model }
   if ($c.in_group) { $payload.in_group = $c.in_group }
+  # judge = pretend the group message did not tag the bot, so the model must decide
+  # for itself whether to answer or stay quiet. Assert on SILENT in the answer.
+  if ($c.judge) { $payload.judge = $c.judge }
   $bodyBytes = [Text.Encoding]::UTF8.GetBytes(($payload | ConvertTo-Json -Compress))
 
   try {

@@ -1485,7 +1485,7 @@ async function handleEvent(event: any) {
 // โหมดข้อสอบ: รัน agent จริงด้วยตัวตนที่ระบุ แต่ไม่ส่งเข้า LINE และไม่บันทึกลง messages
 // ใช้ตรวจว่าการแก้แต่ละครั้งทำให้พฤติกรรมเดิมพังหรือไม่ ก่อนปล่อยให้ทีมใช้
 async function runEval(body: string): Promise<Response> {
-  const { as_user, message, in_group, model: modelKey } = JSON.parse(body);
+  const { as_user, message, in_group, model: modelKey, judge } = JSON.parse(body);
   const evalModel = EVAL_MODELS[String(modelKey ?? "sonnet").toLowerCase()];
   if (!evalModel) {
     return Response.json(
@@ -1511,8 +1511,11 @@ async function runEval(body: string): Promise<Response> {
   const started = Date.now();
   const startedIso = new Date().toISOString();
   try {
+    // judge = จำลองกรณีที่ในกลุ่มไม่ได้แท็กบอท แล้วต้องให้โมเดลตัดสินเองว่าจะตอบหรือเงียบ
+    // ข้อสอบตรวจได้ด้วยการดูว่าคำตอบขึ้นต้นด้วย SILENT หรือไม่
     const answer = await runAgent(message, ctx, chatId, {
       toolLog, skipLatestMessage: false, purpose: "eval", model: evalModel,
+      judgeAddressed: judge === "named" || judge === "follow_up" ? judge : null,
     });
 
     // เก็บกวาดของที่ข้อสอบสร้างไว้ ไม่ให้ไปรกรายการงานจริงของทีม

@@ -16,6 +16,11 @@ on:
         type: choice
         options: [sonnet, haiku]
         default: sonnet
+      cases:
+        description: "Which case file to run"
+        type: choice
+        options: ["tests/cases.json", "tests/cases-judge.json"]
+        default: "tests/cases.json"
 
 jobs:
   eval:
@@ -29,13 +34,14 @@ jobs:
           TEST_KEY: ${{ secrets.CRON_SECRET }}
           # push runs leave this empty, so the script's own default (sonnet) applies
           EVAL_MODEL: ${{ inputs.model }}
+          EVAL_CASES: ${{ inputs.cases }}
         run: |
           if (-not $env:TEST_KEY) {
             Write-Host "::error::CRON_SECRET repository secret is not set - add it in Settings > Secrets and variables > Actions"
             exit 1
           }
-          if ($env:EVAL_MODEL) {
-            ./tests/run-eval.ps1 -TestKey $env:TEST_KEY -Model $env:EVAL_MODEL
-          } else {
-            ./tests/run-eval.ps1 -TestKey $env:TEST_KEY
-          }
+          # ห้ามใช้ชื่อ $args มันเป็นตัวแปรสงวนของ PowerShell
+          $evalArgs = @{ TestKey = $env:TEST_KEY }
+          if ($env:EVAL_MODEL) { $evalArgs.Model = $env:EVAL_MODEL }
+          if ($env:EVAL_CASES) { $evalArgs.CasesPath = (Resolve-Path $env:EVAL_CASES).Path }
+          ./tests/run-eval.ps1 @evalArgs

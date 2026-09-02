@@ -1,0 +1,74 @@
+[
+  {
+    "id": "judge-followup-thread",
+    "why": "ถามต่อจากเรื่องที่เพิ่งคุยกับบอท ไม่มีใครแท็กซ้ำกลางบทสนทนา ต้องตอบ",
+    "as_user": "ตั้ม",
+    "in_group": "AA2",
+    "judge": "follow_up",
+    "message": "แล้วกลุ่ม AA1 ล่ะ",
+    "forbid_answer_matches": "^\\s*SILENT"
+  },
+  {
+    "id": "judge-followup-new-question",
+    "why": "เคสจริงที่พลาดมาแล้ว — เปลี่ยนเรื่องแต่ยังถามบอทอยู่ หลังบอทเพิ่งตอบ 2 วินาที",
+    "as_user": "ตั้ม",
+    "in_group": "AA2",
+    "judge": "follow_up",
+    "message": "เชียงใหม่เที่ยวไหนดี",
+    "forbid_answer_matches": "^\\s*SILENT"
+  },
+  {
+    "id": "judge-followup-work-question",
+    "why": "ถามข้อมูลที่ต้องใช้ tool ต่อจากบทสนทนา ต้องตอบและต้องไปดึงจริง",
+    "as_user": "ตั้ม",
+    "in_group": "AA2",
+    "judge": "follow_up",
+    "message": "แล้วงานที่ค้างอยู่มีอะไรบ้าง",
+    "forbid_answer_matches": "^\\s*SILENT"
+  },
+  {
+    "id": "judge-followup-short-reply",
+    "why": "ตอบรับสั้น ๆ ต่อจากที่บอทเสนอ ('เอาอันแรก') ต้องเข้าใจว่าพูดกับบอท",
+    "as_user": "ตั้ม",
+    "in_group": "AA2",
+    "judge": "follow_up",
+    "message": "เอาอันแรกเลย",
+    "forbid_answer_matches": "^\\s*SILENT"
+  },
+  {
+    "id": "judge-followup-to-colleague",
+    "why": "หันไปสั่งงานคนอื่นโดยเอ่ยชื่อเขา ไม่ได้พูดกับบอท ต้องเงียบ",
+    "as_user": "XXXXXX",
+    "in_group": "AA2",
+    "judge": "follow_up",
+    "message": "ตั้มส่งไฟล์ราคาให้ลูกค้าด้วยนะ",
+    "expect_answer_matches": "^\\s*SILENT"
+  },
+  {
+    "id": "judge-followup-peer-chat",
+    "why": "คุยกันเองระหว่างคนในทีม บอทไม่ควรแทรก ต้องเงียบ",
+    "as_user": "XXXXXX",
+    "in_group": "AA2",
+    "judge": "follow_up",
+    "message": "โอเคเดี๋ยวผมส่งให้พี่ตอนบ่ายนะครับ",
+    "expect_answer_matches": "^\\s*SILENT"
+  },
+  {
+    "id": "judge-named-passing",
+    "why": "พูดถึงบอทกับคนอื่น ไม่ได้พูดกับบอท ต้องเงียบ",
+    "as_user": "XXXXXX",
+    "in_group": "AA2",
+    "judge": "named",
+    "message": "เมื่อวานลองใช้แงวแล้ว ตอบช้าไปหน่อยนะ",
+    "expect_answer_matches": "^\\s*SILENT"
+  },
+  {
+    "id": "judge-named-direct",
+    "why": "เอ่ยชื่อแล้วขอให้ช่วยตรง ๆ ต้องตอบ",
+    "as_user": "ตั้ม",
+    "in_group": "AA2",
+    "judge": "named",
+    "message": "แงวช่วยดูหน่อยว่ามีงานเลยกำหนดไหม",
+    "forbid_answer_matches": "^\\s*SILENT"
+  }
+]
