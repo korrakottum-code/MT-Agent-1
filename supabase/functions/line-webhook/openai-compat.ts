@@ -78,13 +78,17 @@ export function fromOpenAIResponse(data: any): any {
     ? "refusal"
     : (msg.tool_calls?.length ? "tool_use" : "end_turn");
   const u = data.usage ?? {};
+  // สองค่ายนับคนละแบบ: prompt_tokens ของ OpenAI รวม token ที่อ่านจาก cache มาแล้ว
+  // ส่วน input_tokens ของ Anthropic แยกออกจากกัน ต้องลบออกให้เหลือความหมายเดียวกัน
+  // ไม่งั้นต้นทุนของโมเดลค่ายอื่นจะถูกนับซ้ำส่วนที่ cache แล้วรายงานว่าแพงเกินจริง
+  const cached = u.prompt_tokens_details?.cached_tokens ?? 0;
   return {
     content,
     stop_reason: stop,
     usage: {
-      input_tokens: u.prompt_tokens ?? 0,
+      input_tokens: Math.max(0, (u.prompt_tokens ?? 0) - cached),
       output_tokens: u.completion_tokens ?? 0,
-      cache_read_input_tokens: u.prompt_tokens_details?.cached_tokens ?? 0,
+      cache_read_input_tokens: cached,
       cache_creation_input_tokens: 0,
     },
   };

@@ -274,3 +274,15 @@ Deno.test("400 ที่ปรับแล้วยังไม่หาย ต�
   } finally { restore(); }
   assertEquals(calls, 2);
 });
+
+Deno.test("token ที่อ่านจาก cache ต้องไม่ถูกนับซ้ำในช่อง input", () => {
+  // OpenAI นับ cached รวมอยู่ใน prompt_tokens แล้ว ส่วน Anthropic แยกกัน
+  // ถ้าไม่ลบออก ต้นทุนของโมเดลค่ายอื่นจะพองขึ้นและตัดสินใจเลือกโมเดลผิด
+  const r = fromOpenAIResponse({
+    choices: [{ message: { content: "ok" } }],
+    usage: { prompt_tokens: 14723, completion_tokens: 111, prompt_tokens_details: { cached_tokens: 7294 } },
+  });
+  assertEquals(r.usage.input_tokens, 7429);
+  assertEquals(r.usage.cache_read_input_tokens, 7294);
+  assertEquals(r.usage.input_tokens + r.usage.cache_read_input_tokens, 14723);
+});
