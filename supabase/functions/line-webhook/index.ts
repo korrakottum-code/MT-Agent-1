@@ -1402,11 +1402,15 @@ async function handleEvent(event: any) {
   // ผูกกับ "บอทพูดล่าสุด" ไม่ใช่แค่ช่วงเวลา เพราะพอมีคนอื่นพูดแทรก บทสนทนาก็เปลี่ยนมือไปแล้ว
   let followUp = false;
   if (lineGroupId && msgType === "text" && !tagged && !named) {
-    const { data: prev } = await supabase.from("messages")
-      .select("line_user_id, created_at")
+    // ดึงมา 2 แถวแล้วข้ามข้อความปัจจุบันเอง (มันเพิ่งถูกบันทึกไปด้านบน)
+    // ห้ามกรองด้วย .neq("line_message_id", ...) เพราะคำตอบของบอทเก็บ line_message_id เป็น NULL
+    // และ NULL <> x ใน SQL ได้ NULL ไม่ใช่ true — แถวของบอทจะถูกกรองทิ้งไปด้วย
+    // ซึ่งเป็นแถวเดียวที่เงื่อนไขนี้ต้องการเห็น ทำให้ followUp เป็น false ตลอดกาล
+    const { data: prevRows } = await supabase.from("messages")
+      .select("line_user_id, line_message_id, created_at")
       .eq("line_group_id", chatId)
-      .neq("line_message_id", event.message.id)
-      .order("created_at", { ascending: false }).limit(1).maybeSingle();
+      .order("created_at", { ascending: false }).limit(2);
+    const prev = (prevRows ?? []).find((r: any) => r.line_message_id !== event.message.id);
     followUp = Boolean(prev && prev.line_user_id === "bot" &&
       Date.now() - new Date(prev.created_at).getTime() < FOLLOW_UP_WINDOW_MS);
   }
