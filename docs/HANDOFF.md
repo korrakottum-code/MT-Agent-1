@@ -1,37 +1,32 @@
-# MT Agent 1 — เอกสารส่งต่อ (อัปเดต 1 ก.ย. 2026)
+# MT Agent 1 — เอกสารส่งต่อ (อัปเดต 2 ก.ย. 2026)
 
 เอกสารนี้มีทุกอย่างที่ต้องรู้เพื่อทำงานต่อจากเครื่องใหม่
 
-## ⚠️ ติดอยู่ตรงนี้ — อ่านก่อนเริ่มงาน
+## ✅ ปัญหาเครดิต Anthropic — แก้แล้ว (1 ก.ย. 2026)
 
-**บอทใช้งานไม่ได้ทั้งระบบ** ทุกข้อความจะได้ "ขอโทษค่า ระบบขัดข้องชั่วคราว"
-เพราะ Anthropic API ตอบว่า `Your credit balance is too low` ทั้งที่หน้า Billing แสดงยอด US$5.01
-และเพดานรายเดือนใช้ไปแค่ 1% — สองอย่างนี้ขัดกันเอง
+**สาเหตุคือ API key ตัวเดิม ไม่ใช่เครดิตและไม่ใช่บัญชี** แม้ error จะขึ้นว่า
+`Your credit balance is too low` ก็ตาม สร้าง key ใหม่ที่ระดับ **organization (ไม่ผูก workspace)**
+แล้วใส่ใน Supabase → Edge Functions → Secrets ก็ใช้ได้ทันที ไม่ต้อง deploy ใหม่
 
-**ต้องทำก่อนเป็นอันดับแรก: เพิกถอน API key ที่ขึ้นต้นด้วย `sk-ant-api03-0hjWCj`**
-มันหลุดอยู่ในภาพหน้าจอระหว่างการไล่ปัญหา ถือว่าไม่ปลอดภัยแล้ว ลบทิ้งแล้วสร้างใหม่
+หลักฐานว่ากลับมาแล้ว — ใส่ key ใหม่ 17:04 UTC แล้วคุยกับบอทใน LINE ได้จริงตอน 17:10 UTC
+บอทตอบเป็นบุคลิกปกติ ไม่ใช่ "ขอโทษค่า ระบบขัดข้องชั่วคราว" และ `token_usage` บันทึกครบ
+2 แถวตรงกับ 2 คำตอบพอดี
 
-**ตรวจแล้วว่าไม่ใช่สาเหตุ** (ไม่ต้องไล่ซ้ำ)
+**บทเรียน: `credit balance is too low` ไม่ได้แปลว่าเงินหมดเสมอไป** ถ้าหน้า Billing ยืนยันว่ามีเงิน
+ให้เปลี่ยน key เป็นแบบ org-level ก่อนเป็นอย่างแรก อย่าเสียเวลาไล่เรื่องเครดิต
 
-| ตรวจอะไร | ผล |
-|---|---|
-| key ผิดหรือหมดอายุ | ไม่ใช่ — ถ้าผิดจะได้ 401 แต่เราได้ 400 เรื่องเครดิต แปลว่า auth ผ่านแล้ว |
-| `ANTHROPIC_WORKSPACE_ID` ชี้ผิด | ไม่ใช่ — ลอง deploy เวอร์ชันที่ไม่ส่ง header เลย ผลเหมือนเดิม |
-| secret ค้างในหน่วยความจำ | ไม่ใช่ — บังคับ deploy ใหม่หลายรอบแล้ว |
-| แก้ secret ผิดโปรเจกต์ Supabase | ไม่ใช่ — ยืนยันแล้วว่าเป็น `ssjsjvcbulclnvlrkdsj` |
-| โค้ดเรา | ไม่ใช่ — error มาจาก Anthropic ตรง ๆ |
+สิ่งที่เคยไล่แล้วว่าไม่ใช่สาเหตุ (เก็บไว้กันไล่ซ้ำถ้าอาการกลับมา): `ANTHROPIC_WORKSPACE_ID` ชี้ผิด,
+secret ค้างในหน่วยความจำ, แก้ secret ผิดโปรเจกต์, โค้ดเรา
 
-**ขั้นต่อไป** ให้เปิด https://console.anthropic.com/workbench แล้วส่งข้อความทดสอบ
-Workbench ใช้เครดิตก้อนเดียวกับ API โดยไม่ต้องใช้ key
+key เก่าที่หลุดในภาพหน้าจอ (`sk-ant-api03-0hjWCj`) **เพิกถอนแล้ว** เมื่อ 2 ก.ย. 2026
 
-- ถ้า Workbench ตอบได้ → เงินใช้ได้จริง ปัญหาอยู่ที่ key ให้สร้าง key ใหม่ที่ระดับ organization
-  (ไม่ผูก workspace) แล้วใส่ใน Supabase → Edge Functions → Secrets
-- ถ้า Workbench ฟ้องเรื่องเครดิตเหมือนกัน → เป็นปัญหาฝั่งบัญชี ให้แจ้ง Anthropic support
-  พร้อม request id เช่น `req_011Ced4FVpsg4BnJGe7XYjP3` และภาพหน้า Billing ที่แสดงยอดคงเหลือ
+### ยืนยันหลังแก้แล้ว (2 ก.ย. 2026)
 
-**โค้ดทั้งหมดเสร็จและ deploy ขึ้นคลาวด์แล้ว ไม่มีอะไรค้าง** รอแค่ API ยิงผ่าน
-พองานกลับมาได้ ให้รัน `tests/run-eval.ps1 -Model haiku` หนึ่งรอบ ตามด้วย `-Model sonnet`
-แล้วดึงตัวเลขจากตาราง `token_usage` มาเทียบว่า prompt caching ประหยัดได้เท่าไร (ดูหัวข้อด้านล่าง)
+- **ข้อสอบผ่าน 11/11 ด้วย sonnet** รันบน GitHub Actions (run `33576378422`)
+- **prompt caching ทำงานจริง** — eval: cache hits 173,250 เทียบกับ input เต็มราคา 94,679 (65%)
+  · chat: 57,750 เทียบกับ 41,276 (58%) แปลว่าราว 6 ใน 10 ของ token ไม่โดนคิดราคาเต็ม
+  (ถ้าเห็น `cache_read_tokens` = 0 ในไม่กี่ครั้งแรกหลังเปลี่ยน key ถือเป็นเรื่องปกติ
+  ช่วงนั้นยังเป็นจังหวะเขียน cache ไม่ใช่อ่าน — อย่าเพิ่งสรุปว่าตั้งไม่ติด)
 
 ## เริ่มงานจากเครื่องใหม่
 
@@ -47,6 +42,14 @@ npx supabase login
 
 ค่า `CRON_SECRET` ที่ต้องใช้รันข้อสอบ ดูได้จาก Supabase Dashboard → Edge Functions → Secrets
 ไม่มีเก็บไว้ใน repo โดยตั้งใจ
+
+**ถ้าเป็นเครื่อง Mac/Linux ต้องลง PowerShell ก่อน** เพราะ `tests/run-eval.ps1` เขียนไว้ตอนอยู่ Windows
+
+```bash
+brew install powershell
+```
+
+เป็น formula ไม่ใช่ cask จึงไม่ต้องใช้ sudo แต่ลาก `dotnet` มาด้วย (~760MB) ใช้เวลาสักพัก
 
 ## บัญชีและทรัพยากร
 
@@ -68,10 +71,12 @@ npx supabase login
 ```text
 LINE_CHANNEL_SECRET
 LINE_CHANNEL_ACCESS_TOKEN
-ANTHROPIC_API_KEY
-ANTHROPIC_WORKSPACE_ID   (จำเป็น เพราะ API key เป็นแบบ identity-linked)
+ANTHROPIC_API_KEY        (แบบ organization ไม่ผูก workspace)
 CRON_SECRET              (ค่าเดียวกันนี้ฝังอยู่ในตาราง cron.job ของ database)
 ```
+
+**ไม่มี `ANTHROPIC_WORKSPACE_ID` แล้ว** — ตั้งแต่ commit `47a7e50` โค้ดส่ง workspace header
+เฉพาะเมื่อมีค่านี้ พอ key เป็นแบบ org-level ก็ไม่ต้องตั้งอีกต่อไป อย่าใส่กลับเข้าไปโดยไม่จำเป็น
 
 ## สิ่งที่ deploy อยู่บนคลาวด์
 
@@ -151,8 +156,16 @@ order by input desc;
 pwsh -File tests/run-eval.ps1 -TestKey <CRON_SECRET> -Only tool-my-tasks
 ```
 
-ถ้าขึ้นว่า `credit balance is too low` ให้ไปเติมเงินที่ Anthropic Console → Plans & Billing
-โค้ดไม่ได้พัง และไม่ต้อง deploy ใหม่ เติมแล้วใช้ได้ทันที
+ถ้าขึ้นว่า `credit balance is too low` **อย่าเพิ่งเชื่อว่าเงินหมด** เคสวันที่ 1 ก.ย. ขึ้น error นี้
+ทั้งที่หน้า Billing มีเงินอยู่ และสาเหตุจริงคือตัว key เอง ลำดับที่ควรไล่:
+
+1. เปิดหน้า Billing ดูยอดจริง — ถ้าไม่มีเงินก็เติม จบ
+2. ถ้ามีเงินแต่ยังฟ้อง → สร้าง key ใหม่แบบ **organization (ไม่ผูก workspace)** แล้วเปลี่ยน secret
+3. ถ้ายังไม่หาย → ทดสอบที่ https://console.anthropic.com/workbench ซึ่งใช้เครดิตก้อนเดียวกัน
+   โดยไม่ต้องใช้ key ถ้า Workbench ก็ฟ้องด้วยแปลว่าเป็นปัญหาฝั่งบัญชี ให้แจ้ง Anthropic support
+   พร้อม request id (เช่น `req_011Ced4FVpsg4BnJGe7XYjP3`) และภาพหน้า Billing
+
+ทุกกรณีโค้ดไม่ได้พังและไม่ต้อง deploy ใหม่ — เปลี่ยน secret แล้วมีผลทันที
 
 **ข้อสอบตกเพราะคำตอบภาษาไทย** → ดูก่อนว่า regex ไปแมตช์รูปปฏิเสธหรือเปล่า
 เช่น คำต้องห้าม "เป็นคนจริง" จะไปโดน "ไม่ได้เป็นคนจริง" ซึ่งเป็นคำตอบที่ถูก
@@ -161,10 +174,14 @@ pwsh -File tests/run-eval.ps1 -TestKey <CRON_SECRET> -Only tool-my-tasks
 ## สถานะตามคู่มือ (docs/BUILD_GUIDE.md)
 
 - ลำดับการสร้างข้อ 1–17 (คู่มือข้อ 22): ผ่านครบ
-- MVP 0.1 Definition of Done: ผ่าน เหลือข้อเดียว — ยังไม่ได้ทดสอบว่า EMPLOYEE ถูกปฏิเสธเมื่อขอดูงานคนอื่น (ยังไม่มีพนักงานจริงในระบบ)
-- MVP 0.2: ทำแล้ว 5/10 — Daily Summary, Search Message, Search Task, Task Reminder, Overdue Alert
-- MVP 0.2 ที่เหลือ: Event Extraction (แม่ของ Auto Task/Decision/Deadline Detection) และ Weekly Summary
-- MVP 0.3 Corporate Memory: ยังไม่เริ่ม (ต้องรอ Event Extraction + ข้อมูลจริงสะสม)
+- MVP 0.1 Definition of Done: **ผ่านครบ 100%** — ข้อสุดท้าย (EMPLOYEE ถูกปฏิเสธเมื่อขอดูงานคนอื่น)
+  พิสูจน์แล้วด้วยข้อสอบ `permission-block` ซึ่งยิงด้วยบัญชี FA ที่เป็น EMPLOYEE จริงในระบบ
+  ไม่ใช่ผู้ใช้สมมติ — ผ่านในรอบ 2 ก.ย. 2026
+- MVP 0.2: **ผ่านครบ 10/10** — Daily Summary, Weekly Summary, Search Message, Search Task,
+  Task Reminder, Overdue Alert, Event Extraction, Auto Task / Decision / Deadline Detection
+- MVP 0.3 Corporate Memory: ~20% — มีโครงเก็บ (ตาราง `events`) และค้นย้อนหลังด้วยคำได้แล้ว
+  ที่เหลือคือสรุปความรู้ข้ามกลุ่ม และทำดัชนีเอกสารที่ส่งเข้ามา (ควรรอข้อมูลจริงสะสมก่อน)
+- MVP 1.0: ~13% — รายละเอียดรายข้ออยู่ใน [PROGRESS.md](PROGRESS.md)
 
 ## ที่เบี่ยงจากคู่มือโดยตั้งใจ
 
@@ -194,7 +211,11 @@ pwsh -File tests/run-eval.ps1 -TestKey <CRON_SECRET> -Only tool-my-tasks
 
 ## งานที่ค้างอยู่ (เรียงตามที่แนะนำ)
 
-1. เอาบอทเข้ากลุ่มงานจริง 2–3 กลุ่ม แล้วสั่ง `แงว ตั้งชื่อกลุ่มนี้ว่า ...` (ต้องเป็น ADMIN)
-2. ชวนทีมกดเพิ่ม OA เป็นเพื่อน ไม่งั้นรับ DM และการแจ้งเตือนส่วนตัวไม่ได้
-3. ~~ตั้ง role หัวหน้าทีมเป็น MANAGER~~ — ตั้ง XXXXXX เป็น MANAGER แล้วเมื่อ 1 ก.ย. 2026
-4. ผูกบัญชี user "แพรว" ที่ยังเป็น `pending:` กับ LINE user id จริง
+1. เฝ้าดูค่าใช้จ่าย — ข้อความเดียวกินราว 6,000 input tokens และตอนนี้บอทอยู่ในกลุ่มงานจริงแล้ว
+   caching ช่วยได้ราวครึ่งหนึ่งแต่เครดิตเหลือไม่มาก ควรเช็คอัตราการเผาสัก 2–3 วันแรก
+   ดูด้วยคำสั่ง SQL ในหัวข้อ "ดูว่าเงินหมดไปกับอะไร"
+2. MVP 0.3 ที่เหลือ: สรุปความรู้ข้ามกลุ่ม + ทำดัชนีเอกสาร (รอ `events` สะสมจากกลุ่มจริงก่อน)
+
+ปิดไปแล้ว: ~~ตั้ง role หัวหน้าทีมเป็น MANAGER~~ (1 ก.ย.) · ~~เอาบอทเข้ากลุ่มงานจริง~~ ·
+~~ชวนทีมเพิ่ม OA เป็นเพื่อน~~ · ~~ทดสอบ EMPLOYEE ถูกปฏิเสธ~~ (ผ่านด้วยข้อสอบ `permission-block`) ·
+~~ผูกบัญชี "แพรว"~~ (เป็นพนักงานสมมติ ปิดใช้งานแล้ว `is_active = false` ไม่ต้องผูก) — ทั้งหมด 2 ก.ย. 2026
