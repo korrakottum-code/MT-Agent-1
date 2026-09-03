@@ -1579,7 +1579,25 @@ async function runEval(body: string): Promise<Response> {
       .from("groups").select("line_group_id, group_name").eq("is_active", true).limit(50);
     const { data: persona } = await supabase.from("org_settings")
       .select("value").eq("key", "bot_persona").maybeSingle();
+    // บริบทข้ามแชทเป็นชิ้นสุดท้ายที่โพรบก่อนหน้ายังไม่ได้ใส่ ประกอบให้เหมือนตอนตอบจริง
+    const { data: elsewhere } = await supabase.from("messages")
+      .select("line_group_id, message_text, created_at")
+      .eq("line_user_id", caller.line_user_id)
+      .neq("line_group_id", chatId)
+      .gte("created_at", new Date(Date.now() - 6 * 3600_000).toISOString())
+      .order("created_at", { ascending: false }).limit(6);
+    const groupNameOf = new Map((allGroups ?? []).map((g: any) => [g.line_group_id, g.group_name]));
+    const crossChat = (elsewhere ?? []).length > 0
+      ? `\n\nสิ่งที่ ${caller.display_name ?? "ผู้ใช้คนนี้"} เพิ่งคุยกับคุณในแชทอื่นเมื่อไม่กี่ชั่วโมงก่อน:\n` +
+        (elsewhere ?? []).reverse()
+          .map((m: any) => `- [${groupNameOf.get(m.line_group_id) ?? "แชทส่วนตัว"}] ${m.message_text}`)
+          .join("\n")
+      : "";
     const realSystem: any = [
+      { type: "text", text: SYSTEM_RULES },
+      { type: "text", text: buildContext(ctx, roster ?? [], allGroups ?? [], persona?.value ?? null, crossChat) },
+    ];
+    const noCross: any = [
       { type: "text", text: SYSTEM_RULES },
       { type: "text", text: buildContext(ctx, roster ?? [], allGroups ?? [], persona?.value ?? null, "") },
     ];
@@ -1605,6 +1623,12 @@ async function runEval(body: string): Promise<Response> {
     report.push(`มี tool + system จริง + ประวัติทั้งก้อน: ${await isBlocked(realSystem, all) ? "โดนบล็อก" : "ผ่าน"}`);
     report.push(`ไม่มี tool + system จริง + ประวัติทั้งก้อน: ${await isBlocked(realSystem, all, false) ? "โดนบล็อก" : "ผ่าน"}`);
     report.push(`มี tool + system สั้น + ประวัติทั้งก้อน: ${await isBlocked(tiny, all) ? "โดนบล็อก" : "ผ่าน"}`);
+    report.push(`บริบทข้ามแชท ${crossChat.length} ตัวอักษร`);
+    report.push(`มี tool + system ไม่มีข้ามแชท + ประวัติ: ${await isBlocked(noCross, all) ? "โดนบล็อก" : "ผ่าน"}`);
+    // ยิงซ้ำชุดเดิมหลายครั้ง เพราะถ้าผลไม่เหมือนกันทุกครั้ง แปลว่า filter ไม่ได้ตัดสินจากเนื้อหาอย่างเดียว
+    let hit = 0;
+    for (let k = 0; k < 5; k++) if (await isBlocked(realSystem, all)) hit++;
+    report.push(`ยิงชุดเดียวกัน 5 ครั้ง โดนบล็อก ${hit} ครั้ง`);
 
     // ใส่ประวัติทีละบรรทัดใต้ system ชุดจริง เพื่อดูว่าเริ่มโดนตอนถึงบรรทัดไหน
     let flipped = false;
