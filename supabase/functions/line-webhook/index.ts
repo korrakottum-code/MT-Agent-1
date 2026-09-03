@@ -1241,6 +1241,8 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
     { type: "text", text: SYSTEM_RULES, cache_control: { type: "ephemeral" } },
     { type: "text", text: buildContext(ctx, roster ?? [], allGroups ?? [], persona?.value ?? null, crossChat) },
   ];
+  // เก็บรุ่นที่ไม่มีประวัติไว้ด้วย เผื่อโมเดลบล็อกทั้ง prompt ทิ้งแล้วต้องลองใหม่แบบสั้นลง
+  const textWithoutHistory = userText;
   let textContent = history
     ? `บทสนทนาล่าสุดในแชทนี้ (เก่า→ใหม่ ใช้เป็นบริบท):\n${history}\n\nคำสั่งล่าสุดจาก ${ctx.caller.display_name ?? "ผู้ใช้"}: ${userText}`
     : userText;
@@ -1298,14 +1300,30 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
   // นับ token รวมทุกรอบของคำตอบเดียว แล้วบันทึกครั้งเดียวตอนจบ ไม่ว่าจะจบด้วยทางไหน
   const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, iterations: 0 };
 
+  // โมเดลบางค่ายมี filter ที่บล็อกทั้ง prompt ทิ้งก่อนจะได้เริ่มตอบ และตั้งค่าปิดไม่ได้
+  // ของที่ยาวที่สุดใน prompt คือประวัติบทสนทนา ตัดออกแล้วลองใหม่หนึ่งครั้งดีกว่าเงียบใส่ผู้ใช้
+  // ถ้ายังโดนอีกก็ปล่อยให้ error ขึ้นไป จะได้รู้ว่าไม่ใช่เพราะประวัติ
+  let triedWithoutHistory = false;
+
   try {
   for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
-    const response: any = await createMessage(spec, {
-      max_tokens: 4096,
-      system,
-      tools: TOOLS,
-      messages,
-    });
+    let response: any;
+    try {
+      response = await createMessage(spec, {
+        max_tokens: 4096,
+        system,
+        tools: TOOLS,
+        messages,
+      });
+    } catch (e) {
+      if ((e as any)?.name !== "PromptBlocked" || triedWithoutHistory || !history) throw e;
+      triedWithoutHistory = true;
+      console.error("โมเดลบล็อก prompt ทิ้ง — ลองใหม่โดยตัดประวัติบทสนทนาออก");
+      messages.length = 0;
+      messages.push({ role: "user", content: textWithoutHistory });
+      i--;
+      continue;
+    }
 
     const u = response.usage ?? {};
     usage.iterations++;

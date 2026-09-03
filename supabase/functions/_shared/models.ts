@@ -435,8 +435,19 @@ export async function callGemini(spec: ModelSpec, req: any): Promise<any> {
   if (!res.ok) throw new Error(`${spec.model} ตอบ ${res.status}: ${(await res.text()).slice(0, 400)}`);
 
   const data = await res.json();
+
+  // บล็อกทั้ง prompt ตั้งแต่ยังไม่เริ่มตอบ — ไม่มี candidates กลับมาเลย มีแต่เหตุผล
+  // PROHIBITED_CONTENT เป็น filter ที่ผู้เรียกตั้งค่าไม่ได้ safetySettings ช่วยไม่ได้
+  // ทางเดียวคือส่งของที่สั้นลง ผู้เรียกจึงต้องแยกกรณีนี้ออกจาก error อื่นได้
+  const blockReason = data.promptFeedback?.blockReason;
+  if (blockReason) {
+    console.error(`${spec.model} บล็อก prompt ทิ้ง blockReason=${blockReason} promptTokens=${data.usageMetadata?.promptTokenCount ?? "?"}`);
+    const err = new Error(`${spec.model} บล็อก prompt ทิ้งทั้งก้อน (${blockReason})`);
+    err.name = "PromptBlocked";
+    throw err;
+  }
+
   const out = fromGeminiResponse(data);
-  // ถูกบล็อกทั้งคำขอ ไม่ได้แม้แต่จะเริ่มตอบ ต้องบอกให้รู้ว่าเป็นเพราะอะไร
   if (out.content.length === 0 && out.stop_reason !== "refusal") {
     console.error(`${spec.model} ตอบว่างเปล่า finishReason=${out.finish_reason} ${JSON.stringify(data).slice(0, 800)}`);
     throw new Error(`${spec.model} ตอบว่างเปล่า finishReason=${out.finish_reason}`);
