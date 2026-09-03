@@ -1169,7 +1169,18 @@ type AgentOpts = {
   usageOut?: Record<string, number>;
 };
 
-const FALLBACK_SPEC: ModelSpec = { provider: "anthropic", model: MODEL, keyEnv: "ANTHROPIC_API_KEY" };
+const LAST_RESORT_SPEC: ModelSpec = { provider: "anthropic", model: MODEL, keyEnv: "ANTHROPIC_API_KEY" };
+
+// โมเดลสำรองเวลาโมเดลหลักล่มหรือปฏิเสธจนตอบไม่ได้ ตั้งด้วย secret CHAT_FALLBACK_MODEL
+// ต้องเป็นคนละค่ายกับตัวหลัก ไม่งั้นเวลาค่ายนั้นล่มก็ล่มพร้อมกันทั้งคู่ ไม่ได้เป็นตาข่ายอะไร
+// ตั้งเป็น "none" เพื่อปิดได้ ถ้าอยากให้พังดัง ๆ แทนที่จะเปลี่ยนโมเดลเงียบ ๆ
+function fallbackSpec(primary: ModelSpec): ModelSpec | null {
+  const key = (Deno.env.get("CHAT_FALLBACK_MODEL") ?? "luna").trim().toLowerCase();
+  if (!key || key === "none") return null;
+  const { spec } = resolveModel(key);
+  if (!spec || spec.model === primary.model) return null;
+  return spec;
+}
 
 // โมเดลที่ใช้ตอบแชทจริง ตั้งด้วย secret CHAT_MODEL เป็นชื่อย่อเดียวกับที่ข้อสอบใช้
 // อ่านใหม่ทุก request ตั้งใจให้ย้ายหรือถอยกลับได้ด้วยการแก้ secret ไม่ต้อง deploy
@@ -1177,11 +1188,11 @@ const FALLBACK_SPEC: ModelSpec = { provider: "anthropic", model: MODEL, keyEnv: 
 // — บอทที่ตอบด้วยโมเดลสำรองยังใช้งานได้ บอทที่ไม่ตอบเลยคือของเสีย
 function chatSpec(): ModelSpec {
   const key = (Deno.env.get("CHAT_MODEL") ?? "").trim().toLowerCase();
-  if (!key) return FALLBACK_SPEC;
+  if (!key) return LAST_RESORT_SPEC;
   const { spec, error } = resolveModel(key);
   if (!spec) {
     console.error(`CHAT_MODEL="${key}" ใช้ไม่ได้ (${error}) — ตอบด้วย ${MODEL} แทน`);
-    return FALLBACK_SPEC;
+    return LAST_RESORT_SPEC;
   }
   return spec;
 }
@@ -1279,8 +1290,10 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
       `บอกผู้ใช้ตรง ๆ อย่างเป็นมิตรและเสนอทางแก้\n\n${textContent}`;
   }
 
-  const spec = opts.spec ?? chatSpec();
-  const model = spec.model;
+  let spec = opts.spec ?? chatSpec();
+  // ข้อสอบระบุโมเดลมาเอง ห้ามสลับไปตัวอื่นกลางคัน ไม่งั้นผลเทียบจะเป็นของโมเดลที่ไม่ได้สั่ง
+  const backup = opts.spec ? null : fallbackSpec(spec);
+  let usedBackup = false;
 
   const blocks: any[] = [];
   if (opts.image) {
@@ -1328,6 +1341,19 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
         messages,
       });
     } catch (e) {
+      // โมเดลหลักตอบไม่ได้เลย (ล่ม เครดิตหมด เขียนคำสั่งพังซ้ำ) — ย้ายไปตัวสำรองแล้วเริ่มเทิร์นใหม่
+      // ยอมเสียเงินสองรอบดีกว่าปล่อยให้ทีมเจอบอทเงียบ และบันทึกไว้ให้รู้ว่าวันนี้ต้องพึ่งตัวสำรอง
+      if ((e as any)?.name !== "PromptBlocked" && backup && !usedBackup) {
+        usedBackup = true;
+        spec = backup;
+        console.error(`โมเดลหลักตอบไม่ได้ (${e}) — เปลี่ยนไปใช้ ${backup.model} แทนสำหรับคำตอบนี้`);
+        messages.length = 0;
+        messages.push({ role: "user", content });
+        sysNow = system;
+        attempt = 0;
+        i--;
+        continue;
+      }
       if ((e as any)?.name !== "PromptBlocked") throw e;
       attempt++;
       if (attempt === 1 && crossChat) {
@@ -1409,7 +1435,7 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
     if (usage.iterations > 0) {
       await logTokenUsage({
         purpose: opts.purpose ?? "chat",
-        model,
+        model: spec.model,
         chat_id: chatId,
         user_id: ctx.caller?.id ?? null,
         input_tokens: usage.input,

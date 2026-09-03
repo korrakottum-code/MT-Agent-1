@@ -1,7 +1,8 @@
 {
-  "_note": "USD per 1 million tokens. Keys are matched as a prefix of the model id the eval endpoint reports back, so 'claude-haiku-4-5' covers 'claude-haiku-4-5-20251001'. Fill in null values once the real per-token price of a model is known - run-compare.ps1 prints '-' for cost until then, it never guesses.",
+  "_note": "USD ต่อ 1 ล้าน token คีย์ถูกจับคู่แบบขึ้นต้นกับ model id ที่ endpoint ตอบกลับมา ('claude-haiku-4-5' จึงครอบคลุม 'claude-haiku-4-5-20251001') · cache_write ของฝั่ง OpenAI และ Gemini เป็น 0 เพราะสองเจ้านี้ไม่คิดเงินตอนเขียน cache ต่างจาก Anthropic ที่คิด 1.25 เท่าของ input · ตรวจสอบเมื่อ 3 ก.ย. 2569",
+  "_warning": "ราคา gemini-3.7-flash เป็นราคาโปรถึง 31 ธ.ค. 2026 หลังจากนั้นขึ้นเท่าตัว (input 1.50 / output 7.50 / cache_read 0.15) ต้องกลับมาแก้ไฟล์นี้",
   "claude-sonnet-5": { "input": 2, "output": 10, "cache_read": 0.2, "cache_write": 2.5 },
   "claude-haiku-4-5": { "input": 1, "output": 5, "cache_read": 0.1, "cache_write": 1.25 },
-  "gpt-5.6": { "input": null, "output": null, "cache_read": null, "cache_write": null },
-  "gemini-3.7-flash": { "input": null, "output": null, "cache_read": null, "cache_write": null }
+  "gpt-5.6": { "input": 0.2, "output": 1.2, "cache_read": 0.02, "cache_write": 0 },
+  "gemini-3.7-flash": { "input": 0.75, "output": 3.75, "cache_read": 0.075, "cache_write": 0 }
 }
