@@ -1574,12 +1574,23 @@ async function runEval(body: string): Promise<Response> {
 
     // สนใจอย่างเดียวว่าโดนบล็อกทั้ง prompt ไหม ปัญหาอื่น (ตอบสั้นไป ตอบช้า) ไม่เกี่ยว
     // จึงนับว่าไม่โดน แล้วเดินต่อ ไม่ใช่ให้ทั้งการวินิจฉัยล้มเพราะเรื่องที่ไม่ได้ถาม
-    const isBlocked = async (text: string): Promise<boolean> => {
+    // ประกอบ system ชุดจริงแบบเดียวกับตอนตอบแชท เพราะรอบก่อนพิสูจน์แล้วว่าประวัติอย่างเดียวไม่โดน
+    const { data: allGroups } = await supabase
+      .from("groups").select("line_group_id, group_name").eq("is_active", true).limit(50);
+    const { data: persona } = await supabase.from("org_settings")
+      .select("value").eq("key", "bot_persona").maybeSingle();
+    const realSystem: any = [
+      { type: "text", text: SYSTEM_RULES },
+      { type: "text", text: buildContext(ctx, roster ?? [], allGroups ?? [], persona?.value ?? null, "") },
+    ];
+    const tiny: any = [{ type: "text", text: "ตอบสั้น ๆ" }];
+
+    const isBlocked = async (sys: any, text: string): Promise<boolean> => {
       try {
         await createMessage(evalSpec, {
           max_tokens: 256,
-          system: [{ type: "text", text: "ตอบสั้น ๆ" }],
-          messages: [{ role: "user", content: `${text}\n\nสรุปสั้น ๆ` }],
+          system: sys,
+          messages: [{ role: "user", content: text }],
         });
         return false;
       } catch (e) {
@@ -1588,23 +1599,22 @@ async function runEval(body: string): Promise<Response> {
     };
 
     const report: string[] = [`ประวัติ ${lines.length} บรรทัด · โมเดล ${evalSpec.model}`];
-    const guilty: number[] = [];
-    for (let i = 0; i < lines.length; i++) {
-      if (await isBlocked(lines[i])) {
-        guilty.push(i);
-        report.push(`บรรทัด ${i} โดนบล็อกเดี่ยว ๆ: ${lines[i].slice(0, 120)}`);
+    report.push(`system ชุดจริง + ไม่มีประวัติ: ${await isBlocked(realSystem, "สวัสดี") ? "โดนบล็อก" : "ผ่าน"}`);
+    report.push(`system ชุดจริง + ประวัติทั้งก้อน: ${await isBlocked(realSystem, lines.join("\n") + "\n\nสวัสดี") ? "โดนบล็อก" : "ผ่าน"}`);
+    report.push(`system สั้น ๆ + ประวัติทั้งก้อน: ${await isBlocked(tiny, lines.join("\n") + "\n\nสวัสดี") ? "โดนบล็อก" : "ผ่าน"}`);
+
+    // ใส่ประวัติทีละบรรทัดใต้ system ชุดจริง เพื่อดูว่าเริ่มโดนตอนถึงบรรทัดไหน
+    let flipped = false;
+    for (let n = 1; n <= lines.length; n++) {
+      if (await isBlocked(realSystem, lines.slice(0, n).join("\n") + "\n\nสวัสดี")) {
+        report.push(`เริ่มโดนบล็อกเมื่อใส่ถึงบรรทัดที่ ${n} จาก ${lines.length}`);
+        report.push(`บรรทัดนั้นคือ: ${lines[n - 1].slice(0, 200)}`);
+        flipped = true;
+        break;
       }
     }
-    if (guilty.length === 0) {
-      report.push("ไม่มีบรรทัดไหนโดนบล็อกเดี่ยว ๆ — ไล่หาว่าเริ่มโดนตอนต่อกันถึงบรรทัดที่เท่าไร");
-      for (let n = 1; n <= lines.length; n++) {
-        if (await isBlocked(lines.slice(0, n).join("\n"))) {
-          report.push(`เริ่มโดนบล็อกเมื่อรวมถึงบรรทัด ${n - 1}: ${lines[n - 1].slice(0, 160)}`);
-          break;
-        }
-        if (n === lines.length) report.push("รวมทั้งก้อนแล้วก็ยังไม่โดน — จุดชนวนไม่ได้อยู่ในประวัติ");
-      }
-    }
+    if (!flipped) report.push("ใส่ครบทุกบรรทัดใต้ system ชุดจริงแล้วก็ยังไม่โดน");
+
     return Response.json({ as_user: caller.display_name, answer: report.join("\n"), tools_called: [], ms: 0 });
   }
 
