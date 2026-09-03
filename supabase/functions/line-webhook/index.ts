@@ -2,6 +2,7 @@
 // LINE → verify signature → เก็บ message → resolve identity → Claude + Tools → ตอบกลับ
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import {
+  type CacheStore,
   createMessage,
   DEFAULT_MODEL,
   MODELS,
@@ -1171,6 +1172,20 @@ type AgentOpts = {
 
 const LAST_RESORT_SPEC: ModelSpec = { provider: "anthropic", model: MODEL, keyEnv: "ANTHROPIC_API_KEY" };
 
+// ที่เก็บชื่อก้อน cache ของ Gemini ให้ทุก instance เห็นตรงกัน ใช้ตาราง org_settings ที่มีอยู่แล้ว
+// ทุก instance ต้องอ้างก้อนเดียวกัน ไม่งั้นต่างคนต่างสร้าง จ่ายค่าเก็บซ้ำซ้อนโดยไม่มีใครได้ประโยชน์
+const cacheStore: CacheStore = {
+  get: async (key) => {
+    const { data } = await supabase.from("org_settings").select("value").eq("key", key).maybeSingle();
+    return data?.value ?? null;
+  },
+  set: async (key, value) => {
+    const { error } = await supabase.from("org_settings")
+      .upsert({ key, value, updated_at: new Date().toISOString() });
+    if (error) console.error("บันทึก cache ลง org_settings ไม่ได้:", error.message);
+  },
+};
+
 // โมเดลสำรองเวลาโมเดลหลักล่มหรือปฏิเสธจนตอบไม่ได้ ตั้งด้วย secret CHAT_FALLBACK_MODEL
 // ต้องเป็นคนละค่ายกับตัวหลัก ไม่งั้นเวลาค่ายนั้นล่มก็ล่มพร้อมกันทั้งคู่ ไม่ได้เป็นตาข่ายอะไร
 // ตั้งเป็น "none" เพื่อปิดได้ ถ้าอยากให้พังดัง ๆ แทนที่จะเปลี่ยนโมเดลเงียบ ๆ
@@ -1345,6 +1360,8 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
         system: sysNow,
         tools: TOOLS,
         messages,
+        // กฎ + เครื่องมือเหมือนกันทุกข้อความ ฝากไว้ฝั่งโมเดลก้อนเดียวแล้วอ้างถึง (มีผลเฉพาะค่ายที่รองรับ)
+        cache: { key: "chat", store: cacheStore, ttlSeconds: 4 * 3600 },
       });
     } catch (e) {
       // โมเดลหลักตอบไม่ได้เลย (ล่ม เครดิตหมด เขียนคำสั่งพังซ้ำ) — ย้ายไปตัวสำรองแล้วเริ่มเทิร์นใหม่

@@ -588,3 +588,104 @@ Deno.test("token ที่ใช้คิดต้องถูกนับรว
   });
   assertEquals(r.usage.output_tokens, 1200);
 });
+
+// ---------------------------------------------------------------- cache แบบสั่งเอง
+
+function memoryStore() {
+  const m = new Map<string, string>();
+  return {
+    m,
+    get: async (k: string) => m.get(k) ?? null,
+    set: async (k: string, v: string) => { m.set(k, v); },
+  };
+}
+const CACHED_OK = () =>
+  new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] } }] }), { status: 200 });
+const CREATED = (name = "cachedContents/abc") =>
+  new Response(JSON.stringify({ name, expireTime: new Date(Date.now() + 3600_000).toISOString(), usageMetadata: { totalTokenCount: 7000 } }), { status: 200 });
+
+Deno.test("รอบแรกสร้างก้อน cache แล้วส่งคำขอโดยอ้างถึงมัน ไม่ส่งกฎกับเครื่องมือซ้ำ", async () => {
+  const store = memoryStore();
+  const urls: string[] = [], bodies: any[] = [];
+  const restore = stubFetch((u, b) => { urls.push(u); bodies.push(b); return u.endsWith("/cachedContents") ? CREATED() : CACHED_OK(); });
+  try {
+    await callGemini(GSPEC, { ...REQ, cache: { key: "chat", store } });
+  } finally { restore(); }
+  assertEquals(urls[0].endsWith("/cachedContents"), true);
+  assertEquals(bodies[0].system_instruction.parts[0].text, "กฎ");
+  assertEquals(bodies[0].tools[0].function_declarations[0].name, "get_my_tasks");
+  assertEquals(bodies[1].cachedContent, "cachedContents/abc");
+  assertEquals("system_instruction" in bodies[1], false);
+  assertEquals("tools" in bodies[1], false);
+  // ส่วนที่เปลี่ยนทุกครั้งยังไปอยู่ต้นข้อความผู้ใช้เหมือนเดิม ไม่ได้หายไปกับ cache
+  assertEquals(bodies[1].contents[0].parts[0].text.startsWith("บริบท"), true);
+  assertEquals(JSON.parse(store.m.get("gemini_cache:chat")!).name, "cachedContents/abc");
+});
+
+Deno.test("รอบถัดไปใช้ก้อนเดิม ไม่สร้างใหม่", async () => {
+  const store = memoryStore();
+  let creates = 0;
+  const restore = stubFetch((u) => { if (u.endsWith("/cachedContents")) creates++; return u.endsWith("/cachedContents") ? CREATED() : CACHED_OK(); });
+  try {
+    await callGemini(GSPEC, { ...REQ, cache: { key: "chat", store } });
+    await callGemini(GSPEC, { ...REQ, cache: { key: "chat", store } });
+    await callGemini(GSPEC, { ...REQ, cache: { key: "chat", store } });
+  } finally { restore(); }
+  assertEquals(creates, 1);
+});
+
+Deno.test("แก้กฎแล้วต้องได้ก้อนใหม่ เพราะลายนิ้วมือเปลี่ยน", async () => {
+  const store = memoryStore();
+  let creates = 0;
+  const restore = stubFetch((u) => { if (u.endsWith("/cachedContents")) creates++; return u.endsWith("/cachedContents") ? CREATED(`cachedContents/${creates}`) : CACHED_OK(); });
+  try {
+    await callGemini(GSPEC, { ...REQ, cache: { key: "chat", store } });
+    await callGemini(GSPEC, { ...REQ, system: [{ type: "text", text: "กฎใหม่", cache_control: { type: "ephemeral" } }], cache: { key: "chat", store } });
+  } finally { restore(); }
+  assertEquals(creates, 2);
+});
+
+Deno.test("สร้าง cache ไม่ได้ ต้องส่งแบบเต็มราคาแทน ห้ามให้บอทพังเพราะเรื่องประหยัด", async () => {
+  const store = memoryStore();
+  const bodies: any[] = [];
+  const restore = stubFetch((u, b) => {
+    if (u.endsWith("/cachedContents")) return new Response('{"error":"quota"}', { status: 429 });
+    bodies.push(b); return CACHED_OK();
+  });
+  try {
+    const r = await callGemini(GSPEC, { ...REQ, cache: { key: "chat", store } });
+    assertEquals(r.content[0].text, "ok");
+  } finally { restore(); }
+  assertEquals("cachedContent" in bodies[0], false);
+  assertEquals(bodies[0].system_instruction.parts[0].text, "กฎ");
+});
+
+Deno.test("ก้อน cache หายไปก่อนเวลา ต้องส่งเต็มราคารอบนี้แล้วล้างบันทึกให้สร้างใหม่รอบหน้า", async () => {
+  const store = memoryStore();
+  store.m.set("gemini_cache:chat", JSON.stringify({ name: "cachedContents/gone", expireTime: new Date(Date.now() + 3600_000).toISOString(), fingerprint: "x" }));
+  // ลายนิ้วมือไม่ตรง จะสร้างใหม่ก่อน — จำลองว่าสร้างได้แต่พอเอาไปใช้ Google บอกว่าไม่รู้จัก
+  const bodies: any[] = [];
+  let gen = 0;
+  const restore = stubFetch((u, b) => {
+    if (u.endsWith("/cachedContents")) return CREATED("cachedContents/fresh");
+    gen++; bodies.push(b);
+    if (gen === 1) return new Response('{"error":{"message":"CachedContent not found"}}', { status: 403 });
+    return CACHED_OK();
+  });
+  try {
+    const r = await callGemini(GSPEC, { ...REQ, cache: { key: "chat", store } });
+    assertEquals(r.content[0].text, "ok");
+  } finally { restore(); }
+  assertEquals(bodies[0].cachedContent, "cachedContents/fresh");
+  assertEquals("cachedContent" in bodies[1], false);
+  assertEquals(bodies[1].tools[0].function_declarations.length, 1);
+  assertEquals(store.m.get("gemini_cache:chat"), "");
+});
+
+Deno.test("ไม่ได้ให้ที่เก็บ cache มา = ส่งแบบเดิมทุกอย่าง (งานเบื้องหลัง)", async () => {
+  const urls: string[] = [];
+  const restore = stubFetch((u) => { urls.push(u); return CACHED_OK(); });
+  try { await callGemini(GSPEC, REQ); } finally { restore(); }
+  assertEquals(urls.length, 1);
+  assertEquals(urls[0].includes("cachedContents"), false);
+});

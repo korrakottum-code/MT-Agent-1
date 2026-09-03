@@ -443,6 +443,71 @@ export function fromGeminiResponse(data: any): any {
   };
 }
 
+// ที่เก็บชื่อก้อน cache ให้ทุก instance ของฟังก์ชันเห็นตรงกัน ผู้เรียกเป็นคนจัดหามาให้
+// (line-webhook ใช้ตาราง org_settings) ไฟล์นี้จะได้ไม่ต้องรู้จักฐานข้อมูล
+export type CacheStore = {
+  get: (key: string) => Promise<string | null>;
+  set: (key: string, value: string) => Promise<void>;
+};
+
+async function sha256(text: string): Promise<string> {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// cache แบบสั่งเอง: ฝากกฎ + คำอธิบายเครื่องมือทั้ง 22 ตัวไว้ที่ฝั่ง Google ก้อนเดียว แล้วอ้างถึงทุกครั้ง
+// ส่วนนี้คือราว 6–7 พัน token ที่เหมือนเดิมทุกข้อความ และคิดเงินถูกลง 10 เท่าเมื่ออ่านจาก cache
+// cache อัตโนมัติของ Gemini วัดแล้วไม่ติดกับรูปแบบคำขอของเรา จึงต้องสั่งเอง
+//
+// ลายนิ้วมือคือ hash ของ (รุ่น + กฎ + เครื่องมือ) พอแก้กฎหรือเพิ่ม tool ก้อนเก่าจะถูกทิ้งเอง
+// ถ้าสร้างไม่ได้ด้วยเหตุใดก็ตาม ให้ส่งแบบเดิมเต็มราคา บอทต้องไม่พังเพราะเรื่องประหยัดเงิน
+async function geminiCachedContent(
+  spec: ModelSpec,
+  stable: string,
+  toolDecls: any[],
+  cache: { key: string; store: CacheStore; ttlSeconds?: number },
+): Promise<string | null> {
+  const fingerprint = await sha256(`${spec.model}\n${stable}\n${JSON.stringify(toolDecls)}`);
+  const storeKey = `gemini_cache:${cache.key}`;
+  try {
+    const raw = await cache.store.get(storeKey);
+    if (raw) {
+      const rec = JSON.parse(raw);
+      // ไม่ใช้ก้อนที่เหลืออายุไม่ถึง 2 นาที เพราะอาจหมดระหว่างที่คำตอบนี้ยังยิงอยู่หลายรอบ
+      if (rec.fingerprint === fingerprint && new Date(rec.expireTime).getTime() - Date.now() > 120_000) {
+        return rec.name;
+      }
+    }
+  } catch (e) {
+    console.error("อ่านบันทึก cache ไม่ได้:", e);
+  }
+
+  const ttl = cache.ttlSeconds ?? 4 * 3600;
+  const res = await fetch(`${spec.baseURL}/cachedContents`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-goog-api-key": Deno.env.get(spec.keyEnv) ?? "" },
+    body: JSON.stringify({
+      model: `models/${spec.model}`,
+      displayName: cache.key,
+      system_instruction: { parts: [{ text: stable }] },
+      tools: [{ function_declarations: toolDecls }],
+      ttl: `${ttl}s`,
+    }),
+  });
+  if (!res.ok) {
+    console.error(`สร้าง cache ไม่ได้ (${res.status}) ${(await res.text()).slice(0, 300)} — ส่งแบบเต็มราคาแทน`);
+    return null;
+  }
+  const data = await res.json();
+  try {
+    await cache.store.set(storeKey, JSON.stringify({ name: data.name, expireTime: data.expireTime, fingerprint }));
+  } catch (e) {
+    console.error("บันทึกชื่อ cache ไม่ได้:", e);
+  }
+  console.log(`สร้าง cache ${data.name} เก็บ ${data.usageMetadata?.totalTokenCount ?? "?"} token หมดอายุ ${data.expireTime}`);
+  return data.name;
+}
+
 export async function callGemini(spec: ModelSpec, req: any): Promise<any> {
   const body: any = {
     contents: toGeminiContents(prependToFirstUser(req.messages, splitSystem(req.system).volatile)),
@@ -451,17 +516,31 @@ export async function callGemini(spec: ModelSpec, req: any): Promise<any> {
     // บอทนี้แนบรายชื่อพนักงานจริงไปทุกครั้ง ซึ่งไปสะกิด filter จนคำสั่งพื้นฐานโดนบล็อกทิ้ง
     safetySettings: SAFETY_OFF,
   };
-  const { stable, volatile } = splitSystem(req.system);
-  if (stable) body.system_instruction = { parts: [{ text: stable }] };
-  if (req.tools) {
-    body.tools = [{
-      function_declarations: req.tools.map((t: any) => ({
-        name: t.name,
-        description: t.description,
-        parameters: cleanSchema(t.input_schema),
-      })),
-    }];
+  const { stable } = splitSystem(req.system);
+  const toolDecls = req.tools
+    ? req.tools.map((t: any) => ({
+      name: t.name,
+      description: t.description,
+      parameters: cleanSchema(t.input_schema),
+    }))
+    : null;
+
+  // ถ้าผู้เรียกให้ที่เก็บ cache มา และมีทั้งกฎกับเครื่องมือ ให้ฝากไว้ฝั่ง Google แล้วอ้างถึงแทน
+  let cachedName: string | null = null;
+  if (req.cache && stable && toolDecls) {
+    cachedName = await geminiCachedContent(spec, stable, toolDecls, req.cache);
   }
+  if (cachedName) {
+    body.cachedContent = cachedName;
+  } else {
+    if (stable) body.system_instruction = { parts: [{ text: stable }] };
+    if (toolDecls) body.tools = [{ function_declarations: toolDecls }];
+  }
+
+  // ระดับการคิด ตั้งด้วย secret GEMINI_THINKING_LEVEL (เช่น low) ไม่ตั้ง = ค่าเริ่มต้นของโมเดล
+  // token ที่ใช้คิดคิดเงินราคาเดียวกับคำตอบ งานตอบแชทส่วนใหญ่ไม่ต้องคิดหนัก
+  const thinking = (Deno.env.get("GEMINI_THINKING_LEVEL") ?? "").trim().toLowerCase();
+  if (thinking) body.generationConfig.thinkingConfig = { thinkingLevel: thinking };
   if (req.tool_choice?.type === "tool" && req.tool_choice.name) {
     body.toolConfig = {
       functionCallingConfig: { mode: "ANY", allowedFunctionNames: [req.tool_choice.name] },
@@ -482,7 +561,28 @@ export async function callGemini(spec: ModelSpec, req: any): Promise<any> {
     );
 
   let res = await send();
-  if (!res.ok) throw new Error(`${spec.model} ตอบ ${res.status}: ${(await res.text()).slice(0, 400)}`);
+  if (!res.ok) {
+    const detail = await res.text();
+    let retry = false;
+    // ก้อน cache หายไปก่อนเวลา (ถูกลบ/หมดอายุพอดี) ส่งแบบเต็มราคาก่อน แล้วรอบหน้าค่อยสร้างใหม่
+    if (body.cachedContent && /cachedContent|CachedContent|cache/i.test(detail)) {
+      console.error(`Gemini ไม่รับก้อน cache ${body.cachedContent} — ส่งแบบเต็มราคาแทน แล้วให้สร้างใหม่รอบหน้า`);
+      delete body.cachedContent;
+      if (stable) body.system_instruction = { parts: [{ text: stable }] };
+      if (toolDecls) body.tools = [{ function_declarations: toolDecls }];
+      try { await req.cache?.store?.set(`gemini_cache:${req.cache.key}`, ""); } catch { /* ไม่เป็นไร */ }
+      retry = true;
+    }
+    // รุ่นนี้ไม่รู้จักการตั้งระดับการคิด ถอดออกแล้วส่งใหม่ ดีกว่าให้ทั้งบอทพังเพราะเรื่องประหยัด
+    if (body.generationConfig?.thinkingConfig && /thinking/i.test(detail)) {
+      console.error(`Gemini ไม่รับ thinkingConfig (${detail.slice(0, 160)}) — ถอดออกแล้วส่งใหม่`);
+      delete body.generationConfig.thinkingConfig;
+      retry = true;
+    }
+    if (!retry) throw new Error(`${spec.model} ตอบ ${res.status}: ${detail.slice(0, 400)}`);
+    res = await send();
+    if (!res.ok) throw new Error(`${spec.model} ตอบ ${res.status}: ${(await res.text()).slice(0, 400)}`);
+  }
 
   let data = await res.json();
 
