@@ -70,10 +70,19 @@ export function resolveModel(key: string): { spec?: ModelSpec; error?: string } 
   return { spec };
 }
 
+// Anthropic รับ system ได้ทั้งสตริงเปล่า ๆ และ array ของบล็อก และในโปรเจกต์นี้ใช้ทั้งสองแบบ:
+// แชทส่งเป็น array เพื่อวางจุด cache ส่วนงานเบื้องหลังส่งเป็นสตริง ตัวแปลข้ามค่ายต้องรับได้ทั้งคู่
+// ไม่งั้นงานที่ไม่ได้ถูกทดสอบจะพังเงียบ ๆ ตอนย้ายค่าย ซึ่งเกิดขึ้นจริงกับสรุปประจำวันเมื่อ 3 ก.ย.
+export function systemText(system: any): string {
+  if (!system) return "";
+  if (typeof system === "string") return system;
+  return (system as any[]).map((b: any) => (typeof b === "string" ? b : b?.text ?? "")).join("\n\n");
+}
+
 // แปลงคำขอหน้าตาแบบ Anthropic เป็น OpenAI chat completions
 // cache_control หายไปตรงนี้โดยตั้งใจ ฝั่ง OpenAI ไม่มีของแบบนั้นให้สั่ง
 export function toOpenAIMessages(system: any[], messages: any[]): any[] {
-  const out: any[] = [{ role: "system", content: system.map((b: any) => b.text).join("\n\n") }];
+  const out: any[] = [{ role: "system", content: systemText(system) }];
 
   for (const m of messages) {
     if (m.role === "assistant") {
@@ -407,9 +416,8 @@ export async function callGemini(spec: ModelSpec, req: any): Promise<any> {
     // บอทนี้แนบรายชื่อพนักงานจริงไปทุกครั้ง ซึ่งไปสะกิด filter จนคำสั่งพื้นฐานโดนบล็อกทิ้ง
     safetySettings: SAFETY_OFF,
   };
-  if (req.system?.length) {
-    body.system_instruction = { parts: [{ text: req.system.map((b: any) => b.text).join("\n\n") }] };
-  }
+  const sysText = systemText(req.system);
+  if (sysText) body.system_instruction = { parts: [{ text: sysText }] };
   if (req.tools) {
     body.tools = [{
       function_declarations: req.tools.map((t: any) => ({

@@ -513,3 +513,26 @@ Deno.test("คำสั่งเรียก tool ที่เขียนออ
   } finally { restore(); }
   assertEquals(calls, 2);
 });
+
+Deno.test("system ที่ส่งมาเป็นสตริงต้องใช้ได้ ไม่ใช่แค่ array ของบล็อก", async () => {
+  // งานเบื้องหลัง (สรุปรายวัน/รายสัปดาห์/จับงานจากบทสนทนา) ส่ง system เป็นสตริงมาตลอด
+  // ตอนย้ายไป Gemini ตัวแปลรับแต่ array จึงพังทั้งสามงานพร้อมกันแบบเงียบ ๆ
+  let seenGemini: any = null, seenOpenAI: any = null;
+  let restore = stubFetch((_u, b) => {
+    seenGemini = b;
+    return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] } }] }), { status: 200 });
+  });
+  try {
+    await callGemini(GSPEC, { max_tokens: 512, system: "คุณคือแงว สรุปให้สั้น", messages: [{ role: "user", content: "สรุป" }] });
+  } finally { restore(); }
+  assertEquals(seenGemini.system_instruction.parts[0].text, "คุณคือแงว สรุปให้สั้น");
+
+  restore = stubFetch((_u, b) => {
+    seenOpenAI = b;
+    return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+  });
+  try {
+    await callOpenAICompatible(SPEC, { max_tokens: 512, system: "คุณคือแงว สรุปให้สั้น", messages: [{ role: "user", content: "สรุป" }] });
+  } finally { restore(); }
+  assertEquals(seenOpenAI.messages[0], { role: "system", content: "คุณคือแงว สรุปให้สั้น" });
+});
