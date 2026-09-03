@@ -1223,8 +1223,14 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
     .limit(21);
   const nameOf = new Map((roster ?? []).map((u: any) => [u.line_user_id, u.display_name]));
   nameOf.set("bot", "แงว");
+  // ตัดหางข้อความยาว ๆ ในประวัติทิ้ง ประวัติมีไว้ให้ตีความคำสั่งล่าสุดว่าหมายถึงอะไร
+  // ไม่ได้มีไว้ให้อ่านซ้ำทั้งฉบับ คำตอบเก่าของบอทยาวได้เป็นพันตัวอักษร (สรุปรายงาน ตารางตัวเลข)
+  // ซึ่งกินโควตาหนักที่สุดและแทบไม่ช่วยตีความอะไรเลย ประโยคต้น ๆ บอกได้แล้วว่าเรื่องอะไร
+  const HISTORY_LINE_LIMIT = 400;
+  const trim = (t: string) =>
+    t.length > HISTORY_LINE_LIMIT ? `${t.slice(0, HISTORY_LINE_LIMIT)}…(ตัดส่วนที่เหลือ)` : t;
   const history = (recent ?? []).slice(opts.skipLatestMessage === false ? 0 : 1).reverse()
-    .map((m: any) => `${nameOf.get(m.line_user_id) ?? "?"}: ${m.message_text}`)
+    .map((m: any) => `${nameOf.get(m.line_user_id) ?? "?"}: ${trim(m.message_text ?? "")}`)
     .join("\n");
 
   // บุคลิกระดับองค์กร (ADMIN ตั้ง) ใช้กับทุกคนทุกกลุ่ม
