@@ -1278,7 +1278,7 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
     blocks.push({ type: "image", source: { type: "base64", media_type: opts.image.media_type, data: opts.image.data } });
   }
   if (opts.file?.kind === "pdf") {
-    if (spec.provider === "anthropic") {
+    if (spec.provider !== "openai") {
       blocks.push({
         type: "document",
         source: { type: "base64", media_type: "application/pdf", data: opts.file.data },

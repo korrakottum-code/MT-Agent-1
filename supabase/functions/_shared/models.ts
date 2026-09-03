@@ -27,7 +27,7 @@ const anthropic = new Anthropic({
 // และเดาผิดทีเดียวคือรันข้อสอบทั้งชุดทิ้ง — ขาดตัวไหน endpoint บอกตรง ๆ ว่าต้องตั้งอะไร
 
 export type ModelSpec = {
-  provider: "anthropic" | "openai";
+  provider: "anthropic" | "openai" | "gemini";
   model: string;
   baseURL?: string;
   keyEnv: string;
@@ -43,10 +43,12 @@ export const MODELS: Record<string, () => ModelSpec> = {
     keyEnv: "OPENAI_API_KEY",
   }),
   "gemini-flash": () => ({
-    provider: "openai",
+    // คุยกับ Gemini ด้วย API ตัวเต็มของมัน ไม่ใช่โหมดเข้ากันได้กับ OpenAI
+    // เพราะโหมดนั้นตั้ง safetySettings ไม่ได้ แล้ว Gemini บล็อกคำขอธรรมดาของบอทนี้ทิ้งเป็นประจำ
+    // ตัวเต็มยังแนบ PDF ได้ด้วย ซึ่งโหมดเข้ากันได้ทำไม่ได้
+    provider: "gemini",
     model: Deno.env.get("EVAL_GEMINI_MODEL") ?? "",
-    // โหมดเข้ากันได้กับ OpenAI ของ Gemini — ถ้า Google ย้าย path เปลี่ยนที่ secret ได้เลย
-    baseURL: Deno.env.get("EVAL_GEMINI_BASE_URL") ?? "https://generativelanguage.googleapis.com/v1beta/openai",
+    baseURL: Deno.env.get("EVAL_GEMINI_BASE_URL") ?? "https://generativelanguage.googleapis.com/v1beta",
     keyEnv: "GEMINI_API_KEY",
   }),
 };
@@ -160,7 +162,7 @@ export function fromOpenAIResponse(data: any): any {
 // พารามิเตอร์ที่บางเจ้าต้องปรับก่อนถึงจะยอมทำงาน รู้ได้จาก error ที่มันตอบกลับมาเท่านั้น
 // จึงลองแบบมาตรฐานก่อน แล้วปรับตามที่มันบอก ดีกว่าฮาร์ดโค้ดข้อยกเว้นรายเจ้าไว้ล่วงหน้า
 // ซึ่งจะผิดทันทีที่เขาเปลี่ยนรุ่น
-type Fix = "max_tokens" | "no_reasoning" | "no_safety_override";
+type Fix = "max_tokens" | "no_reasoning";
 
 // Gemini บล็อกคำขอทิ้งเองด้วย safety filter ก่อนจะได้ตอบอะไร คำสั่งพื้นฐานอย่าง
 // "ตอนนี้ฉันมีงานอะไรค้าง" ก็โดน เพราะ prompt แนบรายชื่อพนักงานจริงกับ id ไปทุกครั้ง
@@ -178,10 +180,6 @@ function applyFix(body: any, fix: Fix): any {
     const { max_completion_tokens, ...rest } = body;
     return { ...rest, max_tokens: max_completion_tokens };
   }
-  if (fix === "no_safety_override") {
-    const { google, ...rest } = body;
-    return rest;
-  }
   // gpt-5.x ไม่ยอมให้ใช้ tool บน /v1/chat/completions ถ้า reasoning_effort ไม่ใช่ none
   return { ...body, reasoning_effort: "none" };
 }
@@ -189,10 +187,6 @@ function applyFix(body: any, fix: Fix): any {
 function detectFix(detail: string, applied: Fix[]): Fix | null {
   if (detail.includes("max_completion_tokens") && !applied.includes("max_tokens")) return "max_tokens";
   if (detail.includes("reasoning_effort") && !applied.includes("no_reasoning")) return "no_reasoning";
-  if (
-    (detail.includes("safety_settings") || detail.includes("\"google\"")) &&
-    !applied.includes("no_safety_override")
-  ) return "no_safety_override";
   return null;
 }
 
@@ -226,11 +220,6 @@ export async function callOpenAICompatible(spec: ModelSpec, req: any): Promise<a
       : c.type === "any"
       ? "required"
       : "auto";
-  }
-
-  // ฟิลด์นี้มีความหมายเฉพาะกับ Gemini ค่ายอื่นไม่รู้จักและจะถูกถอดออกอัตโนมัติเมื่อโดนปฏิเสธ
-  if ((spec.baseURL ?? "").includes("googleapis.com")) {
-    base.google = { safety_settings: SAFETY_OFF };
   }
 
   const send = async (payload: any) =>
@@ -299,8 +288,165 @@ export async function callOpenAICompatible(spec: ModelSpec, req: any): Promise<a
   return out;
 }
 
+// ---------------------------------------------------------------- Gemini ตัวเต็ม
+
+// Gemini ไม่รับ JSON Schema บางคำ ถ้าส่งไปจะปฏิเสธทั้งชุด tool
+// ตัดเฉพาะคำที่มันไม่รู้จักทิ้ง ไม่แตะโครงสร้างที่เหลือ
+function cleanSchema(node: any): any {
+  if (Array.isArray(node)) return node.map(cleanSchema);
+  if (!node || typeof node !== "object") return node;
+  const out: any = {};
+  for (const [k, v] of Object.entries(node)) {
+    if (k === "additionalProperties" || k === "$schema") continue;
+    out[k] = cleanSchema(v);
+  }
+  return out;
+}
+
+// แปลงคำขอหน้าตาแบบ Anthropic เป็นรูปแบบ contents ของ Gemini
+// ผลลัพธ์ tool ของฝั่ง Anthropic อ้างด้วย id ส่วน Gemini อ้างด้วยชื่อ tool
+// จึงต้องจำ id → ชื่อ จากข้อความของโมเดลก่อนหน้าไว้ ไม่งั้นส่งผลลัพธ์กลับไม่ได้
+export function toGeminiContents(messages: any[]): any[] {
+  const nameOfId = new Map<string, string>();
+  const contents: any[] = [];
+
+  for (const m of messages) {
+    if (m.role === "assistant") {
+      const blocks = Array.isArray(m.content) ? m.content : [{ type: "text", text: m.content }];
+      const parts: any[] = [];
+      for (const b of blocks) {
+        if (b.type === "text" && b.text) parts.push({ text: b.text });
+        if (b.type === "tool_use") {
+          nameOfId.set(b.id, b.name);
+          parts.push({ functionCall: { name: b.name, args: b.input ?? {} } });
+        }
+      }
+      if (parts.length) contents.push({ role: "model", parts });
+      continue;
+    }
+
+    if (typeof m.content === "string") {
+      contents.push({ role: "user", parts: [{ text: m.content }] });
+      continue;
+    }
+
+    const results = (m.content as any[]).filter((b: any) => b.type === "tool_result");
+    if (results.length) {
+      contents.push({
+        role: "user",
+        parts: results.map((r: any) => ({
+          functionResponse: {
+            name: nameOfId.get(r.tool_use_id) ?? r.tool_use_id,
+            // Gemini บังคับให้ response เป็น object เสมอ ผลลัพธ์ของเราเป็นสตริง JSON จึงต้องห่อ
+            response: { result: String(r.content) },
+          },
+        })),
+      });
+      continue;
+    }
+
+    const parts: any[] = [];
+    for (const b of m.content as any[]) {
+      if (b.type === "text") parts.push({ text: b.text });
+      else if (b.type === "image" || b.type === "document") {
+        parts.push({ inline_data: { mime_type: b.source.media_type, data: b.source.data } });
+      }
+    }
+    contents.push({ role: "user", parts });
+  }
+  return contents;
+}
+
+// แปลงคำตอบของ Gemini กลับเป็นหน้าตาแบบ Anthropic เพื่อให้ลูป tool ข้างนอกไม่ต้องรู้ว่าคุยกับใคร
+export function fromGeminiResponse(data: any): any {
+  const cand = data.candidates?.[0] ?? {};
+  const content: any[] = [];
+  let calls = 0;
+  for (const part of cand.content?.parts ?? []) {
+    if (part.text) content.push({ type: "text", text: part.text });
+    if (part.functionCall) {
+      content.push({
+        type: "tool_use",
+        // Gemini ไม่ให้ id มา ต้องตั้งเองให้ไม่ซ้ำ แล้วใช้จับคู่ผลลัพธ์ตอนส่งกลับ
+        id: `gem_${calls++}_${part.functionCall.name}`,
+        name: part.functionCall.name,
+        input: part.functionCall.args ?? {},
+      });
+    }
+  }
+  const finish = String(cand.finishReason ?? "");
+  const stop = finish === "SAFETY" || finish === "PROHIBITED_CONTENT" || finish === "BLOCKLIST"
+    ? "refusal"
+    : content.some((b) => b.type === "tool_use")
+    ? "tool_use"
+    : "end_turn";
+  const u = data.usageMetadata ?? {};
+  const cached = u.cachedContentTokenCount ?? 0;
+  return {
+    content,
+    stop_reason: stop,
+    finish_reason: finish,
+    usage: {
+      input_tokens: Math.max(0, (u.promptTokenCount ?? 0) - cached),
+      output_tokens: u.candidatesTokenCount ?? 0,
+      cache_read_input_tokens: cached,
+      cache_creation_input_tokens: 0,
+    },
+  };
+}
+
+export async function callGemini(spec: ModelSpec, req: any): Promise<any> {
+  const body: any = {
+    contents: toGeminiContents(req.messages),
+    generationConfig: { maxOutputTokens: req.max_tokens },
+    // เหตุผลเดียวที่ต้องใช้ API ตัวเต็ม — โหมดเข้ากันได้กับ OpenAI ตั้งค่านี้ไม่ได้
+    // บอทนี้แนบรายชื่อพนักงานจริงไปทุกครั้ง ซึ่งไปสะกิด filter จนคำสั่งพื้นฐานโดนบล็อกทิ้ง
+    safetySettings: SAFETY_OFF,
+  };
+  if (req.system?.length) {
+    body.system_instruction = { parts: [{ text: req.system.map((b: any) => b.text).join("\n\n") }] };
+  }
+  if (req.tools) {
+    body.tools = [{
+      function_declarations: req.tools.map((t: any) => ({
+        name: t.name,
+        description: t.description,
+        parameters: cleanSchema(t.input_schema),
+      })),
+    }];
+  }
+  if (req.tool_choice?.type === "tool" && req.tool_choice.name) {
+    body.toolConfig = {
+      functionCallingConfig: { mode: "ANY", allowedFunctionNames: [req.tool_choice.name] },
+    };
+  }
+
+  const res = await fetch(
+    `${spec.baseURL}/models/${spec.model}:generateContent`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": Deno.env.get(spec.keyEnv) ?? "",
+      },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!res.ok) throw new Error(`${spec.model} ตอบ ${res.status}: ${(await res.text()).slice(0, 400)}`);
+
+  const data = await res.json();
+  const out = fromGeminiResponse(data);
+  // ถูกบล็อกทั้งคำขอ ไม่ได้แม้แต่จะเริ่มตอบ ต้องบอกให้รู้ว่าเป็นเพราะอะไร
+  if (out.content.length === 0 && out.stop_reason !== "refusal") {
+    console.error(`${spec.model} ตอบว่างเปล่า finishReason=${out.finish_reason} ${JSON.stringify(data).slice(0, 800)}`);
+    throw new Error(`${spec.model} ตอบว่างเปล่า finishReason=${out.finish_reason}`);
+  }
+  return out;
+}
+
 // ทางเข้าเดียวของการยิงเข้าโมเดล ไม่ว่าจะค่ายไหน
 export async function createMessage(spec: ModelSpec, req: any): Promise<any> {
+  if (spec.provider === "gemini") return await callGemini(spec, req);
   if (spec.provider === "openai") return await callOpenAICompatible(spec, req);
   // Haiku 4.5 ไม่รับ output_config.effort ถ้าส่งไปจะได้ 400 กลับมา
   const supportsEffort = !spec.model.includes("haiku");

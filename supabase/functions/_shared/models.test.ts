@@ -6,8 +6,11 @@
 import { assertEquals, assertRejects, assertThrows } from "jsr:@std/assert@1";
 import {
   _resetLearnedFixes,
+  callGemini,
   callOpenAICompatible,
+  fromGeminiResponse,
   fromOpenAIResponse,
+  toGeminiContents,
   toOpenAIMessages,
 } from "./models.ts";
 
@@ -374,41 +377,109 @@ Deno.test("ว่างเปล่าสองครั้งติด ต้�
   } finally { restore(); }
 });
 
-Deno.test("ปลายทาง Gemini ต้องได้ safety_settings ไปด้วย ส่วนเจ้าอื่นต้องไม่ได้", async () => {
-  const seen: any[] = [];
-  const ok = () => new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
-  let restore = stubFetch((_u, b) => { seen.push(b); return ok(); });
-  try {
-    await callOpenAICompatible(
-      { ...SPEC, model: "gemini-x", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai" },
-      REQ,
-    );
-  } finally { restore(); }
-  assertEquals(seen[0].google.safety_settings.length, 5);
 
-  restore = stubFetch((_u, b) => { seen.push(b); return ok(); });
-  try {
-    await callOpenAICompatible(SPEC, REQ);
-  } finally { restore(); }
-  assertEquals("google" in seen[1], false);
+// ---------------------------------------------------------------- Gemini ตัวเต็ม
+
+const GSPEC = {
+  provider: "gemini" as const,
+  model: "gemini-x",
+  baseURL: "https://generativelanguage.googleapis.com/v1beta",
+  keyEnv: "TEST_KEY",
+};
+
+Deno.test("ผลลัพธ์ tool ต้องอ้างกลับด้วยชื่อ tool ไม่ใช่ id เพราะ Gemini ไม่รู้จัก id ของเรา", () => {
+  const out = toGeminiContents([
+    { role: "user", content: "งานฉันมีอะไรบ้าง" },
+    { role: "assistant", content: [{ type: "tool_use", id: "gem_0_get_my_tasks", name: "get_my_tasks", input: { status: "TODO" } }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "gem_0_get_my_tasks", content: '{"tasks":[]}' }] },
+  ]);
+  assertEquals(out[1], { role: "model", parts: [{ functionCall: { name: "get_my_tasks", args: { status: "TODO" } } }] });
+  assertEquals(out[2], {
+    role: "user",
+    parts: [{ functionResponse: { name: "get_my_tasks", response: { result: '{"tasks":[]}' } } }],
+  });
 });
 
-Deno.test("เจ้าที่ไม่รู้จักฟิลด์ safety ต้องถอดออกแล้วลองใหม่ ไม่ใช่พังทั้งเทิร์น", async () => {
-  const bodies: any[] = [];
-  const restore = stubFetch((_u, body) => {
-    bodies.push(body);
-    if ("google" in body) {
-      return new Response('{"error":{"message":"Unknown name \"google\": Cannot find field."}}', { status: 400 });
-    }
-    return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+Deno.test("PDF กับรูปแนบไปเป็น inline_data ได้ทั้งคู่", () => {
+  const out = toGeminiContents([{
+    role: "user",
+    content: [
+      { type: "document", source: { media_type: "application/pdf", data: "AAA" } },
+      { type: "text", text: "สรุปให้หน่อย" },
+    ],
+  }]);
+  assertEquals(out[0].parts[0], { inline_data: { mime_type: "application/pdf", data: "AAA" } });
+  assertEquals(out[0].parts[1], { text: "สรุปให้หน่อย" });
+});
+
+Deno.test("การเรียก tool ของ Gemini แปลงเป็น stop_reason tool_use พร้อม id ที่ตั้งเองไม่ซ้ำ", () => {
+  const r = fromGeminiResponse({
+    candidates: [{
+      finishReason: "STOP",
+      content: { parts: [{ functionCall: { name: "create_task", args: { title: "ทำสไลด์" } } }] },
+    }],
+    usageMetadata: { promptTokenCount: 7500, candidatesTokenCount: 40, cachedContentTokenCount: 500 },
+  });
+  assertEquals(r.stop_reason, "tool_use");
+  assertEquals(r.content[0].name, "create_task");
+  assertEquals(r.content[0].input, { title: "ทำสไลด์" });
+  // cached ถูกนับรวมใน promptTokenCount แล้ว ต้องหักออกให้ความหมายตรงกับฝั่ง Anthropic
+  assertEquals(r.usage.input_tokens, 7000);
+  assertEquals(r.usage.cache_read_input_tokens, 500);
+});
+
+Deno.test("โดน filter บล็อก ต้องกลายเป็น refusal ไม่ใช่คำตอบว่าง", () => {
+  const r = fromGeminiResponse({ candidates: [{ finishReason: "PROHIBITED_CONTENT", content: {} }] });
+  assertEquals(r.stop_reason, "refusal");
+  assertEquals(r.content.length, 0);
+});
+
+Deno.test("ทุกคำขอต้องแนบ safetySettings ไปด้วย นี่คือเหตุผลเดียวที่ต้องใช้ API ตัวเต็ม", async () => {
+  let seenUrl = "", seenBody: any = null;
+  const restore = stubFetch((url, body) => {
+    seenUrl = url; seenBody = body;
+    return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] } }] }), { status: 200 });
   });
   try {
-    const r = await callOpenAICompatible(
-      { ...SPEC, model: "gemini-y", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai" },
-      REQ,
-    );
-    assertEquals(r.content[0].text, "ok");
+    await callGemini(GSPEC, { ...REQ, tool_choice: { type: "tool", name: "get_my_tasks" } });
   } finally { restore(); }
-  assertEquals(bodies.length, 2);
-  assertEquals("google" in bodies[1], false);
+  assertEquals(seenUrl, "https://generativelanguage.googleapis.com/v1beta/models/gemini-x:generateContent");
+  assertEquals(seenBody.safetySettings.length, 5);
+  assertEquals(seenBody.system_instruction.parts[0].text, "กฎ\n\nบริบท");
+  assertEquals(seenBody.tools[0].function_declarations[0].name, "get_my_tasks");
+  assertEquals(seenBody.toolConfig.functionCallingConfig.allowedFunctionNames, ["get_my_tasks"]);
+});
+
+Deno.test("คำที่ Gemini ไม่รู้จักใน schema ต้องถูกตัดออก ไม่งั้นมันปฏิเสธทั้งชุด tool", async () => {
+  let seenBody: any = null;
+  const restore = stubFetch((_u, body) => {
+    seenBody = body;
+    return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] } }] }), { status: 200 });
+  });
+  try {
+    await callGemini(GSPEC, {
+      ...REQ,
+      tools: [{
+        name: "t",
+        description: "d",
+        input_schema: {
+          type: "object",
+          additionalProperties: false,
+          properties: { a: { type: "object", additionalProperties: false, properties: {} } },
+        },
+      }],
+    });
+  } finally { restore(); }
+  const p = seenBody.tools[0].function_declarations[0].parameters;
+  assertEquals("additionalProperties" in p, false);
+  assertEquals("additionalProperties" in p.properties.a, false);
+});
+
+Deno.test("ตอบว่างเปล่าโดยไม่ได้ถูกบล็อก ต้องโยน error พร้อม finishReason", async () => {
+  const restore = stubFetch(() =>
+    new Response(JSON.stringify({ candidates: [{ finishReason: "MAX_TOKENS", content: {} }] }), { status: 200 })
+  );
+  try {
+    await assertRejects(() => callGemini(GSPEC, REQ), Error, "MAX_TOKENS");
+  } finally { restore(); }
 });
