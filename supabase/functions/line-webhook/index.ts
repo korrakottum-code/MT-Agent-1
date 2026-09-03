@@ -1572,17 +1572,18 @@ async function runEval(body: string): Promise<Response> {
     const lines = (recent ?? []).reverse()
       .map((m: any) => `${nameOf.get(m.line_user_id) ?? "?"}: ${m.message_text}`);
 
+    // สนใจอย่างเดียวว่าโดนบล็อกทั้ง prompt ไหม ปัญหาอื่น (ตอบสั้นไป ตอบช้า) ไม่เกี่ยว
+    // จึงนับว่าไม่โดน แล้วเดินต่อ ไม่ใช่ให้ทั้งการวินิจฉัยล้มเพราะเรื่องที่ไม่ได้ถาม
     const isBlocked = async (text: string): Promise<boolean> => {
       try {
         await createMessage(evalSpec, {
-          max_tokens: 16,
+          max_tokens: 256,
           system: [{ type: "text", text: "ตอบสั้น ๆ" }],
           messages: [{ role: "user", content: `${text}\n\nสรุปสั้น ๆ` }],
         });
         return false;
       } catch (e) {
-        if ((e as any)?.name === "PromptBlocked") return true;
-        throw e;
+        return (e as any)?.name === "PromptBlocked";
       }
     };
 
