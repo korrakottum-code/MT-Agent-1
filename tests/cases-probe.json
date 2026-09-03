@@ -1,9 +1,0 @@
-[
-  {
-    "id": "probe-history-bisect",
-    "why": "โหมดวินิจฉัยฝั่งเซิร์ฟเวอร์ ไล่ทีละบรรทัดว่าอันไหนในประวัติแชทที่ทำให้โมเดลบล็อกทั้ง prompt",
-    "as_user": "ตั้ม",
-    "message": "__probe_history__",
-    "min_answer_length": 1
-  }
-]

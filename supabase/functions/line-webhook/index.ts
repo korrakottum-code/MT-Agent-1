@@ -1241,6 +1241,13 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
     { type: "text", text: SYSTEM_RULES, cache_control: { type: "ephemeral" } },
     { type: "text", text: buildContext(ctx, roster ?? [], allGroups ?? [], persona?.value ?? null, crossChat) },
   ];
+  // รุ่นที่ไม่มีบริบทข้ามแชท ไว้ใช้ตอนโมเดลบล็อกทั้ง prompt ทิ้ง
+  const systemNoCross: any = crossChat
+    ? [
+      { type: "text", text: SYSTEM_RULES, cache_control: { type: "ephemeral" } },
+      { type: "text", text: buildContext(ctx, roster ?? [], allGroups ?? [], persona?.value ?? null, "") },
+    ]
+    : system;
   // เก็บรุ่นที่ไม่มีประวัติไว้ด้วย เผื่อโมเดลบล็อกทั้ง prompt ทิ้งแล้วต้องลองใหม่แบบสั้นลง
   const textWithoutHistory = userText;
   let textContent = history
@@ -1301,9 +1308,14 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
   const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, iterations: 0 };
 
   // โมเดลบางค่ายมี filter ที่บล็อกทั้ง prompt ทิ้งก่อนจะได้เริ่มตอบ และตั้งค่าปิดไม่ได้
-  // ของที่ยาวที่สุดใน prompt คือประวัติบทสนทนา ตัดออกแล้วลองใหม่หนึ่งครั้งดีกว่าเงียบใส่ผู้ใช้
-  // ถ้ายังโดนอีกก็ปล่อยให้ error ขึ้นไป จะได้รู้ว่าไม่ใช่เพราะประวัติ
-  let triedWithoutHistory = false;
+  //
+  // จากการไล่หาเมื่อ 3 ก.ย. 2569: ไม่มีข้อความไหนผิดเดี่ยว ๆ ยิงประวัติทั้งก้อนทีละบรรทัด
+  // และทั้งก้อนพร้อม system กับ tool ครบ ก็ไม่โดน ที่โดนคือตอนมี "บริบทข้ามแชท" อยู่ด้วย
+  // พร้อมกับประวัติในแชทนี้ ตัดอย่างใดอย่างหนึ่งออกแล้วผ่านทั้งคู่
+  // จึงถอยทีละขั้นตามลำดับความสำคัญ: ตัดบริบทข้ามแชทก่อน เพราะเป็นของนอกห้องและมีค่าน้อยสุด
+  // ค่อยตัดประวัติในแชทนี้ ซึ่งเป็นตัวที่ทำให้คำสั่งต่อเนื่องอย่าง "เอาอันแรก" ยังทำงานได้
+  let attempt = 0;
+  let sysNow = system;
 
   try {
   for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
@@ -1311,18 +1323,28 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
     try {
       response = await createMessage(spec, {
         max_tokens: 4096,
-        system,
+        system: sysNow,
         tools: TOOLS,
         messages,
       });
     } catch (e) {
-      if ((e as any)?.name !== "PromptBlocked" || triedWithoutHistory || !history) throw e;
-      triedWithoutHistory = true;
-      console.error("โมเดลบล็อก prompt ทิ้ง — ลองใหม่โดยตัดประวัติบทสนทนาออก");
-      messages.length = 0;
-      messages.push({ role: "user", content: textWithoutHistory });
-      i--;
-      continue;
+      if ((e as any)?.name !== "PromptBlocked") throw e;
+      attempt++;
+      if (attempt === 1 && crossChat) {
+        console.error("โมเดลบล็อก prompt ทิ้ง — ลองใหม่โดยตัดบริบทข้ามแชทออก");
+        sysNow = systemNoCross;
+        i--;
+        continue;
+      }
+      if (attempt <= 2 && history) {
+        console.error("โมเดลบล็อก prompt ทิ้ง — ลองใหม่โดยตัดประวัติบทสนทนาออกด้วย");
+        sysNow = systemNoCross;
+        messages.length = 0;
+        messages.push({ role: "user", content: textWithoutHistory });
+        i--;
+        continue;
+      }
+      throw e;
     }
 
     const u = response.usage ?? {};
@@ -1557,93 +1579,6 @@ async function runEval(body: string): Promise<Response> {
   }
   const ctx: Ctx = { caller, group, lineGroupId: group?.line_group_id ?? null };
   const chatId = group?.line_group_id ?? caller.line_user_id;
-
-  // โหมดวินิจฉัย: หาว่าบรรทัดไหนในประวัติแชทที่ทำให้โมเดลบล็อกทั้ง prompt ทิ้ง
-  // ทำฝั่งเซิร์ฟเวอร์เพราะจะได้ไม่ต้องเอาบทสนทนาจริงของทีมออกไปไว้ในไฟล์ทดสอบ
-  // ลบทิ้งได้เมื่อรู้คำตอบแล้ว ไม่ใช่ของที่ต้องอยู่ถาวร
-  if (message === "__probe_history__") {
-    const { data: roster } = await supabase.from("users")
-      .select("line_user_id, display_name").eq("is_active", true).limit(50);
-    const { data: recent } = await supabase.from("messages")
-      .select("line_user_id, message_text").eq("line_group_id", chatId)
-      .order("created_at", { ascending: false }).limit(21);
-    const nameOf = new Map((roster ?? []).map((u: any) => [u.line_user_id, u.display_name]));
-    nameOf.set("bot", "แงว");
-    const lines = (recent ?? []).reverse()
-      .map((m: any) => `${nameOf.get(m.line_user_id) ?? "?"}: ${m.message_text}`);
-
-    // สนใจอย่างเดียวว่าโดนบล็อกทั้ง prompt ไหม ปัญหาอื่น (ตอบสั้นไป ตอบช้า) ไม่เกี่ยว
-    // จึงนับว่าไม่โดน แล้วเดินต่อ ไม่ใช่ให้ทั้งการวินิจฉัยล้มเพราะเรื่องที่ไม่ได้ถาม
-    // ประกอบ system ชุดจริงแบบเดียวกับตอนตอบแชท เพราะรอบก่อนพิสูจน์แล้วว่าประวัติอย่างเดียวไม่โดน
-    const { data: allGroups } = await supabase
-      .from("groups").select("line_group_id, group_name").eq("is_active", true).limit(50);
-    const { data: persona } = await supabase.from("org_settings")
-      .select("value").eq("key", "bot_persona").maybeSingle();
-    // บริบทข้ามแชทเป็นชิ้นสุดท้ายที่โพรบก่อนหน้ายังไม่ได้ใส่ ประกอบให้เหมือนตอนตอบจริง
-    const { data: elsewhere } = await supabase.from("messages")
-      .select("line_group_id, message_text, created_at")
-      .eq("line_user_id", caller.line_user_id)
-      .neq("line_group_id", chatId)
-      .gte("created_at", new Date(Date.now() - 6 * 3600_000).toISOString())
-      .order("created_at", { ascending: false }).limit(6);
-    const groupNameOf = new Map((allGroups ?? []).map((g: any) => [g.line_group_id, g.group_name]));
-    const crossChat = (elsewhere ?? []).length > 0
-      ? `\n\nสิ่งที่ ${caller.display_name ?? "ผู้ใช้คนนี้"} เพิ่งคุยกับคุณในแชทอื่นเมื่อไม่กี่ชั่วโมงก่อน:\n` +
-        (elsewhere ?? []).reverse()
-          .map((m: any) => `- [${groupNameOf.get(m.line_group_id) ?? "แชทส่วนตัว"}] ${m.message_text}`)
-          .join("\n")
-      : "";
-    const realSystem: any = [
-      { type: "text", text: SYSTEM_RULES },
-      { type: "text", text: buildContext(ctx, roster ?? [], allGroups ?? [], persona?.value ?? null, crossChat) },
-    ];
-    const noCross: any = [
-      { type: "text", text: SYSTEM_RULES },
-      { type: "text", text: buildContext(ctx, roster ?? [], allGroups ?? [], persona?.value ?? null, "") },
-    ];
-    const tiny: any = [{ type: "text", text: "ตอบสั้น ๆ" }];
-
-    const isBlocked = async (sys: any, text: string, withTools = true): Promise<boolean> => {
-      try {
-        await createMessage(evalSpec, {
-          max_tokens: 256,
-          system: sys,
-          ...(withTools ? { tools: TOOLS } : {}),
-          messages: [{ role: "user", content: text }],
-        });
-        return false;
-      } catch (e) {
-        return (e as any)?.name === "PromptBlocked";
-      }
-    };
-
-    const report: string[] = [`ประวัติ ${lines.length} บรรทัด · โมเดล ${evalSpec.model}`];
-    const all = lines.join("\n") + "\n\nสวัสดี";
-    report.push(`มี tool + system จริง + ไม่มีประวัติ: ${await isBlocked(realSystem, "สวัสดี") ? "โดนบล็อก" : "ผ่าน"}`);
-    report.push(`มี tool + system จริง + ประวัติทั้งก้อน: ${await isBlocked(realSystem, all) ? "โดนบล็อก" : "ผ่าน"}`);
-    report.push(`ไม่มี tool + system จริง + ประวัติทั้งก้อน: ${await isBlocked(realSystem, all, false) ? "โดนบล็อก" : "ผ่าน"}`);
-    report.push(`มี tool + system สั้น + ประวัติทั้งก้อน: ${await isBlocked(tiny, all) ? "โดนบล็อก" : "ผ่าน"}`);
-    report.push(`บริบทข้ามแชท ${crossChat.length} ตัวอักษร`);
-    report.push(`มี tool + system ไม่มีข้ามแชท + ประวัติ: ${await isBlocked(noCross, all) ? "โดนบล็อก" : "ผ่าน"}`);
-    // ยิงซ้ำชุดเดิมหลายครั้ง เพราะถ้าผลไม่เหมือนกันทุกครั้ง แปลว่า filter ไม่ได้ตัดสินจากเนื้อหาอย่างเดียว
-    let hit = 0;
-    for (let k = 0; k < 5; k++) if (await isBlocked(realSystem, all)) hit++;
-    report.push(`ยิงชุดเดียวกัน 5 ครั้ง โดนบล็อก ${hit} ครั้ง`);
-
-    // ใส่ประวัติทีละบรรทัดใต้ system ชุดจริง เพื่อดูว่าเริ่มโดนตอนถึงบรรทัดไหน
-    let flipped = false;
-    for (let n = 1; n <= lines.length; n++) {
-      if (await isBlocked(realSystem, lines.slice(0, n).join("\n") + "\n\nสวัสดี")) {
-        report.push(`เริ่มโดนบล็อกเมื่อใส่ถึงบรรทัดที่ ${n} จาก ${lines.length}`);
-        report.push(`บรรทัดนั้นคือ: ${lines[n - 1].slice(0, 200)}`);
-        flipped = true;
-        break;
-      }
-    }
-    if (!flipped) report.push("ใส่ครบทุกบรรทัดใต้ system ชุดจริงแล้วก็ยังไม่โดน");
-
-    return Response.json({ as_user: caller.display_name, answer: report.join("\n"), tools_called: [], ms: 0 });
-  }
 
   const toolLog: string[] = [];
   const usage: Record<string, number> = {};
