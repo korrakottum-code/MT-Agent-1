@@ -483,3 +483,14 @@ Deno.test("ตอบว่างเปล่าโดยไม่ได้ถู
     await assertRejects(() => callGemini(GSPEC, REQ), Error, "MAX_TOKENS");
   } finally { restore(); }
 });
+
+Deno.test("thoughtSignature ที่ Gemini แนบมา ต้องส่งคืนครบ ไม่งั้นรอบสองพังทุกครั้ง", () => {
+  // อาการจริง: รอบแรกเรียก tool ได้ พอส่งผลลัพธ์กลับก็ 400 ว่าขาด thought_signature
+  const part = {
+    functionCall: { name: "get_my_tasks", args: {} },
+    thoughtSignature: "sig-xyz",
+  };
+  const r = fromGeminiResponse({ candidates: [{ content: { parts: [part] } }] });
+  const back = toGeminiContents([{ role: "assistant", content: r.content }]);
+  assertEquals(back[0].parts[0], part);
+});

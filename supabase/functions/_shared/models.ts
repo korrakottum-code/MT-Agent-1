@@ -318,7 +318,10 @@ export function toGeminiContents(messages: any[]): any[] {
         if (b.type === "text" && b.text) parts.push({ text: b.text });
         if (b.type === "tool_use") {
           nameOfId.set(b.id, b.name);
-          parts.push({ functionCall: { name: b.name, args: b.input ?? {} } });
+          // คืน part เดิมทั้งก้อนถ้ามี Gemini แนบ thoughtSignature มากับ functionCall
+          // แล้วบังคับให้ส่งกลับไปด้วย ถ้าประกอบขึ้นใหม่ ฟิลด์นั้นหายแล้วมันตอบ 400
+          // ทุกครั้งที่เข้ารอบสอง แปลว่าทุกคำสั่งที่ต้องใช้ tool จะพังหมด
+          parts.push(b._rawPart ?? { functionCall: { name: b.name, args: b.input ?? {} } });
         }
       }
       if (parts.length) contents.push({ role: "model", parts });
@@ -371,6 +374,7 @@ export function fromGeminiResponse(data: any): any {
         id: `gem_${calls++}_${part.functionCall.name}`,
         name: part.functionCall.name,
         input: part.functionCall.args ?? {},
+        _rawPart: part,
       });
     }
   }
