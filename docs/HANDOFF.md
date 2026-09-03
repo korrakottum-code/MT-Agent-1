@@ -155,8 +155,22 @@ git clone https://github.com/korrakottum-code/MT-Agent-1.git
 npx supabase login
 ```
 
-ค่า `CRON_SECRET` ที่ต้องใช้รันข้อสอบ ดูได้จาก Supabase Dashboard → Edge Functions → Secrets
-ไม่มีเก็บไว้ใน repo โดยตั้งใจ
+ผูก CLI เข้ากับโปรเจกต์ (ต้องทำใหม่ทุกเครื่อง เพราะไฟล์ที่จำการผูกไว้ไม่ได้อยู่ใน repo)
+
+```bash
+npx supabase link --project-ref ssjsjvcbulclnvlrkdsj
+```
+
+**ถ้าจะรันแค่ข้อสอบ ไม่ต้องลงอะไรในเครื่องเลย** สั่งจากหน้าเว็บ GitHub → Actions →
+"Agent eval" → Run workflow เพราะ `CRON_SECRET` เก็บไว้เป็น repository secret อยู่แล้ว
+หรือสั่งจากเทอร์มินัลด้วย `gh` ถ้าล็อกอินไว้ (`gh auth login` ครั้งเดียวต่อเครื่อง)
+
+```bash
+gh workflow run agent-eval.yml --ref main
+```
+
+ค่า `CRON_SECRET` ในเครื่องต้องใช้เฉพาะตอนอยากรัน `tests/run-eval.ps1` เองจากเทอร์มินัล
+ดูได้จาก Supabase Dashboard → Edge Functions → Secrets ไม่มีเก็บไว้ใน repo โดยตั้งใจ
 
 **ถ้าเป็นเครื่อง Mac/Linux ต้องลง PowerShell ก่อน** เพราะ `tests/run-eval.ps1` เขียนไว้ตอนอยู่ Windows
 
