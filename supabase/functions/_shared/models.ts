@@ -234,7 +234,41 @@ export async function callOpenAICompatible(spec: ModelSpec, req: any): Promise<a
     res = await send(payload);
   }
   if (!res.ok) throw new Error(`${spec.model} ตอบ ${res.status}: ${(await res.text()).slice(0, 400)}`);
-  return fromOpenAIResponse(await res.json());
+
+  let data = await res.json();
+  let out = fromOpenAIResponse(data);
+
+  // ตอบ 200 กลับมาโดยไม่มีทั้งข้อความและคำสั่งเรียก tool = ใช้อะไรไม่ได้เลย
+  // เกิดจริงกับรุ่นที่คิดก่อนตอบ: โควตาคำตอบหมดไปกับการคิด จนไม่เหลือให้พูด
+  // อาการนี้ห้ามกลืน เพราะผู้ใช้จะเห็นบอทตอบว่า "…" โดยไม่มีใครรู้ว่าเกิดอะไรขึ้น
+  if (out.content.length === 0) {
+    const reason = data.choices?.[0]?.finish_reason ?? "(ไม่บอก)";
+    console.error(
+      `${spec.model} ตอบกลับมาแบบว่างเปล่า finish_reason=${reason} ` +
+      `completion_tokens=${data.usage?.completion_tokens ?? 0} — ลองใหม่แบบปิดการคิดและเพิ่มโควตาคำตอบ`,
+    );
+    if (!applied.includes("no_reasoning")) {
+      applied.push("no_reasoning");
+      learnedFixes.set(spec.model, applied);
+    }
+    payload = { ...applyFix(payload, "no_reasoning") };
+    // เผื่อโควตาไว้มากขึ้นด้วย เพราะถ้าสาเหตุคือคิดจนหมดโควตา การปิดคิดอย่างเดียวอาจยังไม่พอ
+    if (payload.max_completion_tokens) payload.max_completion_tokens = Math.max(payload.max_completion_tokens, 8192);
+    if (payload.max_tokens) payload.max_tokens = Math.max(payload.max_tokens, 8192);
+    const retry = await send(payload);
+    if (!retry.ok) {
+      throw new Error(`${spec.model} ตอบว่างเปล่า (finish_reason=${reason}) แล้วลองใหม่ได้ ${retry.status}`);
+    }
+    data = await retry.json();
+    out = fromOpenAIResponse(data);
+    if (out.content.length === 0) {
+      throw new Error(
+        `${spec.model} ตอบว่างเปล่าสองครั้งติด finish_reason=${data.choices?.[0]?.finish_reason ?? "(ไม่บอก)"} — ` +
+        `ยังใช้โมเดลนี้ตอบไม่ได้`,
+      );
+    }
+  }
+  return out;
 }
 
 // ทางเข้าเดียวของการยิงเข้าโมเดล ไม่ว่าจะค่ายไหน

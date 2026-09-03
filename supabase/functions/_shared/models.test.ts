@@ -342,3 +342,34 @@ Deno.test("งานที่ไม่มี tool เลย ต้องไม�
   assertEquals("tools" in seen, false);
   assertEquals("tool_choice" in seen, false);
 });
+
+Deno.test("ตอบ 200 มาแบบว่างเปล่า ต้องลองใหม่แบบปิดการคิด ไม่ใช่ปล่อยให้ผู้ใช้เห็น '…'", async () => {
+  // อาการจริงของ gemini-3.7-flash วันที่ย้าย production: 200 OK แต่ completion_tokens = 0
+  const bodies: any[] = [];
+  const restore = stubFetch((_url, body) => {
+    bodies.push(body);
+    if (body.reasoning_effort !== "none") {
+      return new Response(
+        JSON.stringify({ choices: [{ finish_reason: "length", message: { content: "" } }], usage: { completion_tokens: 0 } }),
+        { status: 200 },
+      );
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: "ตอบได้แล้วค่ะ" } }] }), { status: 200 });
+  });
+  try {
+    const r = await callOpenAICompatible(SPEC, REQ);
+    assertEquals(r.content[0].text, "ตอบได้แล้วค่ะ");
+  } finally { restore(); }
+  assertEquals(bodies.length, 2);
+  assertEquals(bodies[1].reasoning_effort, "none");
+  assertEquals(bodies[1].max_completion_tokens, 8192);
+});
+
+Deno.test("ว่างเปล่าสองครั้งติด ต้องโยน error ให้เห็น ไม่ใช่ตอบเงียบ ๆ", async () => {
+  const restore = stubFetch(() =>
+    new Response(JSON.stringify({ choices: [{ finish_reason: "length", message: {} }] }), { status: 200 })
+  );
+  try {
+    await assertRejects(() => callOpenAICompatible(SPEC, REQ), Error, "ว่างเปล่าสองครั้งติด");
+  } finally { restore(); }
+});
