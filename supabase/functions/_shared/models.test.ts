@@ -10,6 +10,7 @@ import {
   callOpenAICompatible,
   fromGeminiResponse,
   fromOpenAIResponse,
+  splitSystem,
   toGeminiContents,
   toOpenAIMessages,
 } from "./models.ts";
@@ -19,19 +20,22 @@ const SYSTEM = [
   { type: "text", text: "บริบท" },
 ];
 
-Deno.test("system หลายบล็อกยุบเป็นข้อความเดียว และ cache_control ไม่หลุดไปด้วย", () => {
+// ใช้กับข้อสอบที่ตรวจการแปลข้อความอย่างเดียว ไม่มีส่วนที่ต้องย้ายไปอยู่ในข้อความผู้ใช้
+const SYS = [{ type: "text", text: "กฎ" }];
+
+Deno.test("system เหลือเฉพาะส่วนนิ่ง ส่วนที่เปลี่ยนย้ายไปเป็นข้อความผู้ใช้ และ cache_control ไม่หลุดไปด้วย", () => {
   const out = toOpenAIMessages(SYSTEM, []);
-  assertEquals(out.length, 1);
-  assertEquals(out[0], { role: "system", content: "กฎ\n\nบริบท" });
+  assertEquals(out[0], { role: "system", content: "กฎ" });
+  assertEquals(out[1], { role: "user", content: "บริบท" });
 });
 
 Deno.test("ข้อความผู้ใช้แบบสตริงส่งผ่านตรง ๆ", () => {
-  const out = toOpenAIMessages(SYSTEM, [{ role: "user", content: "งานฉันมีอะไรบ้าง" }]);
+  const out = toOpenAIMessages(SYS, [{ role: "user", content: "งานฉันมีอะไรบ้าง" }]);
   assertEquals(out[1], { role: "user", content: "งานฉันมีอะไรบ้าง" });
 });
 
 Deno.test("tool_use ของ Anthropic กลายเป็น tool_calls และ input ถูก stringify", () => {
-  const out = toOpenAIMessages(SYSTEM, [{
+  const out = toOpenAIMessages(SYS, [{
     role: "assistant",
     content: [
       { type: "text", text: "เดี๋ยวเช็คให้นะคะ" },
@@ -47,12 +51,12 @@ Deno.test("tool_use ของ Anthropic กลายเป็น tool_calls แ�
 });
 
 Deno.test("assistant ที่มีแต่ tool_use ต้องไม่มี key tool_calls โผล่มาเป็น array ว่าง", () => {
-  const out = toOpenAIMessages(SYSTEM, [{ role: "assistant", content: [{ type: "text", text: "ค่ะ" }] }]);
+  const out = toOpenAIMessages(SYS, [{ role: "assistant", content: [{ type: "text", text: "ค่ะ" }] }]);
   assertEquals("tool_calls" in out[1], false);
 });
 
 Deno.test("ผลลัพธ์ tool แตกเป็น message ละ 1 การเรียก พร้อม tool_call_id", () => {
-  const out = toOpenAIMessages(SYSTEM, [{
+  const out = toOpenAIMessages(SYS, [{
     role: "user",
     content: [
       { type: "tool_result", tool_use_id: "tu_1", content: '{"tasks":[]}' },
@@ -66,7 +70,7 @@ Deno.test("ผลลัพธ์ tool แตกเป็น message ละ 1 ก
 });
 
 Deno.test("รูปภาพกลายเป็น data URI", () => {
-  const out = toOpenAIMessages(SYSTEM, [{
+  const out = toOpenAIMessages(SYS, [{
     role: "user",
     content: [
       { type: "image", source: { type: "base64", media_type: "image/png", data: "AAA" } },
@@ -81,7 +85,7 @@ Deno.test("รูปภาพกลายเป็น data URI", () => {
 
 Deno.test("PDF ต้องพังดัง ๆ ไม่ใช่เงียบ ๆ ทิ้งไฟล์แล้วให้โมเดลตอบมั่ว", () => {
   assertThrows(() =>
-    toOpenAIMessages(SYSTEM, [{
+    toOpenAIMessages(SYS, [{
       role: "user",
       content: [{ type: "document", source: { type: "base64", media_type: "application/pdf", data: "AAA" } }],
     }])
@@ -304,12 +308,12 @@ Deno.test("ของแถมที่เจ้านั้นแนบมาก
     extra_content: { google: { thought_signature: "sig-abc" } },
   };
   const r = fromOpenAIResponse({ choices: [{ message: { tool_calls: [call] } }] });
-  const back = toOpenAIMessages(SYSTEM, [{ role: "assistant", content: r.content }]);
+  const back = toOpenAIMessages(SYS, [{ role: "assistant", content: r.content }]);
   assertEquals(back[1].tool_calls, [call]);
 });
 
 Deno.test("tool_use ที่ไม่มีของแถม ยังประกอบขึ้นใหม่ได้เหมือนเดิม", () => {
-  const back = toOpenAIMessages(SYSTEM, [{
+  const back = toOpenAIMessages(SYS, [{
     role: "assistant",
     content: [{ type: "tool_use", id: "tu_1", name: "get_my_tasks", input: { status: "TODO" } }],
   }]);
@@ -445,7 +449,7 @@ Deno.test("ทุกคำขอต้องแนบ safetySettings ไปด�
   } finally { restore(); }
   assertEquals(seenUrl, "https://generativelanguage.googleapis.com/v1beta/models/gemini-x:generateContent");
   assertEquals(seenBody.safetySettings.length, 5);
-  assertEquals(seenBody.system_instruction.parts[0].text, "กฎ\n\nบริบท");
+  assertEquals(seenBody.system_instruction.parts[0].text, "กฎ");
   assertEquals(seenBody.tools[0].function_declarations[0].name, "get_my_tasks");
   assertEquals(seenBody.toolConfig.functionCallingConfig.allowedFunctionNames, ["get_my_tasks"]);
 });
@@ -535,4 +539,52 @@ Deno.test("system ที่ส่งมาเป็นสตริงต้อ�
     await callOpenAICompatible(SPEC, { max_tokens: 512, system: "คุณคือแงว สรุปให้สั้น", messages: [{ role: "user", content: "สรุป" }] });
   } finally { restore(); }
   assertEquals(seenOpenAI.messages[0], { role: "system", content: "คุณคือแงว สรุปให้สั้น" });
+});
+
+// ---------------------------------------------------------------- ประหยัด token
+
+Deno.test("ส่วนที่ติดเครื่องหมาย cache ไว้ต้องแยกออกจากส่วนที่เปลี่ยนทุกครั้ง", () => {
+  const { stable, volatile } = splitSystem(SYSTEM);
+  assertEquals(stable, "กฎ");
+  assertEquals(volatile, "บริบท");
+});
+
+Deno.test("system ที่เป็นสตริง หรือไม่ได้ทำเครื่องหมายไว้เลย ถือว่านิ่งทั้งก้อน", () => {
+  assertEquals(splitSystem("กฎล้วน"), { stable: "กฎล้วน", volatile: "" });
+  assertEquals(splitSystem([{ type: "text", text: "ก" }, { type: "text", text: "ข" }]),
+    { stable: "ก\n\nข", volatile: "" });
+});
+
+Deno.test("ปลายทาง Gemini: system นิ่ง และบริบทย้ายไปข้อความผู้ใช้", async () => {
+  let seen: any = null;
+  const restore = stubFetch((_u, b) => {
+    seen = b;
+    return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] } }] }), { status: 200 });
+  });
+  try {
+    await callGemini(GSPEC, { max_tokens: 512, system: SYSTEM, messages: [{ role: "user", content: "หวัดดี" }] });
+  } finally { restore(); }
+  assertEquals(seen.system_instruction.parts[0].text, "กฎ");
+  assertEquals(seen.contents[0].parts[0].text, "บริบท\n\nหวัดดี");
+});
+
+Deno.test("ปลายทางแบบ OpenAI ก็ต้องแยกแบบเดียวกัน", async () => {
+  let seen: any = null;
+  const restore = stubFetch((_u, b) => {
+    seen = b;
+    return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+  });
+  try {
+    await callOpenAICompatible(SPEC, { max_tokens: 512, system: SYSTEM, messages: [{ role: "user", content: "หวัดดี" }] });
+  } finally { restore(); }
+  assertEquals(seen.messages[0], { role: "system", content: "กฎ" });
+  assertEquals(seen.messages[1].content, "บริบท\n\nหวัดดี");
+});
+
+Deno.test("token ที่ใช้คิดต้องถูกนับรวมเป็นคำตอบ เพราะ Google คิดเงินราคาเดียวกัน", () => {
+  const r = fromGeminiResponse({
+    candidates: [{ content: { parts: [{ text: "ok" }] } }],
+    usageMetadata: { promptTokenCount: 1000, candidatesTokenCount: 300, thoughtsTokenCount: 900 },
+  });
+  assertEquals(r.usage.output_tokens, 1200);
 });

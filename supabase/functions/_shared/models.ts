@@ -73,6 +73,37 @@ export function resolveModel(key: string): { spec?: ModelSpec; error?: string } 
 // Anthropic รับ system ได้ทั้งสตริงเปล่า ๆ และ array ของบล็อก และในโปรเจกต์นี้ใช้ทั้งสองแบบ:
 // แชทส่งเป็น array เพื่อวางจุด cache ส่วนงานเบื้องหลังส่งเป็นสตริง ตัวแปลข้ามค่ายต้องรับได้ทั้งคู่
 // ไม่งั้นงานที่ไม่ได้ถูกทดสอบจะพังเงียบ ๆ ตอนย้ายค่าย ซึ่งเกิดขึ้นจริงกับสรุปประจำวันเมื่อ 3 ก.ย.
+// cache ของทุกค่ายทำงานแบบ "หัวข้อความต้องเหมือนเดิม" ถ้าส่วนต้นเปลี่ยนแม้แต่นิดเดียว
+// (เวลาปัจจุบัน รายชื่อคน บริบทข้ามแชท) ก็อ่านของเก่าไม่ได้ ต้องจ่ายเต็มราคาทั้งก้อนใหม่ทุกครั้ง
+// บล็อกที่ติด cache_control ไว้คือส่วนที่ตั้งใจให้อยู่นิ่ง ที่เหลือคือส่วนที่เปลี่ยน
+// จึงส่งเฉพาะส่วนนิ่งเป็น system แล้วย้ายส่วนที่เปลี่ยนไปไว้ต้นข้อความของผู้ใช้แทน
+export function splitSystem(system: any): { stable: string; volatile: string } {
+  if (!system) return { stable: "", volatile: "" };
+  if (typeof system === "string") return { stable: system, volatile: "" };
+  const blocks = system as any[];
+  const stable: string[] = [];
+  const vol: string[] = [];
+  for (const b of blocks) {
+    const text = typeof b === "string" ? b : b?.text ?? "";
+    if (!text) continue;
+    (typeof b === "object" && b?.cache_control ? stable : vol).push(text);
+  }
+  // ไม่มีบล็อกไหนถูกทำเครื่องหมายไว้ = ไม่ได้ออกแบบมาให้ cache ถือว่านิ่งทั้งหมด
+  if (stable.length === 0) return { stable: vol.join("\n\n"), volatile: "" };
+  return { stable: stable.join("\n\n"), volatile: vol.join("\n\n") };
+}
+
+// เอาส่วนที่เปลี่ยนทุกครั้งไปแปะไว้หน้าสุดของข้อความผู้ใช้ก้อนแรก
+function prependToFirstUser(messages: any[], text: string): any[] {
+  if (!text) return messages;
+  const out = messages.map((m) => ({ ...m }));
+  const i = out.findIndex((m) => m.role === "user");
+  if (i === -1) return [{ role: "user", content: text }, ...out];
+  const c = out[i].content;
+  out[i].content = typeof c === "string" ? `${text}\n\n${c}` : [{ type: "text", text }, ...(c as any[])];
+  return out;
+}
+
 export function systemText(system: any): string {
   if (!system) return "";
   if (typeof system === "string") return system;
@@ -82,7 +113,9 @@ export function systemText(system: any): string {
 // แปลงคำขอหน้าตาแบบ Anthropic เป็น OpenAI chat completions
 // cache_control หายไปตรงนี้โดยตั้งใจ ฝั่ง OpenAI ไม่มีของแบบนั้นให้สั่ง
 export function toOpenAIMessages(system: any[], messages: any[]): any[] {
-  const out: any[] = [{ role: "system", content: systemText(system) }];
+  const { stable, volatile } = splitSystem(system);
+  const out: any[] = [{ role: "system", content: stable }];
+  messages = prependToFirstUser(messages, volatile);
 
   for (const m of messages) {
     if (m.role === "assistant") {
@@ -401,7 +434,9 @@ export function fromGeminiResponse(data: any): any {
     finish_reason: finish,
     usage: {
       input_tokens: Math.max(0, (u.promptTokenCount ?? 0) - cached),
-      output_tokens: u.candidatesTokenCount ?? 0,
+      // Google คิดเงิน token ที่ใช้ "คิด" ในราคาเดียวกับคำตอบ แต่รายงานแยกคนละช่อง
+      // ถ้าไม่บวกเข้าไป ต้นทุนที่เราเห็นจะต่ำกว่าบิลจริง แล้วเลือกโมเดลจากตัวเลขที่ผิด
+      output_tokens: (u.candidatesTokenCount ?? 0) + (u.thoughtsTokenCount ?? 0),
       cache_read_input_tokens: cached,
       cache_creation_input_tokens: 0,
     },
@@ -410,14 +445,14 @@ export function fromGeminiResponse(data: any): any {
 
 export async function callGemini(spec: ModelSpec, req: any): Promise<any> {
   const body: any = {
-    contents: toGeminiContents(req.messages),
+    contents: toGeminiContents(prependToFirstUser(req.messages, splitSystem(req.system).volatile)),
     generationConfig: { maxOutputTokens: req.max_tokens },
     // เหตุผลเดียวที่ต้องใช้ API ตัวเต็ม — โหมดเข้ากันได้กับ OpenAI ตั้งค่านี้ไม่ได้
     // บอทนี้แนบรายชื่อพนักงานจริงไปทุกครั้ง ซึ่งไปสะกิด filter จนคำสั่งพื้นฐานโดนบล็อกทิ้ง
     safetySettings: SAFETY_OFF,
   };
-  const sysText = systemText(req.system);
-  if (sysText) body.system_instruction = { parts: [{ text: sysText }] };
+  const { stable, volatile } = splitSystem(req.system);
+  if (stable) body.system_instruction = { parts: [{ text: stable }] };
   if (req.tools) {
     body.tools = [{
       function_declarations: req.tools.map((t: any) => ({
