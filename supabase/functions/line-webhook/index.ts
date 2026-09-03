@@ -1558,6 +1558,55 @@ async function runEval(body: string): Promise<Response> {
   const ctx: Ctx = { caller, group, lineGroupId: group?.line_group_id ?? null };
   const chatId = group?.line_group_id ?? caller.line_user_id;
 
+  // โหมดวินิจฉัย: หาว่าบรรทัดไหนในประวัติแชทที่ทำให้โมเดลบล็อกทั้ง prompt ทิ้ง
+  // ทำฝั่งเซิร์ฟเวอร์เพราะจะได้ไม่ต้องเอาบทสนทนาจริงของทีมออกไปไว้ในไฟล์ทดสอบ
+  // ลบทิ้งได้เมื่อรู้คำตอบแล้ว ไม่ใช่ของที่ต้องอยู่ถาวร
+  if (message === "__probe_history__") {
+    const { data: roster } = await supabase.from("users")
+      .select("line_user_id, display_name").eq("is_active", true).limit(50);
+    const { data: recent } = await supabase.from("messages")
+      .select("line_user_id, message_text").eq("line_group_id", chatId)
+      .order("created_at", { ascending: false }).limit(21);
+    const nameOf = new Map((roster ?? []).map((u: any) => [u.line_user_id, u.display_name]));
+    nameOf.set("bot", "แงว");
+    const lines = (recent ?? []).reverse()
+      .map((m: any) => `${nameOf.get(m.line_user_id) ?? "?"}: ${m.message_text}`);
+
+    const isBlocked = async (text: string): Promise<boolean> => {
+      try {
+        await createMessage(evalSpec, {
+          max_tokens: 16,
+          system: [{ type: "text", text: "ตอบสั้น ๆ" }],
+          messages: [{ role: "user", content: `${text}\n\nสรุปสั้น ๆ` }],
+        });
+        return false;
+      } catch (e) {
+        if ((e as any)?.name === "PromptBlocked") return true;
+        throw e;
+      }
+    };
+
+    const report: string[] = [`ประวัติ ${lines.length} บรรทัด · โมเดล ${evalSpec.model}`];
+    const guilty: number[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      if (await isBlocked(lines[i])) {
+        guilty.push(i);
+        report.push(`บรรทัด ${i} โดนบล็อกเดี่ยว ๆ: ${lines[i].slice(0, 120)}`);
+      }
+    }
+    if (guilty.length === 0) {
+      report.push("ไม่มีบรรทัดไหนโดนบล็อกเดี่ยว ๆ — ไล่หาว่าเริ่มโดนตอนต่อกันถึงบรรทัดที่เท่าไร");
+      for (let n = 1; n <= lines.length; n++) {
+        if (await isBlocked(lines.slice(0, n).join("\n"))) {
+          report.push(`เริ่มโดนบล็อกเมื่อรวมถึงบรรทัด ${n - 1}: ${lines[n - 1].slice(0, 160)}`);
+          break;
+        }
+        if (n === lines.length) report.push("รวมทั้งก้อนแล้วก็ยังไม่โดน — จุดชนวนไม่ได้อยู่ในประวัติ");
+      }
+    }
+    return Response.json({ as_user: caller.display_name, answer: report.join("\n"), tools_called: [], ms: 0 });
+  }
+
   const toolLog: string[] = [];
   const usage: Record<string, number> = {};
   const started = Date.now();
