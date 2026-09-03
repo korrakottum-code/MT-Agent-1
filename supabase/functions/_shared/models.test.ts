@@ -373,3 +373,42 @@ Deno.test("ว่างเปล่าสองครั้งติด ต้�
     await assertRejects(() => callOpenAICompatible(SPEC, REQ), Error, "ว่างเปล่าสองครั้งติด");
   } finally { restore(); }
 });
+
+Deno.test("ปลายทาง Gemini ต้องได้ safety_settings ไปด้วย ส่วนเจ้าอื่นต้องไม่ได้", async () => {
+  const seen: any[] = [];
+  const ok = () => new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+  let restore = stubFetch((_u, b) => { seen.push(b); return ok(); });
+  try {
+    await callOpenAICompatible(
+      { ...SPEC, model: "gemini-x", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai" },
+      REQ,
+    );
+  } finally { restore(); }
+  assertEquals(seen[0].google.safety_settings.length, 5);
+
+  restore = stubFetch((_u, b) => { seen.push(b); return ok(); });
+  try {
+    await callOpenAICompatible(SPEC, REQ);
+  } finally { restore(); }
+  assertEquals("google" in seen[1], false);
+});
+
+Deno.test("เจ้าที่ไม่รู้จักฟิลด์ safety ต้องถอดออกแล้วลองใหม่ ไม่ใช่พังทั้งเทิร์น", async () => {
+  const bodies: any[] = [];
+  const restore = stubFetch((_u, body) => {
+    bodies.push(body);
+    if ("google" in body) {
+      return new Response('{"error":{"message":"Unknown name \"google\": Cannot find field."}}', { status: 400 });
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+  });
+  try {
+    const r = await callOpenAICompatible(
+      { ...SPEC, model: "gemini-y", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai" },
+      REQ,
+    );
+    assertEquals(r.content[0].text, "ok");
+  } finally { restore(); }
+  assertEquals(bodies.length, 2);
+  assertEquals("google" in bodies[1], false);
+});

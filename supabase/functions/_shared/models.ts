@@ -160,12 +160,27 @@ export function fromOpenAIResponse(data: any): any {
 // พารามิเตอร์ที่บางเจ้าต้องปรับก่อนถึงจะยอมทำงาน รู้ได้จาก error ที่มันตอบกลับมาเท่านั้น
 // จึงลองแบบมาตรฐานก่อน แล้วปรับตามที่มันบอก ดีกว่าฮาร์ดโค้ดข้อยกเว้นรายเจ้าไว้ล่วงหน้า
 // ซึ่งจะผิดทันทีที่เขาเปลี่ยนรุ่น
-type Fix = "max_tokens" | "no_reasoning";
+type Fix = "max_tokens" | "no_reasoning" | "no_safety_override";
+
+// Gemini บล็อกคำขอทิ้งเองด้วย safety filter ก่อนจะได้ตอบอะไร คำสั่งพื้นฐานอย่าง
+// "ตอนนี้ฉันมีงานอะไรค้าง" ก็โดน เพราะ prompt แนบรายชื่อพนักงานจริงกับ id ไปทุกครั้ง
+// ตรงนี้สั่งลดระดับเฉพาะหมวดที่ผู้ใช้ตั้งเองได้ ถ้าเจ้าไหนไม่รู้จักฟิลด์นี้ ระบบจะถอดออกให้เอง
+const SAFETY_OFF = [
+  "HARM_CATEGORY_HARASSMENT",
+  "HARM_CATEGORY_HATE_SPEECH",
+  "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+  "HARM_CATEGORY_DANGEROUS_CONTENT",
+  "HARM_CATEGORY_CIVIC_INTEGRITY",
+].map((category) => ({ category, threshold: "BLOCK_NONE" }));
 
 function applyFix(body: any, fix: Fix): any {
   if (fix === "max_tokens") {
     const { max_completion_tokens, ...rest } = body;
     return { ...rest, max_tokens: max_completion_tokens };
+  }
+  if (fix === "no_safety_override") {
+    const { google, ...rest } = body;
+    return rest;
   }
   // gpt-5.x ไม่ยอมให้ใช้ tool บน /v1/chat/completions ถ้า reasoning_effort ไม่ใช่ none
   return { ...body, reasoning_effort: "none" };
@@ -174,6 +189,10 @@ function applyFix(body: any, fix: Fix): any {
 function detectFix(detail: string, applied: Fix[]): Fix | null {
   if (detail.includes("max_completion_tokens") && !applied.includes("max_tokens")) return "max_tokens";
   if (detail.includes("reasoning_effort") && !applied.includes("no_reasoning")) return "no_reasoning";
+  if (
+    (detail.includes("safety_settings") || detail.includes("\"google\"")) &&
+    !applied.includes("no_safety_override")
+  ) return "no_safety_override";
   return null;
 }
 
@@ -207,6 +226,11 @@ export async function callOpenAICompatible(spec: ModelSpec, req: any): Promise<a
       : c.type === "any"
       ? "required"
       : "auto";
+  }
+
+  // ฟิลด์นี้มีความหมายเฉพาะกับ Gemini ค่ายอื่นไม่รู้จักและจะถูกถอดออกอัตโนมัติเมื่อโดนปฏิเสธ
+  if ((spec.baseURL ?? "").includes("googleapis.com")) {
+    base.google = { safety_settings: SAFETY_OFF };
   }
 
   const send = async (payload: any) =>
@@ -247,6 +271,10 @@ export async function callOpenAICompatible(spec: ModelSpec, req: any): Promise<a
       `${spec.model} ตอบกลับมาแบบว่างเปล่า finish_reason=${reason} ` +
       `completion_tokens=${data.usage?.completion_tokens ?? 0} — ลองใหม่แบบปิดการคิดและเพิ่มโควตาคำตอบ`,
     );
+    // โดนบล็อกด้วย filter ต้องรู้ให้ได้ว่าหมวดไหน ไม่งั้นไล่ต่อไม่ถูกว่าปรับได้หรือปรับไม่ได้
+    if (String(reason).includes("content_filter")) {
+      console.error(`${spec.model} รายละเอียดการบล็อก: ${JSON.stringify(data).slice(0, 1500)}`);
+    }
     if (!applied.includes("no_reasoning")) {
       applied.push("no_reasoning");
       learnedFixes.set(spec.model, applied);
