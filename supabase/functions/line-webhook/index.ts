@@ -1215,7 +1215,22 @@ function resolveEvalModel(key: string): { spec?: ModelSpec; error?: string } {
   return { spec };
 }
 
-const PROD_SPEC: ModelSpec = { provider: "anthropic", model: MODEL, keyEnv: "ANTHROPIC_API_KEY" };
+const FALLBACK_SPEC: ModelSpec = { provider: "anthropic", model: MODEL, keyEnv: "ANTHROPIC_API_KEY" };
+
+// โมเดลที่ใช้ตอบแชทจริง ตั้งด้วย secret CHAT_MODEL เป็นชื่อย่อเดียวกับที่ข้อสอบใช้
+// อ่านใหม่ทุก request ตั้งใจให้ย้ายหรือถอยกลับได้ด้วยการแก้ secret ไม่ต้อง deploy
+// ถ้าชื่อผิดหรือ secret ของค่ายนั้นหาย ให้ตกกลับมาที่ Anthropic แทนที่จะให้บอทเงียบใส่ทีม
+// — บอทที่ตอบด้วยโมเดลสำรองยังใช้งานได้ บอทที่ไม่ตอบเลยคือของเสีย
+function chatSpec(): ModelSpec {
+  const key = (Deno.env.get("CHAT_MODEL") ?? "").trim().toLowerCase();
+  if (!key) return FALLBACK_SPEC;
+  const { spec, error } = resolveEvalModel(key);
+  if (!spec) {
+    console.error(`CHAT_MODEL="${key}" ใช้ไม่ได้ (${error}) — ตอบด้วย ${MODEL} แทน`);
+    return FALLBACK_SPEC;
+  }
+  return spec;
+}
 
 // ทางเข้าเดียวของการยิงเข้าโมเดล ไม่ว่าจะค่ายไหน
 async function createMessage(spec: ModelSpec, req: any): Promise<any> {
@@ -1316,15 +1331,26 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
       `บอกผู้ใช้ตรง ๆ อย่างเป็นมิตรและเสนอทางแก้\n\n${textContent}`;
   }
 
+  const spec = opts.spec ?? chatSpec();
+  const model = spec.model;
+
   const blocks: any[] = [];
   if (opts.image) {
     blocks.push({ type: "image", source: { type: "base64", media_type: opts.image.media_type, data: opts.image.data } });
   }
   if (opts.file?.kind === "pdf") {
-    blocks.push({
-      type: "document",
-      source: { type: "base64", media_type: "application/pdf", data: opts.file.data },
-    });
+    if (spec.provider === "anthropic") {
+      blocks.push({
+        type: "document",
+        source: { type: "base64", media_type: "application/pdf", data: opts.file.data },
+      });
+    } else {
+      // โมเดลค่ายอื่นรับ PDF แนบตรงไม่ได้ผ่านช่องทางที่ใช้อยู่ ต้องบอกผู้ใช้ให้รู้ตัว
+      // ห้ามเงียบ ๆ ทิ้งไฟล์แล้วตอบไปเรื่อย เพราะเขาจะเชื่อว่าบอทอ่านไฟล์แล้ว
+      textContent = `หมายเหตุ: ผู้ใช้ส่งไฟล์ PDF "${opts.file.name}" มา แต่ตอนนี้คุณอ่านไฟล์ PDF ไม่ได้ ` +
+        `บอกเขาตรง ๆ อย่างเป็นมิตรว่าอ่าน PDF ไม่ได้ และเสนอให้ก็อปข้อความในไฟล์มาวางแทน ` +
+        `ห้ามเดาเนื้อหาในไฟล์เด็ดขาด\n\n${textContent}`;
+    }
   }
   blocks.push({ type: "text", text: textContent });
   const content: any = blocks.length === 1 ? textContent : blocks;
@@ -1332,8 +1358,6 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
 
   // นับ token รวมทุกรอบของคำตอบเดียว แล้วบันทึกครั้งเดียวตอนจบ ไม่ว่าจะจบด้วยทางไหน
   const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, iterations: 0 };
-  const spec = opts.spec ?? PROD_SPEC;
-  const model = spec.model;
 
   try {
   for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {

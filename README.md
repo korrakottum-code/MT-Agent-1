@@ -16,7 +16,7 @@ LINE Group → LINE OA → Webhook → Supabase Edge Function
 - [x] Phase 2 — Webhook backend (Edge Function `line-webhook`) ตอบ `@AI` ในกลุ่มได้
 - [x] Phase 3 — Supabase project `MT-Agent-1` (ap-southeast-1) + ตาราง `users / groups / messages / tasks / audit_logs`
 - [x] Phase 4 — Identity: auto-register จาก LINE profile + `register_user` สำหรับ ADMIN
-- [x] Phase 5–6 — Agent (claude-sonnet-5) + Tools 8 ตัว
+- [x] Phase 5–6 — Agent + Tools 8 ตัว (โมเดลที่ตอบแชทตั้งด้วย secret `CHAT_MODEL` ตอนนี้เป็น `gemini-3.7-flash`)
 - [x] Phase 9–10 — Permission ตาม role + Audit log ทุก tool call
 - [x] MVP 0.1 — ผ่าน Test Scenario หลัก (สร้างงาน/ดูงาน/สรุปกลุ่ม/ลงทะเบียน) เมื่อ 1 ก.ย. 2026
   - เหลือทดสอบ: คนที่ไม่ใช่ ADMIN ถามงานคนอื่นแล้วต้องโดนปฏิเสธ
