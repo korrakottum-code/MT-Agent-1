@@ -32,10 +32,10 @@ jobs:
         shell: pwsh
         env:
           TEST_KEY: ${{ secrets.CRON_SECRET }}
-          # push = ด่านคัดกรองราคาถูก ใช้ haiku เสมอ (ถูกกว่า sonnet ~40% ต่อรอบ)
-          # sonnet แพงเกินกว่าจะรันทุก push — สั่งเองตอนจะปิดเฟสหรือก่อนเชื่อว่าอะไรเสร็จจริง
-          # เหตุผลเต็มอยู่ใน docs/HANDOFF.md หัวข้อผลการทดลองลดค่าใช้จ่าย
-          EVAL_MODEL: ${{ inputs.model || 'haiku' }}
+          # push ใช้โมเดลเดียวกับที่บอทตอบจริง เพราะนั่นคือสิ่งที่ต้องกันไม่ให้พัง
+          # (เคยใช้ haiku เป็นด่านราคาถูก แต่พอย้ายไป Gemini แล้วเครดิต Anthropic หมด
+          #  ด่านนั้นก็แดงทุก push ด้วยเหตุผลเรื่องบิล ไม่ใช่เรื่องโค้ด ซึ่งแย่กว่าไม่มีด่าน)
+          EVAL_MODEL: ${{ inputs.model || 'gemini-flash' }}
           EVAL_CASES: ${{ inputs.cases }}
         run: |
           if (-not $env:TEST_KEY) {

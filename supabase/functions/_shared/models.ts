@@ -1,9 +1,30 @@
-// ตัวแปลข้ามค่าย: คุยกับโมเดลที่ไม่ใช่ Anthropic ด้วยหน้าตาแบบ OpenAI chat completions
-// ซึ่งเป็นภาษากลางที่ทั้ง OpenAI และ Gemini (endpoint โหมด openai) รับได้
+// โมเดลกลางของทั้งระบบ — ทุกฟังก์ชันที่ต้องคุยกับโมเดลเรียกผ่านไฟล์นี้ไฟล์เดียว
+// เพื่อให้การย้ายค่ายทำครั้งเดียวแล้วมีผลกับทุกงาน ไม่ใช่ตามแก้ทีละที่แล้วลืมบางที่
 //
-// แยกไฟล์ออกมาเพราะเป็นส่วนที่พังเงียบที่สุด — แปลผิดนิดเดียวโมเดลจะเรียก tool ไม่ได้เลย
-// แล้วผลเทียบจะออกมาว่า "โมเดลนี้ใช้ tool ไม่เป็น" ทั้งที่เป็นความผิดของตัวแปลเอง
-// มีข้อสอบของตัวเองที่ openai-compat.test.ts รันด้วย: deno test --allow-env supabase/functions/line-webhook/
+// โมเดลนอกค่าย Anthropic คุยผ่านหน้าตาแบบ OpenAI chat completions ซึ่งเป็นภาษากลาง
+// ที่ทั้ง OpenAI และ Gemini (endpoint โหมด openai) รับได้
+// ส่วนที่แปลไป-กลับเป็นส่วนที่พังเงียบที่สุด — แปลผิดนิดเดียวโมเดลจะเรียก tool ไม่ได้เลย
+// มีข้อสอบของตัวเองที่ models.test.ts รันด้วย: deno test --allow-env supabase/functions/_shared/
+import Anthropic from "npm:@anthropic-ai/sdk";
+
+export const DEFAULT_MODEL = "claude-sonnet-5";
+
+// identity-linked API key ต้องแนบ anthropic-workspace-id ทุก request
+// ตั้งค่าเป็น "none" ได้ ถ้า key ไม่ใช่แบบผูก workspace — การส่ง header ผิด workspace
+// ทำให้ API ไปคิดเงินจาก workspace ที่ไม่มียอด แล้วตอบว่าเครดิตไม่พอ ทั้งที่บัญชีมีเงิน
+const RAW_WORKSPACE_ID = Deno.env.get("ANTHROPIC_WORKSPACE_ID") ?? "";
+const WORKSPACE_ID = RAW_WORKSPACE_ID.trim().toLowerCase() === "none" ? "" : RAW_WORKSPACE_ID.trim();
+const anthropic = new Anthropic({
+  apiKey: Deno.env.get("ANTHROPIC_API_KEY") ?? "",
+  ...(WORKSPACE_ID ? { defaultHeaders: { "anthropic-workspace-id": WORKSPACE_ID } } : {}),
+});
+
+// โมเดลที่เลือกได้ ไม่รับค่าอิสระ กันพิมพ์ผิดแล้วไปเรียกโมเดลที่ไม่มีจริง
+// โมเดลนอกค่าย Anthropic คุยผ่านหน้าตาแบบ OpenAI chat completions ซึ่งเป็นภาษากลาง
+// ที่ทั้ง OpenAI และ Gemini (endpoint โหมด openai) รับได้ ตัวแปลอยู่ที่ toOpenAIMessages
+//
+// ชื่อรุ่นจริงไม่ฝังในโค้ด ต้องตั้งเป็น secret เพราะชื่อรุ่นเปลี่ยนบ่อยกว่าโค้ด
+// และเดาผิดทีเดียวคือรันข้อสอบทั้งชุดทิ้ง — ขาดตัวไหน endpoint บอกตรง ๆ ว่าต้องตั้งอะไร
 
 export type ModelSpec = {
   provider: "anthropic" | "openai";
@@ -11,6 +32,41 @@ export type ModelSpec = {
   baseURL?: string;
   keyEnv: string;
 };
+
+export const MODELS: Record<string, () => ModelSpec> = {
+  haiku: () => ({ provider: "anthropic", model: "claude-haiku-4-5-20251001", keyEnv: "ANTHROPIC_API_KEY" }),
+  sonnet: () => ({ provider: "anthropic", model: "claude-sonnet-5", keyEnv: "ANTHROPIC_API_KEY" }),
+  luna: () => ({
+    provider: "openai",
+    model: Deno.env.get("EVAL_LUNA_MODEL") ?? "",
+    baseURL: Deno.env.get("EVAL_LUNA_BASE_URL") ?? "https://api.openai.com/v1",
+    keyEnv: "OPENAI_API_KEY",
+  }),
+  "gemini-flash": () => ({
+    provider: "openai",
+    model: Deno.env.get("EVAL_GEMINI_MODEL") ?? "",
+    // โหมดเข้ากันได้กับ OpenAI ของ Gemini — ถ้า Google ย้าย path เปลี่ยนที่ secret ได้เลย
+    baseURL: Deno.env.get("EVAL_GEMINI_BASE_URL") ?? "https://generativelanguage.googleapis.com/v1beta/openai",
+    keyEnv: "GEMINI_API_KEY",
+  }),
+};
+
+// บอกให้ชัดว่าขาดอะไร แทนที่จะปล่อยให้ยิงไปแล้วได้ 401 กลับมาแบบงง ๆ
+export function resolveModel(key: string): { spec?: ModelSpec; error?: string } {
+  const make = MODELS[key];
+  if (!make) {
+    return { error: `ไม่รู้จักโมเดล "${key}" (ใช้ได้: ${Object.keys(MODELS).join(", ")})` };
+  }
+  const spec = make();
+  if (!spec.model) {
+    const envName = key === "luna" ? "EVAL_LUNA_MODEL" : "EVAL_GEMINI_MODEL";
+    return { error: `โมเดล "${key}" ยังไม่ได้เชื่อม — ตั้ง secret ${envName} เป็นชื่อรุ่นจริงก่อน` };
+  }
+  if (!Deno.env.get(spec.keyEnv)) {
+    return { error: `โมเดล "${key}" ยังไม่ได้เชื่อม — ตั้ง secret ${spec.keyEnv} ก่อน` };
+  }
+  return { spec };
+}
 
 // แปลงคำขอหน้าตาแบบ Anthropic เป็น OpenAI chat completions
 // cache_control หายไปตรงนี้โดยตั้งใจ ฝั่ง OpenAI ไม่มีของแบบนั้นให้สั่ง
@@ -135,11 +191,23 @@ export async function callOpenAICompatible(spec: ModelSpec, req: any): Promise<a
     model: spec.model,
     max_completion_tokens: req.max_tokens,
     messages: toOpenAIMessages(req.system, req.messages),
-    tools: req.tools.map((t: any) => ({
+  };
+  if (req.tools) {
+    base.tools = req.tools.map((t: any) => ({
       type: "function",
       function: { name: t.name, description: t.description, parameters: t.input_schema },
-    })),
-  };
+    }));
+  }
+  // งานที่บังคับให้ตอบผ่าน tool ตัวเดียว (เช่น การดึงงาน/มติออกจากบทสนทนา) ต้องบังคับได้ทั้งสองค่าย
+  // ถ้าแปลข้อนี้หายไป โมเดลจะตอบเป็นข้อความเปล่า แล้วงานเบื้องหลังจะได้ผลลัพธ์ว่างทุกครั้งแบบเงียบ ๆ
+  if (req.tool_choice) {
+    const c = req.tool_choice;
+    base.tool_choice = c.type === "tool" && c.name
+      ? { type: "function", function: { name: c.name } }
+      : c.type === "any"
+      ? "required"
+      : "auto";
+  }
 
   const send = async (payload: any) =>
     await fetch(`${spec.baseURL}/chat/completions`, {
@@ -167,4 +235,20 @@ export async function callOpenAICompatible(spec: ModelSpec, req: any): Promise<a
   }
   if (!res.ok) throw new Error(`${spec.model} ตอบ ${res.status}: ${(await res.text()).slice(0, 400)}`);
   return fromOpenAIResponse(await res.json());
+}
+
+// ทางเข้าเดียวของการยิงเข้าโมเดล ไม่ว่าจะค่ายไหน
+export async function createMessage(spec: ModelSpec, req: any): Promise<any> {
+  if (spec.provider === "openai") return await callOpenAICompatible(spec, req);
+  // Haiku 4.5 ไม่รับ output_config.effort ถ้าส่งไปจะได้ 400 กลับมา
+  const supportsEffort = !spec.model.includes("haiku");
+  return await (anthropic as any).messages.create({
+    model: spec.model,
+    max_tokens: req.max_tokens,
+    ...(supportsEffort ? { output_config: { effort: "medium" } } : {}),
+    system: req.system,
+    ...(req.tools ? { tools: req.tools } : {}),
+    ...(req.tool_choice ? { tool_choice: req.tool_choice } : {}),
+    messages: req.messages,
+  });
 }

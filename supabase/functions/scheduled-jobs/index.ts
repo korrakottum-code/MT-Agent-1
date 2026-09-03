@@ -2,27 +2,32 @@
 // ถูกเรียกโดย pg_cron: daily_summary (18:00), morning_reminder (09:00), weekly_summary (จันทร์ 09:00),
 // due_reminders (ทุกนาที) และ extract_events (ทุก 3 ชม.)
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import Anthropic from "npm:@anthropic-ai/sdk";
+import { createMessage, DEFAULT_MODEL, type ModelSpec, resolveModel } from "../_shared/models.ts";
 
 const CRON_SECRET = Deno.env.get("CRON_SECRET") ?? "";
 const CHANNEL_ACCESS_TOKEN = Deno.env.get("LINE_CHANNEL_ACCESS_TOKEN") ?? "";
-const WORKSPACE_ID = Deno.env.get("ANTHROPIC_WORKSPACE_ID") ?? "";
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
 );
 
-const anthropic = new Anthropic({
-  apiKey: Deno.env.get("ANTHROPIC_API_KEY") ?? "",
-  ...(WORKSPACE_ID ? { defaultHeaders: { "anthropic-workspace-id": WORKSPACE_ID } } : {}),
-});
+// งานอ่านแล้วสรุปไม่ต้องตัดสินใจแทนใคร ผิดนิดหน่อยก็แค่สรุปไม่คม จึงใช้รุ่นถูกได้
+// ส่วนสรุปรายสัปดาห์ต้องร้อยเรื่องทั้งสัปดาห์ และรันแค่สัปดาห์ละครั้ง ค่าใช้จ่ายไม่มีนัย จึงแยกให้ตั้งรุ่นแพงกว่าได้
+// ตั้งด้วย secret เป็นชื่อย่อเดียวกับที่ CHAT_MODEL ใช้ อ่านใหม่ทุกครั้งที่ job วิ่ง ย้ายค่ายได้ไม่ต้อง deploy
+// ตั้งผิดหรือ secret ของค่ายนั้นหาย ให้ตกกลับไปที่ Anthropic แล้วเขียน log ไว้ ดีกว่างานเบื้องหลังเงียบหายไปเฉย ๆ
+function jobSpec(envName: string, fallbackEnv?: string): ModelSpec {
+  const key = (Deno.env.get(envName) ?? (fallbackEnv ? Deno.env.get(fallbackEnv) : "") ?? "").trim().toLowerCase();
+  if (key) {
+    const { spec, error } = resolveModel(key);
+    if (spec) return spec;
+    console.error(`${envName}="${key}" ใช้ไม่ได้ (${error}) — ใช้ ${DEFAULT_MODEL} แทน`);
+  }
+  return { provider: "anthropic", model: DEFAULT_MODEL, keyEnv: "ANTHROPIC_API_KEY" };
+}
 
-// งานอ่านแล้วสรุปใช้ Haiku ได้ ไม่ต้องตัดสินใจแทนใคร ผิดนิดหน่อยก็แค่สรุปไม่คม
-// ส่วนสรุปรายสัปดาห์ยังใช้ Sonnet เพราะต้องร้อยเรื่องทั้งสัปดาห์ และรันแค่สัปดาห์ละครั้ง ค่าใช้จ่ายไม่มีนัย
-// หมายเหตุ: Haiku 4.5 ไม่รับ output_config.effort จึงต้องไม่ส่งพารามิเตอร์นั้นไปด้วย
-const MODEL_CHEAP = "claude-haiku-4-5-20251001";
-const MODEL_SMART = "claude-sonnet-5";
+const specCheap = () => jobSpec("JOBS_MODEL", "CHAT_MODEL");
+const specSmart = () => jobSpec("JOBS_MODEL_SMART", "JOBS_MODEL");
 
 async function pushToGroup(to: string, text: string) {
   const res = await fetch("https://api.line.me/v2/bot/message/push", {
@@ -88,8 +93,8 @@ async function dailySummary() {
       .map((m: any) => `${nameOf.get(m.line_user_id) ?? "?"}: ${m.message_text}`)
       .join("\n");
 
-    const response: any = await (anthropic as any).messages.create({
-      model: MODEL_CHEAP,
+    const spec = specCheap();
+    const response: any = await createMessage(spec, {
       max_tokens: 1024,
       system:
         `คุณคือ MT Agent สรุปประจำวันของ LINE Group ให้ทีม อ่านบทสนทนาแล้วสรุปเป็นภาษาไทย ` +
@@ -103,7 +108,7 @@ async function dailySummary() {
           `งานที่เสร็จวันนี้: ${JSON.stringify(doneTasks ?? [])}`,
       }],
     });
-    await logTokenUsage("daily_summary", MODEL_CHEAP, g.line_group_id, response);
+    await logTokenUsage("daily_summary", spec.model, g.line_group_id, response);
     const summary = response.content
       .filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
     if (!summary) continue;
@@ -213,10 +218,9 @@ async function weeklySummary() {
       .map((m: any) => `${nameOf.get(m.line_user_id) ?? "?"}: ${m.message_text}`)
       .join("\n").slice(0, 60000);
 
-    const response: any = await (anthropic as any).messages.create({
-      model: MODEL_SMART,
+    const spec = specSmart();
+    const response: any = await createMessage(spec, {
       max_tokens: 1500,
-      output_config: { effort: "medium" },
       system:
         `คุณคือแงว สรุปภาพรวมประจำสัปดาห์ของทีมจากบทสนทนาและข้อมูลงาน ตอบภาษาไทย ` +
         `ห้ามใช้ markdown ใช้หัวข้อสั้นกับเลขข้อ ไม่เกิน 18 บรรทัด เนื้อหาต้องมี: ` +
@@ -231,7 +235,7 @@ async function weeklySummary() {
           `งานที่เลยกำหนดและยังค้าง: ${JSON.stringify(withOwner(overdue))}`,
       }],
     });
-    await logTokenUsage("weekly_summary", MODEL_SMART, g.line_group_id, response);
+    await logTokenUsage("weekly_summary", spec.model, g.line_group_id, response);
     const summary = response.content
       .filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
     if (!summary) continue;
@@ -329,8 +333,8 @@ async function extractEvents() {
         .join("\n").slice(0, 60000);
       const nowIso = new Date(runStart.getTime() + 7 * 3600_000).toISOString().replace("Z", "+07:00");
 
-      const response: any = await (anthropic as any).messages.create({
-        model: MODEL_CHEAP,
+      const spec = specCheap();
+      const response: any = await createMessage(spec, {
         max_tokens: 2000,
         system:
           `คุณคือแงว อ่านบทสนทนาในกลุ่มงานแล้วดึงเฉพาะ 3 อย่างนี้ออกมา\n` +
@@ -358,7 +362,7 @@ async function extractEvents() {
         }],
       });
 
-      await logTokenUsage("extract_events", MODEL_CHEAP, g.line_group_id, response);
+      await logTokenUsage("extract_events", spec.model, g.line_group_id, response);
 
       const call = (response.content ?? []).find((b: any) => b.type === "tool_use");
       const found = (call?.input?.events ?? []).filter((e: any) =>

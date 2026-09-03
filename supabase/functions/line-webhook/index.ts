@@ -1,8 +1,13 @@
 // MT Agent 1 — LINE Webhook + AI Agent (MVP 0.1)
 // LINE → verify signature → เก็บ message → resolve identity → Claude + Tools → ตอบกลับ
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import Anthropic from "npm:@anthropic-ai/sdk";
-import { callOpenAICompatible, type ModelSpec } from "./openai-compat.ts";
+import {
+  createMessage,
+  DEFAULT_MODEL,
+  MODELS,
+  type ModelSpec,
+  resolveModel,
+} from "../_shared/models.ts";
 
 const CHANNEL_SECRET = Deno.env.get("LINE_CHANNEL_SECRET") ?? "";
 const CHANNEL_ACCESS_TOKEN = Deno.env.get("LINE_CHANNEL_ACCESS_TOKEN") ?? "";
@@ -12,16 +17,7 @@ const supabase = createClient(
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
 );
 
-// identity-linked API key ต้องแนบ anthropic-workspace-id ทุก request
-// ตั้งค่าเป็น "none" ได้ ถ้า key ไม่ใช่แบบผูก workspace — การส่ง header ผิด workspace
-// ทำให้ API ไปคิดเงินจาก workspace ที่ไม่มียอด แล้วตอบว่าเครดิตไม่พอ ทั้งที่บัญชีมีเงิน
-const RAW_WORKSPACE_ID = Deno.env.get("ANTHROPIC_WORKSPACE_ID") ?? "";
-const WORKSPACE_ID = RAW_WORKSPACE_ID.trim().toLowerCase() === "none" ? "" : RAW_WORKSPACE_ID.trim();
-const anthropic = new Anthropic({
-  apiKey: Deno.env.get("ANTHROPIC_API_KEY") ?? "",
-  ...(WORKSPACE_ID ? { defaultHeaders: { "anthropic-workspace-id": WORKSPACE_ID } } : {}),
-});
-const MODEL = "claude-sonnet-5";
+const MODEL = DEFAULT_MODEL;
 const MAX_TOOL_ITERATIONS = 8;
 // นานแค่ไหนหลังบอทพูด ที่ยังนับว่าข้อความถัดมาน่าจะคุยกับบอทอยู่
 // ตั้งสั้นไว้เพราะทุกข้อความในหน้าต่างนี้ต้องเสียค่าเรียกโมเดลเพื่อตัดสินว่าจะตอบหรือเงียบ
@@ -1173,48 +1169,6 @@ type AgentOpts = {
   usageOut?: Record<string, number>;
 };
 
-// โมเดลที่ยอมให้ข้อสอบเลือกได้ ไม่รับค่าอิสระ กันพิมพ์ผิดแล้วไปเรียกโมเดลที่ไม่มีจริง
-// โมเดลนอกค่าย Anthropic คุยผ่านหน้าตาแบบ OpenAI chat completions ซึ่งเป็นภาษากลาง
-// ที่ทั้ง OpenAI และ Gemini (endpoint โหมด openai) รับได้ ตัวแปลอยู่ที่ toOpenAIMessages
-//
-// ชื่อรุ่นจริงไม่ฝังในโค้ด ต้องตั้งเป็น secret เพราะชื่อรุ่นเปลี่ยนบ่อยกว่าโค้ด
-// และเดาผิดทีเดียวคือรันข้อสอบทั้งชุดทิ้ง — ขาดตัวไหน endpoint บอกตรง ๆ ว่าต้องตั้งอะไร
-
-const EVAL_MODELS: Record<string, () => ModelSpec> = {
-  haiku: () => ({ provider: "anthropic", model: "claude-haiku-4-5-20251001", keyEnv: "ANTHROPIC_API_KEY" }),
-  sonnet: () => ({ provider: "anthropic", model: "claude-sonnet-5", keyEnv: "ANTHROPIC_API_KEY" }),
-  luna: () => ({
-    provider: "openai",
-    model: Deno.env.get("EVAL_LUNA_MODEL") ?? "",
-    baseURL: Deno.env.get("EVAL_LUNA_BASE_URL") ?? "https://api.openai.com/v1",
-    keyEnv: "OPENAI_API_KEY",
-  }),
-  "gemini-flash": () => ({
-    provider: "openai",
-    model: Deno.env.get("EVAL_GEMINI_MODEL") ?? "",
-    // โหมดเข้ากันได้กับ OpenAI ของ Gemini — ถ้า Google ย้าย path เปลี่ยนที่ secret ได้เลย
-    baseURL: Deno.env.get("EVAL_GEMINI_BASE_URL") ?? "https://generativelanguage.googleapis.com/v1beta/openai",
-    keyEnv: "GEMINI_API_KEY",
-  }),
-};
-
-// บอกให้ชัดว่าขาดอะไร แทนที่จะปล่อยให้ยิงไปแล้วได้ 401 กลับมาแบบงง ๆ
-function resolveEvalModel(key: string): { spec?: ModelSpec; error?: string } {
-  const make = EVAL_MODELS[key];
-  if (!make) {
-    return { error: `ไม่รู้จักโมเดล "${key}" (ใช้ได้: ${Object.keys(EVAL_MODELS).join(", ")})` };
-  }
-  const spec = make();
-  if (!spec.model) {
-    const envName = key === "luna" ? "EVAL_LUNA_MODEL" : "EVAL_GEMINI_MODEL";
-    return { error: `โมเดล "${key}" ยังไม่ได้เชื่อม — ตั้ง secret ${envName} เป็นชื่อรุ่นจริงก่อน` };
-  }
-  if (!Deno.env.get(spec.keyEnv)) {
-    return { error: `โมเดล "${key}" ยังไม่ได้เชื่อม — ตั้ง secret ${spec.keyEnv} ก่อน` };
-  }
-  return { spec };
-}
-
 const FALLBACK_SPEC: ModelSpec = { provider: "anthropic", model: MODEL, keyEnv: "ANTHROPIC_API_KEY" };
 
 // โมเดลที่ใช้ตอบแชทจริง ตั้งด้วย secret CHAT_MODEL เป็นชื่อย่อเดียวกับที่ข้อสอบใช้
@@ -1224,27 +1178,12 @@ const FALLBACK_SPEC: ModelSpec = { provider: "anthropic", model: MODEL, keyEnv: 
 function chatSpec(): ModelSpec {
   const key = (Deno.env.get("CHAT_MODEL") ?? "").trim().toLowerCase();
   if (!key) return FALLBACK_SPEC;
-  const { spec, error } = resolveEvalModel(key);
+  const { spec, error } = resolveModel(key);
   if (!spec) {
     console.error(`CHAT_MODEL="${key}" ใช้ไม่ได้ (${error}) — ตอบด้วย ${MODEL} แทน`);
     return FALLBACK_SPEC;
   }
   return spec;
-}
-
-// ทางเข้าเดียวของการยิงเข้าโมเดล ไม่ว่าจะค่ายไหน
-async function createMessage(spec: ModelSpec, req: any): Promise<any> {
-  if (spec.provider === "openai") return await callOpenAICompatible(spec, req);
-  // Haiku 4.5 ไม่รับ output_config.effort ถ้าส่งไปจะได้ 400 กลับมา
-  const supportsEffort = !spec.model.includes("haiku");
-  return await (anthropic as any).messages.create({
-    model: spec.model,
-    max_tokens: req.max_tokens,
-    ...(supportsEffort ? { output_config: { effort: "medium" } } : {}),
-    system: req.system,
-    tools: req.tools,
-    messages: req.messages,
-  });
 }
 
 // เก็บยอด token ทุกครั้งที่เรียกโมเดล ถ้าเก็บไม่ได้ต้องไม่ทำให้บอทตอบไม่ได้
@@ -1585,7 +1524,7 @@ async function handleEvent(event: any) {
 // ใช้ตรวจว่าการแก้แต่ละครั้งทำให้พฤติกรรมเดิมพังหรือไม่ ก่อนปล่อยให้ทีมใช้
 async function runEval(body: string): Promise<Response> {
   const { as_user, message, in_group, model: modelKey, judge } = JSON.parse(body);
-  const { spec: evalSpec, error: modelError } = resolveEvalModel(String(modelKey ?? "sonnet").toLowerCase());
+  const { spec: evalSpec, error: modelError } = resolveModel(String(modelKey ?? "sonnet").toLowerCase());
   if (!evalSpec) return Response.json({ error: modelError }, { status: 400 });
   const { data: caller } = await supabase.from("users").select("*")
     .ilike("display_name", `%${as_user}%`).eq("is_active", true).maybeSingle();

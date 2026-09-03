@@ -1,5 +1,5 @@
 // ข้อสอบของตัวแปลข้ามค่าย — รันฟรี ไม่ยิงเข้าโมเดลจริง ไม่เสียเงิน
-// deno test --allow-env supabase/functions/line-webhook/
+// deno test --allow-env supabase/functions/_shared/
 //
 // จุดประสงค์: ถ้าตัวแปลพัง ผลเทียบโมเดลจะโกหกว่า "โมเดลนี้เรียก tool ไม่เป็น"
 // ทั้งที่ความจริงคือเราแปลคำขอผิดเอง ข้อสอบชุดนี้กันไม่ให้สรุปผิดแบบนั้น
@@ -9,7 +9,7 @@ import {
   callOpenAICompatible,
   fromOpenAIResponse,
   toOpenAIMessages,
-} from "./openai-compat.ts";
+} from "./models.ts";
 
 const SYSTEM = [
   { type: "text", text: "กฎ", cache_control: { type: "ephemeral" } },
@@ -315,4 +315,30 @@ Deno.test("tool_use ที่ไม่มีของแถม ยังปร�
     type: "function",
     function: { name: "get_my_tasks", arguments: '{"status":"TODO"}' },
   }]);
+});
+
+Deno.test("การบังคับให้ตอบผ่าน tool ตัวเดียว ต้องแปลไปถึงฝั่ง OpenAI ด้วย", async () => {
+  // งานอ่านบทสนทนาจับงาน/มติ บังคับ tool ตัวเดียวเสมอ ถ้าแปลหาย ผลลัพธ์จะว่างทุกครั้งแบบเงียบ ๆ
+  let seen: any = null;
+  const restore = stubFetch((_url, body) => {
+    seen = body;
+    return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+  });
+  try {
+    await callOpenAICompatible(SPEC, { ...REQ, tool_choice: { type: "tool", name: "record_events" } });
+  } finally { restore(); }
+  assertEquals(seen.tool_choice, { type: "function", function: { name: "record_events" } });
+});
+
+Deno.test("งานที่ไม่มี tool เลย ต้องไม่ส่ง key tools ว่าง ๆ ไป", async () => {
+  let seen: any = null;
+  const restore = stubFetch((_url, body) => {
+    seen = body;
+    return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+  });
+  try {
+    await callOpenAICompatible(SPEC, { max_tokens: 1024, system: SYSTEM, messages: REQ.messages });
+  } finally { restore(); }
+  assertEquals("tools" in seen, false);
+  assertEquals("tool_choice" in seen, false);
 });
