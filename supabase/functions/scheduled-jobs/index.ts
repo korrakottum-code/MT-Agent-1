@@ -29,6 +29,23 @@ function jobSpec(envName: string, fallbackEnv?: string): ModelSpec {
 const specCheap = () => jobSpec("JOBS_MODEL", "CHAT_MODEL");
 const specSmart = () => jobSpec("JOBS_MODEL_SMART", "JOBS_MODEL");
 
+// จำกัดให้ job ทำเฉพาะบางกลุ่ม ตั้งด้วย secret JOB_ONLY_GROUPS เป็นชื่อกลุ่มคั่นด้วยจุลภาค
+// มีไว้เพื่อทดสอบ job ที่ยิงข้อความเข้ากลุ่มจริง โดยไม่ไปรบกวนห้องที่ไม่ได้ตั้งใจทดสอบ
+// ปกติไม่ต้องตั้ง ถ้าไม่ตั้งคือทำครบทุกกลุ่มเหมือนเดิม อย่าลืมลบทิ้งหลังทดสอบเสร็จ
+function onlyGroups(): string[] | null {
+  const raw = (Deno.env.get("JOB_ONLY_GROUPS") ?? "").trim();
+  if (!raw) return null;
+  return raw.split(",").map((x) => x.trim()).filter(Boolean);
+}
+
+function pickGroups<T extends { group_name?: string | null }>(groups: T[]): T[] {
+  const only = onlyGroups();
+  if (!only) return groups;
+  const picked = groups.filter((g) => only.includes(g.group_name ?? ""));
+  console.log(`JOB_ONLY_GROUPS ตั้งไว้ ทำเฉพาะ ${picked.map((g) => g.group_name).join(", ") || "(ไม่ตรงสักกลุ่ม)"}`);
+  return picked;
+}
+
 async function pushToGroup(to: string, text: string) {
   const res = await fetch("https://api.line.me/v2/bot/message/push", {
     method: "POST",
@@ -68,7 +85,8 @@ async function logTokenUsage(purpose: string, model: string, chatId: string | nu
 // ---------------------------------------------------------------- daily summary (18:00)
 
 async function dailySummary() {
-  const { data: groups } = await supabase.from("groups").select("*").eq("is_active", true);
+  const { data: allActive } = await supabase.from("groups").select("*").eq("is_active", true);
+  const groups = pickGroups(allActive ?? []);
   const since = new Date(Date.now() - 24 * 3600_000).toISOString();
   const { data: users } = await supabase.from("users").select("id, line_user_id, display_name");
   const nameOf = new Map((users ?? []).map((u: any) => [u.line_user_id, u.display_name]));
@@ -145,7 +163,8 @@ async function dailySummary() {
 async function morningReminder() {
   const now = new Date();
   const in24h = new Date(now.getTime() + 24 * 3600_000);
-  const { data: groups } = await supabase.from("groups").select("*").eq("is_active", true);
+  const { data: allActive } = await supabase.from("groups").select("*").eq("is_active", true);
+  const groups = pickGroups(allActive ?? []);
 
   for (const g of groups ?? []) {
     const { data: tasks } = await supabase.from("tasks")
@@ -185,7 +204,8 @@ async function morningReminder() {
 
 async function weeklySummary() {
   const since = new Date(Date.now() - 7 * 24 * 3600_000).toISOString();
-  const { data: groups } = await supabase.from("groups").select("*").eq("is_active", true);
+  const { data: allActive } = await supabase.from("groups").select("*").eq("is_active", true);
+  const groups = pickGroups(allActive ?? []);
   const { data: users } = await supabase.from("users").select("id, line_user_id, display_name");
   const nameOf = new Map((users ?? []).map((u: any) => [u.line_user_id, u.display_name]));
   nameOf.set("bot", "แงว");
@@ -291,7 +311,8 @@ async function extractEvents() {
     .select("value").eq("key", EVENT_CURSOR_KEY).maybeSingle();
   const since = cursorRow?.value ?? new Date(runStart.getTime() - 24 * 3600_000).toISOString();
 
-  const { data: groups } = await supabase.from("groups").select("*").eq("is_active", true);
+  const { data: allActive } = await supabase.from("groups").select("*").eq("is_active", true);
+  const groups = pickGroups(allActive ?? []);
   const { data: users } = await supabase.from("users")
     .select("id, line_user_id, display_name").eq("is_active", true);
   const nameOf = new Map((users ?? []).map((u: any) => [u.line_user_id, u.display_name]));
