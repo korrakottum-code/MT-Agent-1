@@ -425,20 +425,33 @@ export async function callGemini(spec: ModelSpec, req: any): Promise<any> {
     };
   }
 
-  const res = await fetch(
-    `${spec.baseURL}/models/${spec.model}:generateContent`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": Deno.env.get(spec.keyEnv) ?? "",
+  const send = async () =>
+    await fetch(
+      `${spec.baseURL}/models/${spec.model}:generateContent`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": Deno.env.get(spec.keyEnv) ?? "",
+        },
+        body: JSON.stringify(body),
       },
-      body: JSON.stringify(body),
-    },
-  );
+    );
+
+  let res = await send();
   if (!res.ok) throw new Error(`${spec.model} ตอบ ${res.status}: ${(await res.text()).slice(0, 400)}`);
 
-  const data = await res.json();
+  let data = await res.json();
+
+  // MALFORMED_FUNCTION_CALL = โมเดลตั้งใจเรียก tool แล้วเขียนคำสั่งออกมาไม่ถูกรูป
+  // ได้คำตอบเปล่ากลับมาทั้งที่ไม่ได้ถูกบล็อก เป็นอาการชั่วคราวที่ยิงซ้ำแล้วมักหาย
+  // เจอจริง 1 ครั้งจาก 33 ตอนผู้ใช้ส่ง PDF รัว ๆ ซึ่งผู้ใช้เห็นเป็น "ระบบขัดข้อง"
+  if (data.candidates?.[0]?.finishReason === "MALFORMED_FUNCTION_CALL") {
+    console.error(`${spec.model} เขียนคำสั่งเรียก tool ออกมาไม่ถูกรูป — ยิงซ้ำอีกครั้ง`);
+    res = await send();
+    if (!res.ok) throw new Error(`${spec.model} ตอบ ${res.status}: ${(await res.text()).slice(0, 400)}`);
+    data = await res.json();
+  }
 
   // บล็อกทั้ง prompt ตั้งแต่ยังไม่เริ่มตอบ — ไม่มี candidates กลับมาเลย มีแต่เหตุผล
   // PROHIBITED_CONTENT เป็น filter ที่ผู้เรียกตั้งค่าไม่ได้ safetySettings ช่วยไม่ได้

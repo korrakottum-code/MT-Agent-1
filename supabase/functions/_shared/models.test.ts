@@ -494,3 +494,22 @@ Deno.test("thoughtSignature ที่ Gemini แนบมา ต้องส่�
   const back = toGeminiContents([{ role: "assistant", content: r.content }]);
   assertEquals(back[0].parts[0], part);
 });
+
+Deno.test("คำสั่งเรียก tool ที่เขียนออกมาไม่ถูกรูป ต้องยิงซ้ำ ไม่ใช่ตอบว่าระบบขัดข้อง", async () => {
+  let calls = 0;
+  const restore = stubFetch(() => {
+    calls++;
+    if (calls === 1) {
+      return new Response(
+        JSON.stringify({ candidates: [{ finishReason: "MALFORMED_FUNCTION_CALL", content: { parts: [{ text: "" }] } }] }),
+        { status: 200 },
+      );
+    }
+    return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "สรุปให้แล้วค่ะ" }] } }] }), { status: 200 });
+  });
+  try {
+    const r = await callGemini(GSPEC, REQ);
+    assertEquals(r.content[0].text, "สรุปให้แล้วค่ะ");
+  } finally { restore(); }
+  assertEquals(calls, 2);
+});
