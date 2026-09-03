@@ -1585,11 +1585,12 @@ async function runEval(body: string): Promise<Response> {
     ];
     const tiny: any = [{ type: "text", text: "ตอบสั้น ๆ" }];
 
-    const isBlocked = async (sys: any, text: string): Promise<boolean> => {
+    const isBlocked = async (sys: any, text: string, withTools = true): Promise<boolean> => {
       try {
         await createMessage(evalSpec, {
           max_tokens: 256,
           system: sys,
+          ...(withTools ? { tools: TOOLS } : {}),
           messages: [{ role: "user", content: text }],
         });
         return false;
@@ -1599,9 +1600,11 @@ async function runEval(body: string): Promise<Response> {
     };
 
     const report: string[] = [`ประวัติ ${lines.length} บรรทัด · โมเดล ${evalSpec.model}`];
-    report.push(`system ชุดจริง + ไม่มีประวัติ: ${await isBlocked(realSystem, "สวัสดี") ? "โดนบล็อก" : "ผ่าน"}`);
-    report.push(`system ชุดจริง + ประวัติทั้งก้อน: ${await isBlocked(realSystem, lines.join("\n") + "\n\nสวัสดี") ? "โดนบล็อก" : "ผ่าน"}`);
-    report.push(`system สั้น ๆ + ประวัติทั้งก้อน: ${await isBlocked(tiny, lines.join("\n") + "\n\nสวัสดี") ? "โดนบล็อก" : "ผ่าน"}`);
+    const all = lines.join("\n") + "\n\nสวัสดี";
+    report.push(`มี tool + system จริง + ไม่มีประวัติ: ${await isBlocked(realSystem, "สวัสดี") ? "โดนบล็อก" : "ผ่าน"}`);
+    report.push(`มี tool + system จริง + ประวัติทั้งก้อน: ${await isBlocked(realSystem, all) ? "โดนบล็อก" : "ผ่าน"}`);
+    report.push(`ไม่มี tool + system จริง + ประวัติทั้งก้อน: ${await isBlocked(realSystem, all, false) ? "โดนบล็อก" : "ผ่าน"}`);
+    report.push(`มี tool + system สั้น + ประวัติทั้งก้อน: ${await isBlocked(tiny, all) ? "โดนบล็อก" : "ผ่าน"}`);
 
     // ใส่ประวัติทีละบรรทัดใต้ system ชุดจริง เพื่อดูว่าเริ่มโดนตอนถึงบรรทัดไหน
     let flipped = false;
