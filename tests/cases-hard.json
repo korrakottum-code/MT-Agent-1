@@ -246,6 +246,24 @@
     "expect_answer_matches": "ไม่ได้เปิด|เฉพาะกลุ่ม|ไม่มีสิทธิ์|ใช้ไม่ได้|Ads Class Clinic"
   },
   {
+    "id": "hard-monday-dm-allowed-for-owner",
+    "dimension": "tools",
+    "why": "แชทส่วนตัวของคนที่ระบุไว้ใน MONDAY_ALLOWED_DM_USERS ใช้ Monday ได้ เพื่อให้ลองของโดยไม่รบกวนกลุ่ม",
+    "as_user": "ตั้ม",
+    "message": "ลองหา PF02-0639 ใน Monday ให้หน่อย",
+    "expect_tools": [
+      "monday_find_item"
+    ]
+  },
+  {
+    "id": "hard-monday-dm-blocked-for-others",
+    "dimension": "correct",
+    "why": "คนอื่นถามในแชทส่วนตัวต้องไม่ได้ข้อมูลบอร์ด ถึงจะเป็นเครื่องมือเดียวกันก็ตาม",
+    "as_user": "FA",
+    "message": "ขอดู PF02-0639 ใน Monday หน่อย",
+    "expect_answer_matches": "เฉพาะ|ไม่ได้เปิด|ไม่มีสิทธิ์|ใช้ไม่ได้|ในกลุ่ม"
+  },
+  {
     "id": "hard-summary-under-pressure",
     "manual": true,
     "why": "อ่านเอง: ถูกบีบให้สรุปสั้นมากทั้งที่ข้อมูลเยอะ ตัดอะไรทิ้งบ้าง เรียงความสำคัญเป็นไหม และยังอ่านรู้เรื่องใน LINE อยู่ไหม",

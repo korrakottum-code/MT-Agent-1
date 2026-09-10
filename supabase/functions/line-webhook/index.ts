@@ -227,7 +227,16 @@ function mondayAllowedHere(ctx: Ctx): string | null {
   if (!raw) return "ยังไม่ได้เปิดใช้ Monday — ต้องตั้ง secret MONDAY_ALLOWED_GROUPS ว่าให้ใช้ได้ในกลุ่มไหนก่อน";
   const allowed = raw.split(",").map((x) => x.trim()).filter(Boolean);
   const here = ctx.group?.group_name ?? null;
-  if (!here) return `Monday ใช้ได้เฉพาะในกลุ่ม ${allowed.join(" หรือ ")} ไม่ใช่ในแชทส่วนตัว`;
+
+  // ในแชทส่วนตัวเปิดให้เฉพาะคนที่ระบุชื่อไว้ ใช้ตอนอยากลองโดยไม่รบกวนกลุ่ม
+  if (!here) {
+    const people = (Deno.env.get("MONDAY_ALLOWED_DM_USERS") ?? "")
+      .split(",").map((x) => x.trim()).filter(Boolean);
+    const me = String(ctx.caller.display_name ?? "");
+    if (people.length > 0 && people.includes(me)) return null;
+    return `Monday ในแชทส่วนตัวเปิดให้เฉพาะบางคน ถ้าอยากใช้ให้ถามในกลุ่ม ${allowed.join(" หรือ ")}`;
+  }
+
   if (!allowed.includes(here)) return `กลุ่มนี้ไม่ได้เปิดให้ใช้ Monday (เปิดไว้เฉพาะ ${allowed.join(", ")})`;
   return null;
 }
@@ -431,7 +440,7 @@ const TOOLS = [
     description:
       "ค้นงานใน Monday ของทีม ค้นได้ทั้งจากชื่องานและจากรหัสงาน (เช่น PF02-0639 PALL00-1030 PO00-0006) " +
       "ใช้เมื่อมีคนถามว่า 'รหัสนี้อยู่ไหน' 'หาไม่เจอใน Monday' 'งานนี้สถานะอะไรแล้ว' " +
-      "ตอบกลับพร้อมลิงก์เปิดรายการนั้นได้เลย ใช้ได้เฉพาะกลุ่มที่เปิดสิทธิ์ไว้",
+      "ตอบกลับพร้อมลิงก์เปิดรายการนั้นได้เลย ใช้ได้เฉพาะกลุ่มที่เปิดสิทธิ์ไว้ และแชทส่วนตัวของคนที่ระบุไว้",
     input_schema: {
       type: "object",
       properties: {
