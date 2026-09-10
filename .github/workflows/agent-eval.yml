@@ -19,7 +19,7 @@ on:
       cases:
         description: "Which case file to run"
         type: choice
-        options: ["tests/cases.json", "tests/cases-judge.json", "tests/cases-compare.json"]
+        options: ["tests/cases.json", "tests/cases-hard.json", "tests/cases-judge.json", "tests/cases-compare.json"]
         default: "tests/cases.json"
 
 jobs:
