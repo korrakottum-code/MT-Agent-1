@@ -35,6 +35,15 @@ function Test-AgentCase {
   if ($Case.forbid_answer_matches -and $answer -match $Case.forbid_answer_matches) {
     $problems += "answer contains forbidden /$($Case.forbid_answer_matches)/"
   }
+  # A promise is only a lie if nothing backed it up. Wording alone cannot tell the two apart,
+  # so pair the claim with the tool that would have to have run for the claim to be true.
+  if ($Case.claim_needs_tool) {
+    $claim = [string]$Case.claim_needs_tool.answer_matches
+    $needed = [string]$Case.claim_needs_tool.tool
+    if ($claim -and $answer -match $claim -and $tools -notcontains $needed) {
+      $problems += "claimed /$claim/ without calling '$needed' (called: $($tools -join ', '))"
+    }
+  }
   if ($Case.min_answer_length -and $answer.Length -lt $Case.min_answer_length) {
     $problems += "answer too short ($($answer.Length) chars)"
   }
