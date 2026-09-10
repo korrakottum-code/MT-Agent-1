@@ -1058,14 +1058,23 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
         // และแต่ละบอร์ดมีคอลัมน์ไม่เหมือนกัน จึงถามก่อนว่าบอร์ดไหนมีคอลัมน์รหัสจริง
         // แล้วค่อยค้นทีละบอร์ดด้วยคอลัมน์เท่าที่บอร์ดนั้นมี
         const schema = await mondayQuery(
-          `query($ids: [ID!]) { boards(ids: $ids) { id name columns { id } } }`,
+          `query($ids: [ID!]) { boards(ids: $ids) { id name columns { id type } } }`,
           { ids: boardIds },
         );
         const wanted = mondayCodeColumns();
         const boards: any[] = [];
         for (const b of schema?.boards ?? []) {
-          const have = new Set((b.columns ?? []).map((c: any) => String(c.id)));
-          const cols = ["name", ...wanted.filter((c) => have.has(c))];
+          const all = (b.columns ?? []).map((c: any) => ({ id: String(c.id), type: String(c.type) }));
+          const have = new Set(all.map((c: any) => c.id));
+          // รหัสงานของทีมไม่ได้อยู่คอลัมน์เดียวกันทุกบอร์ด และบอร์ดเก่ากับบอร์ดใหม่ตั้งชื่อคอลัมน์คนละแบบ
+          // การไล่ค้นทุกคอลัมน์ที่เก็บข้อความ จึงเจอรหัสได้โดยไม่ต้องมาตามแก้ค่าคอนฟิกทุกครั้งที่เปิดบอร์ดใหม่
+          const textCols = all
+            .filter((c: any) => c.type === "text" || c.type === "long_text")
+            .map((c: any) => c.id);
+          const cols = [
+            "name",
+            ...new Set([...wanted.filter((c) => have.has(c)), ...textCols]),
+          ].slice(0, 12);
           const rules = cols
             .map((c) => `{column_id: "${c}", compare_value: [$t], operator: contains_text}`)
             .join(", ");
