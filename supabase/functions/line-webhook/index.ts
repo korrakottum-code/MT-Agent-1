@@ -264,6 +264,129 @@ async function mondayAccountSlug(): Promise<string> {
   return mondaySlug!;
 }
 
+type MondayHit = {
+  itemId: string;
+  itemName: string;
+  boardId: string;
+  boardName: string;
+  state: string;
+  // ชื่อกับชนิดของคอลัมน์มาด้วย เพราะบอร์ดของทีมมีคอลัมน์สถานะหลายอัน
+  // ถ้าเดาจากไอดีอย่างเดียวจะหยิบผิดอัน แล้วรายงานสถานะบริการว่าเป็นสถานะงาน
+  columns: { id: string; text: string; title: string; type: string }[];
+};
+
+// ค้นรายการใน Monday จากคำเดียว ใช้ได้ทั้งชื่องานและรหัสงาน
+// แยกออกมาเป็นฟังก์ชันเพราะเครื่องมือที่เขียนกลับเข้า Monday ต้องหาให้เจอก่อนถึงจะเขียนได้
+// และต้องหาด้วยวิธีเดียวกันเป๊ะ ไม่งั้นสิ่งที่ผู้ใช้เห็นตอนค้น กับสิ่งที่ถูกแก้ จะเป็นคนละใบ
+async function mondaySearchItems(
+  term: string,
+  boardName: string | null,
+  limit: number,
+): Promise<{ searched: number; hits: MondayHit[] }> {
+  // used_at ของ Monday ไม่ได้เรียงตามที่ทีมใช้จริง บอร์ดของเดือนปัจจุบันหล่นไปอยู่ท้ายแถวได้
+  const all = await mondayQuery(
+    `query { boards(limit: 100, order_by: used_at) { id name columns { id type title } } }`,
+  );
+  let pool: any[] = all?.boards ?? [];
+  if (boardName) {
+    const needle = boardName.toLowerCase();
+    const hit = pool.filter((b: any) => String(b.name).toLowerCase().includes(needle));
+    if (hit.length === 0) throw new Error(`ไม่พบบอร์ดชื่อใกล้เคียง "${boardName}"`);
+    pool = hit.slice(0, 6);
+  } else {
+    // บัญชีนี้มีบอร์ดเกือบร้อย ถ้ากวาดหมดทุกครั้งจะรอเป็นสิบวินาที
+    // งานที่คนถามหาเกือบทั้งหมดอยู่บอร์ดของเดือนนี้ จึงเรียงบอร์ดเดือนปัจจุบันขึ้นก่อน
+    // ส่วนบอร์ดงานย่อยไม่ได้เก็บรหัสงาน ตัดออกไปเลยเพื่อไม่ให้เปลืองรอบ
+    const now = new Date(Date.now() + 7 * 3600_000);
+    const month = [
+      "january", "february", "march", "april", "may", "june",
+      "july", "august", "september", "october", "november", "december",
+    ][now.getUTCMonth()];
+    const year = String(now.getUTCFullYear());
+    const score = (n: string) => {
+      const x = n.toLowerCase();
+      return (x.includes(month) ? 2 : 0) + (x.includes(year) ? 1 : 0);
+    };
+    pool = pool
+      .filter((b: any) => !String(b.name).toLowerCase().startsWith("subitems of"))
+      .map((b: any, i: number) => ({ b, i, s: score(String(b.name)) }))
+      .sort((x, y) => y.s - x.s || x.i - y.i)
+      .slice(0, 40)
+      .map((x) => x.b);
+  }
+  if (pool.length === 0) throw new Error("ไม่พบบอร์ดใน Monday");
+
+  // Monday ปฏิเสธทั้งคำขอด้วย "Column not found" ถ้าอ้างคอลัมน์ที่บอร์ดนั้นไม่มี
+  // และรหัสงานอยู่คนละคอลัมน์ในแต่ละบอร์ด จึงค้นทุกคอลัมน์ที่เก็บข้อความของบอร์ดนั้น ๆ
+  const wanted = mondayCodeColumns();
+  const askBoard = async (b: any): Promise<MondayHit[]> => {
+    const cols0 = (b.columns ?? []).map((c: any) => ({
+      id: String(c.id),
+      type: String(c.type),
+      title: String(c.title ?? ""),
+    }));
+    const meta = new Map(cols0.map((c: any) => [c.id, c]));
+    const have = new Set(cols0.map((c: any) => c.id));
+    const textCols = cols0
+      .filter((c: any) => c.type === "text" || c.type === "long_text")
+      .map((c: any) => c.id);
+    const cols = [
+      "name",
+      ...new Set([...wanted.filter((c) => have.has(c)), ...textCols]),
+    ].slice(0, 12);
+    const rules = cols
+      .map((c) => `{column_id: "${c}", compare_value: [$t], operator: contains_text}`)
+      .join(", ");
+    try {
+      const page = await mondayQuery(
+        `query($t: String!, $id: ID!) {
+          boards(ids: [$id]) {
+            items_page(limit: ${limit}, query_params: {operator: or, rules: [${rules}]}) {
+              items { id name state column_values { id text } }
+            }
+          }
+        }`,
+        { t: term, id: b.id },
+      );
+      const items = page?.boards?.[0]?.items_page?.items ?? [];
+      return items.map((it: any) => ({
+        itemId: String(it.id),
+        itemName: String(it.name),
+        boardId: String(b.id),
+        boardName: String(b.name),
+        state: String(it.state),
+        columns: (it.column_values ?? [])
+          .filter((c: any) => c.text)
+          .map((c: any) => {
+            const m: any = meta.get(String(c.id));
+            return {
+              id: String(c.id),
+              text: String(c.text),
+              title: m?.title ?? "",
+              type: m?.type ?? "",
+            };
+          }),
+      }));
+    } catch (_e) {
+      // บอร์ดเดียวพังไม่ควรทำให้การค้นทั้งหมดพัง ข้ามไปแล้วรายงานเท่าที่เจอ
+      return [];
+    }
+  };
+
+  // ยิงเป็นชุด ชุดละ 10 บอร์ด แล้วหยุดทันทีที่ชุดไหนเจอ
+  // รหัสงานหนึ่งรหัสอยู่บอร์ดเดียว ค้นต่อหลังเจอแล้วคือรอฟรี
+  const hits: MondayHit[] = [];
+  let searched = 0;
+  for (let i = 0; i < pool.length; i += 10) {
+    const slice = pool.slice(i, i + 10);
+    searched += slice.length;
+    const batch = await Promise.all(slice.map(askBoard));
+    for (const r of batch) hits.push(...r);
+    if (hits.length > 0) break;
+  }
+  return { searched, hits };
+}
+
 // รหัสงานของทีมไม่ได้อยู่ในชื่อรายการ แต่อยู่ในคอลัมน์ ต้องค้นทั้งชื่อและคอลัมน์รหัส
 // คอลัมน์รหัสตั้งได้ที่ MONDAY_CODE_COLUMNS เผื่อบอร์ดใหม่ใช้คอลัมน์คนละตัว
 function mondayCodeColumns(): string[] {
@@ -445,10 +568,60 @@ const TOOLS = [
       type: "object",
       properties: {
         query: { type: "string", description: "รหัสงานหรือคำในชื่องาน" },
-        board_name: { type: "string", description: "ชื่อบอร์ด ไม่ระบุ = ค้นบอร์ดที่ใช้ล่าสุด 4 บอร์ด" },
+        board_name: { type: "string", description: "ชื่อบอร์ด ไม่ระบุ = ค้นทุกบอร์ด โดยเริ่มจากบอร์ดของเดือนปัจจุบัน" },
         limit: { type: "integer", description: "จำนวนผลต่อบอร์ด ค่าเริ่มต้น 5" },
       },
       required: ["query"],
+    },
+  },
+  {
+    name: "monday_set_status",
+    description:
+      "เปลี่ยนสถานะของงานใน Monday เช่นจาก Not Started เป็น Working on it หรือ Done " +
+      "ใช้เมื่อมีคนบอกว่า 'ปิดงานรหัสนี้ใน Monday ให้หน่อย' หรือ 'อัปเดตสถานะเป็นกำลังทำ' " +
+      "ทั้งบริษัทเห็นผลทันทีและระบบรายงานของทีมอิงสถานะนี้ ต้องทวนกับคนสั่งก่อนเสมอว่างานไหนและเปลี่ยนเป็นอะไร " +
+      "ถ้าใส่ชื่อสถานะไม่ตรงกับที่บอร์ดนั้นมี เครื่องมือจะคืนรายชื่อสถานะที่เลือกได้มาให้ ให้ถามคนสั่งว่าจะเอาอันไหน",
+    input_schema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "รหัสงานหรือคำในชื่องาน ใช้ค้นให้เจอก่อนแก้" },
+        status: { type: "string", description: "ชื่อสถานะที่ต้องการ เช่น Done หรือ Working on it" },
+        board_name: { type: "string", description: "ชื่อบอร์ด ใส่เมื่อค้นแล้วเจอหลายใบ" },
+        column_id: { type: "string", description: "ไอดีคอลัมน์สถานะ ใส่เมื่อบอร์ดมีคอลัมน์สถานะหลายอัน" },
+      },
+      required: ["query", "status"],
+    },
+  },
+  {
+    name: "monday_add_update",
+    description:
+      "แปะข้อความลงในช่องอัปเดตของงานใน Monday ใช้เมื่อมีคนบอกว่า 'โน้ตไว้ในการ์ดด้วย' 'บันทึกลง Monday ให้หน่อย' " +
+      "เหมาะกับการย้ายข้อสรุปจากไลน์ไปไว้ในการ์ด คนที่เข้ามาดูทีหลังจะได้เห็น เพิ่มอย่างเดียวไม่ทับของเดิม " +
+      "ลงชื่อคนสั่งต่อท้ายให้อัตโนมัติ",
+    input_schema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "รหัสงานหรือคำในชื่องาน" },
+        text: { type: "string", description: "ข้อความที่จะแปะ" },
+        board_name: { type: "string", description: "ชื่อบอร์ด ใส่เมื่อค้นแล้วเจอหลายใบ" },
+      },
+      required: ["query", "text"],
+    },
+  },
+  {
+    name: "monday_create_item",
+    description:
+      "เปิดการ์ดงานใหม่ใน Monday ใช้เมื่อมีคนบอกว่า 'เปิดงานนี้ใน Monday ด้วย' 'สร้างการ์ดให้หน่อย' " +
+      "ทั้งบริษัทเห็น ต้องทวนกับคนสั่งก่อนว่าชื่ออะไรและลงบอร์ดไหน " +
+      "ถ้าไม่รู้ว่าจะลงบอร์ดไหนให้เรียก monday_list_boards ดูก่อน อย่าเดา",
+    input_schema: {
+      type: "object",
+      properties: {
+        board_name: { type: "string", description: "ชื่อบอร์ดที่จะเปิดการ์ด" },
+        title: { type: "string", description: "ชื่อการ์ด" },
+        code: { type: "string", description: "รหัสงาน ถ้ามี จะลงในคอลัมน์รหัสของบอร์ดนั้นให้" },
+      },
+      required: ["board_name", "title"],
     },
   },
   {
@@ -779,6 +952,9 @@ const WRITE_TOOLS = new Set([
   "register_user",
   "confirm_event",
   "dismiss_event",
+  "monday_set_status",
+  "monday_add_update",
+  "monday_create_item",
 ]);
 
 async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
@@ -1064,105 +1240,29 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
         const slug = await mondayAccountSlug();
         const limit = Math.min(Math.max(input.limit ?? 5, 1), 20);
         const term = String(input.query);
+        const { searched, hits } = await mondaySearchItems(term, input.board_name ?? null, limit);
 
-        // used_at ของ Monday ไม่ได้เรียงตามที่ทีมใช้จริง บอร์ดของเดือนปัจจุบันหล่นไปอยู่ท้ายแถวได้
-        // เคยจำกัดไว้แค่ 4 บอร์ดแรก รหัสของเดือนนี้เลยหาไม่เจอทั้งที่มีอยู่ ตอนนี้กวาดทุกบอร์ด
-        const all = await mondayQuery(
-          `query { boards(limit: 100, order_by: used_at) { id name columns { id type } } }`,
-        );
-        let pool: any[] = all?.boards ?? [];
-        if (input.board_name) {
-          const needle = String(input.board_name).toLowerCase();
-          const hit = pool.filter((b: any) => String(b.name).toLowerCase().includes(needle));
-          if (hit.length === 0) return { error: `ไม่พบบอร์ดชื่อใกล้เคียง "${input.board_name}"` };
-          pool = hit.slice(0, 6);
-        } else {
-          // บัญชีนี้มีบอร์ดเกือบร้อย ถ้ากวาดหมดทุกครั้งจะรอเป็นสิบวินาที
-          // งานที่คนถามหาเกือบทั้งหมดอยู่บอร์ดของเดือนนี้ จึงเรียงบอร์ดเดือนปัจจุบันขึ้นก่อน
-          // ส่วนบอร์ดงานย่อยไม่ได้เก็บรหัสงาน ตัดออกไปเลยเพื่อไม่ให้เปลืองรอบ
-          const now = new Date(Date.now() + 7 * 3600_000);
-          const month = [
-            "january", "february", "march", "april", "may", "june",
-            "july", "august", "september", "october", "november", "december",
-          ][now.getUTCMonth()];
-          const year = String(now.getUTCFullYear());
-          const score = (n: string) => {
-            const x = n.toLowerCase();
-            return (x.includes(month) ? 2 : 0) + (x.includes(year) ? 1 : 0);
+        const found = hits.map((h) => {
+          const pick = (needle: string) => h.columns.find((c) => c.id.includes(needle))?.text ?? null;
+          // บอร์ดของทีมมีคอลัมน์สถานะได้ถึงห้าอัน ทั้งความเร่งด่วน ชนิดบริการ และสถานะงานจริง
+          // อันที่คนถามหมายถึงคือคอลัมน์ที่ชื่อว่าสถานะ ที่เหลือส่งไปด้วยแต่แยกช่องกัน
+          const statuses = h.columns.filter((c) => c.type === "status");
+          const main = statuses.find((c) => /status|สถานะ/i.test(c.title)) ?? null;
+          return {
+            id: h.itemId,
+            name: h.itemName,
+            board: h.boardName,
+            state: h.state,
+            status: main?.text ?? null,
+            status_column: main?.title ?? null,
+            other_fields: statuses
+              .filter((c) => c !== main)
+              .map((c) => ({ field: c.title, value: c.text })),
+            owner: pick("project_owner") ?? pick("people") ?? null,
+            due: pick("date_") ?? null,
+            url: slug ? `https://${slug}.monday.com/boards/${h.boardId}/pulses/${h.itemId}` : null,
           };
-          pool = pool
-            .filter((b: any) => !String(b.name).toLowerCase().startsWith("subitems of"))
-            .map((b: any, i: number) => ({ b, i, s: score(String(b.name)) }))
-            .sort((x, y) => y.s - x.s || x.i - y.i)
-            .slice(0, 40)
-            .map((x) => x.b);
-        }
-        if (pool.length === 0) return { error: "ไม่พบบอร์ดใน Monday" };
-        let searched = 0;
-
-        // Monday ปฏิเสธทั้งคำขอด้วย "Column not found" ถ้าอ้างคอลัมน์ที่บอร์ดนั้นไม่มี
-        // และรหัสงานอยู่คนละคอลัมน์ในแต่ละบอร์ด จึงค้นทุกคอลัมน์ที่เก็บข้อความของบอร์ดนั้น ๆ
-        const wanted = mondayCodeColumns();
-        const askBoard = async (b: any) => {
-          const cols0 = (b.columns ?? []).map((c: any) => ({ id: String(c.id), type: String(c.type) }));
-          const have = new Set(cols0.map((c: any) => c.id));
-          const textCols = cols0
-            .filter((c: any) => c.type === "text" || c.type === "long_text")
-            .map((c: any) => c.id);
-          const cols = [
-            "name",
-            ...new Set([...wanted.filter((c) => have.has(c)), ...textCols]),
-          ].slice(0, 12);
-          const rules = cols
-            .map((c) => `{column_id: "${c}", compare_value: [$t], operator: contains_text}`)
-            .join(", ");
-          try {
-            const page = await mondayQuery(
-              `query($t: String!, $id: ID!) {
-                boards(ids: [$id]) {
-                  items_page(limit: ${limit}, query_params: {operator: or, rules: [${rules}]}) {
-                    items { id name state column_values { id text } }
-                  }
-                }
-              }`,
-              { t: term, id: b.id },
-            );
-            const items = page?.boards?.[0]?.items_page?.items ?? [];
-            return items.length ? { id: b.id, name: b.name, items_page: { items } } : null;
-          } catch (_e) {
-            // บอร์ดเดียวพังไม่ควรทำให้การค้นทั้งหมดพัง ข้ามไปแล้วรายงานเท่าที่เจอ
-            return null;
-          }
-        };
-
-        // ยิงเป็นชุด ชุดละ 10 บอร์ด แล้วหยุดทันทีที่ชุดไหนเจอ
-        // รหัสงานหนึ่งรหัสอยู่บอร์ดเดียว ค้นต่อหลังเจอแล้วคือรอฟรี
-        const boards: any[] = [];
-        for (let i = 0; i < pool.length; i += 10) {
-          const slice = pool.slice(i, i + 10);
-          searched += slice.length;
-          const batch = await Promise.all(slice.map(askBoard));
-          for (const r of batch) if (r) boards.push(r);
-          if (boards.length > 0) break;
-        }
-
-        const found: any[] = [];
-        for (const b of boards) {
-          for (const it of b.items_page?.items ?? []) {
-            const texts = (it.column_values ?? []).filter((c: any) => c.text);
-            const pick = (needle: string) =>
-              texts.find((c: any) => c.id.includes(needle))?.text ?? null;
-            found.push({
-              name: it.name,
-              board: b.name,
-              state: it.state,
-              status: pick("color_") ?? null,
-              owner: pick("project_owner") ?? pick("people") ?? null,
-              due: pick("date_") ?? null,
-              url: slug ? `https://${slug}.monday.com/boards/${b.id}/pulses/${it.id}` : null,
-            });
-          }
-        }
+        });
         return found.length === 0
           ? {
             count: 0,
@@ -1170,6 +1270,154 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
             note: `ค้นครบ ${searched} บอร์ดแล้วไม่พบ "${term}" — บอกไปตรง ๆ ว่าไม่มีใน Monday ห้ามค้นซ้ำด้วยคำที่สั้นลง`,
           }
           : { count: found.length, items: found };
+      } catch (e) {
+        return { error: String((e as Error).message) };
+      }
+    }
+
+    case "monday_set_status":
+    case "monday_add_update":
+    case "monday_create_item": {
+      const denied = mondayAllowedHere(ctx);
+      if (denied) return { error: denied };
+      try {
+        const slug = await mondayAccountSlug();
+        const linkTo = (boardId: string, itemId: string) =>
+          slug ? `https://${slug}.monday.com/boards/${boardId}/pulses/${itemId}` : null;
+
+        if (name === "monday_create_item") {
+          const boards = await mondayQuery(
+            `query { boards(limit: 100, order_by: used_at) { id name columns { id type } } }`,
+          );
+          const needle = String(input.board_name).toLowerCase();
+          const hit = (boards?.boards ?? []).filter((b: any) =>
+            String(b.name).toLowerCase().includes(needle)
+          );
+          if (hit.length === 0) return { error: `ไม่พบบอร์ดชื่อใกล้เคียง "${input.board_name}"` };
+          if (hit.length > 1) {
+            return {
+              error: `ชื่อบอร์ด "${input.board_name}" ตรงหลายบอร์ด`,
+              boards: hit.slice(0, 8).map((b: any) => b.name),
+              note: "ถามคนสั่งว่าจะเอาบอร์ดไหน อย่าเลือกเอง",
+            };
+          }
+          const board = hit[0];
+
+          // รหัสงานลงคอลัมน์รหัสของบอร์ดนั้น ถ้าบอร์ดนั้นไม่มีคอลัมน์รหัส ก็ข้ามไปเปิดการ์ดเปล่า
+          const have = new Set((board.columns ?? []).map((c: any) => String(c.id)));
+          const codeCol = mondayCodeColumns().find((c) => have.has(c)) ?? null;
+          const withCode = Boolean(input.code && codeCol);
+          const vars: Record<string, unknown> = { b: board.id, n: String(input.title) };
+          if (withCode) vars.v = JSON.stringify({ [codeCol as string]: String(input.code) });
+          const d = await mondayQuery(
+            `mutation($b: ID!, $n: String!${withCode ? ", $v: JSON!" : ""}) {
+              create_item(board_id: $b, item_name: $n${withCode ? ", column_values: $v" : ""}) { id name }
+            }`,
+            vars,
+          );
+          const it = d?.create_item;
+          if (!it) return { error: "Monday ไม่ได้คืนการ์ดที่สร้าง ลองใหม่อีกครั้ง" };
+          return {
+            created: {
+              name: it.name,
+              board: board.name,
+              code_saved: withCode,
+              url: linkTo(String(board.id), String(it.id)),
+            },
+            note: input.code && !codeCol
+              ? `บอร์ด "${board.name}" ไม่มีคอลัมน์รหัส เลยเปิดการ์ดให้โดยไม่ได้ลงรหัส บอกคนสั่งด้วย`
+              : undefined,
+          };
+        }
+
+        // อีกสองเครื่องมือแก้ของที่มีอยู่แล้ว ต้องหาให้เจอใบเดียวก่อนถึงจะแก้ได้
+        const { searched, hits } = await mondaySearchItems(
+          String(input.query),
+          input.board_name ?? null,
+          5,
+        );
+        if (hits.length === 0) {
+          return { error: `ค้นครบ ${searched} บอร์ดแล้วไม่พบ "${input.query}" ใน Monday` };
+        }
+        if (hits.length > 1) {
+          return {
+            error: `"${input.query}" ตรงหลายรายการ`,
+            candidates: hits.slice(0, 5).map((h) => ({
+              name: h.itemName,
+              board: h.boardName,
+              url: linkTo(h.boardId, h.itemId),
+            })),
+            note: "ถามคนสั่งว่าหมายถึงใบไหน อย่าเดาเอง",
+          };
+        }
+        const t = hits[0];
+
+        if (name === "monday_add_update") {
+          const who = ctx.caller.display_name ?? "ไม่ทราบชื่อ";
+          const body = `${String(input.text)}\n\n— ${who} ผ่านแงว`;
+          await mondayQuery(
+            `mutation($i: ID!, $b: String!) { create_update(item_id: $i, body: $b) { id } }`,
+            { i: t.itemId, b: body },
+          );
+          return {
+            added_to: { name: t.itemName, board: t.boardName, url: linkTo(t.boardId, t.itemId) },
+          };
+        }
+
+        // เปลี่ยนสถานะ ต้องรู้ก่อนว่าบอร์ดนี้มีคอลัมน์สถานะอะไร และรับป้ายชื่อไหนได้บ้าง
+        // ถ้าส่งป้ายที่บอร์ดไม่รู้จัก Monday จะไม่เปลี่ยนอะไรโดยไม่ขึ้น error ซึ่งอันตรายกว่าพังตรง ๆ
+        const meta = await mondayQuery(
+          `query($id: ID!) { boards(ids: [$id]) { columns { id title type settings_str } } }`,
+          { id: t.boardId },
+        );
+        const statusCols = (meta?.boards?.[0]?.columns ?? [])
+          .filter((c: any) => c.type === "status")
+          .map((c: any) => {
+            let labels: string[] = [];
+            try {
+              const parsed = JSON.parse(c.settings_str ?? "{}");
+              labels = Object.values(parsed.labels ?? {}).map((x: any) => String(x)).filter(Boolean);
+            } catch (_e) { /* บอร์ดเก่าบางใบไม่มี settings ก็ปล่อยว่างไว้ */ }
+            return { id: String(c.id), title: String(c.title), labels };
+          });
+        if (statusCols.length === 0) {
+          return { error: `บอร์ด "${t.boardName}" ไม่มีคอลัมน์สถานะให้เปลี่ยน` };
+        }
+        const want = String(input.status).toLowerCase();
+        const wantCol = input.column_id
+          ? statusCols.find((c: any) => c.id === input.column_id)
+          : (statusCols.find((c: any) => c.labels.some((l: string) => l.toLowerCase() === want)) ??
+            statusCols[0]);
+        if (!wantCol) {
+          return {
+            error: `ไม่พบคอลัมน์สถานะที่ระบุในบอร์ด "${t.boardName}"`,
+            columns: statusCols.map((c: any) => ({ id: c.id, title: c.title, labels: c.labels })),
+          };
+        }
+        const label = wantCol.labels.find((l: string) => l.toLowerCase() === want);
+        if (!label) {
+          return {
+            error: `บอร์ด "${t.boardName}" ไม่มีสถานะชื่อ "${input.status}"`,
+            column: wantCol.title,
+            available: wantCol.labels,
+            note: "ถามคนสั่งว่าจะเอาอันไหนจากรายการนี้ อย่าเลือกให้เอง",
+          };
+        }
+        await mondayQuery(
+          `mutation($b: ID!, $i: ID!, $c: String!, $v: String!) {
+            change_simple_column_value(board_id: $b, item_id: $i, column_id: $c, value: $v) { id }
+          }`,
+          { b: t.boardId, i: t.itemId, c: wantCol.id, v: label },
+        );
+        return {
+          updated: {
+            name: t.itemName,
+            board: t.boardName,
+            column: wantCol.title,
+            status: label,
+            url: linkTo(t.boardId, t.itemId),
+          },
+        };
       } catch (e) {
         return { error: String((e as Error).message) };
       }
