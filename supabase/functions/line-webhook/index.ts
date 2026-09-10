@@ -19,7 +19,7 @@ const supabase = createClient(
 );
 
 const MODEL = DEFAULT_MODEL;
-const MAX_TOOL_ITERATIONS = 8;
+const MAX_TOOL_ITERATIONS = 12;
 // นานแค่ไหนหลังบอทพูด ที่ยังนับว่าข้อความถัดมาน่าจะคุยกับบอทอยู่
 // ตั้งสั้นไว้เพราะทุกข้อความในหน้าต่างนี้ต้องเสียค่าเรียกโมเดลเพื่อตัดสินว่าจะตอบหรือเงียบ
 const FOLLOW_UP_WINDOW_MS = 3 * 60_000;
@@ -1038,37 +1038,51 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
         }
 
         const slug = await mondayAccountSlug();
-        let boardIds: string[] = [];
-        if (input.board_name) {
-          const d = await mondayQuery("query { boards(limit: 60, order_by: used_at) { id name } }");
-          const hit = (d?.boards ?? []).filter((b: any) =>
-            String(b.name).toLowerCase().includes(String(input.board_name).toLowerCase())
-          );
-          if (hit.length === 0) return { error: `ไม่พบบอร์ดชื่อใกล้เคียง "${input.board_name}"` };
-          boardIds = hit.slice(0, 3).map((b: any) => b.id);
-        } else {
-          const d = await mondayQuery("query { boards(limit: 4, order_by: used_at) { id } }");
-          boardIds = (d?.boards ?? []).map((b: any) => b.id);
-        }
-        if (boardIds.length === 0) return { error: "ไม่พบบอร์ดใน Monday" };
-
         const limit = Math.min(Math.max(input.limit ?? 5, 1), 20);
         const term = String(input.query);
-        // Monday ปฏิเสธทั้งคำขอด้วย "Column not found" ถ้าอ้างคอลัมน์ที่บอร์ดนั้นไม่มี
-        // และแต่ละบอร์ดมีคอลัมน์ไม่เหมือนกัน จึงถามก่อนว่าบอร์ดไหนมีคอลัมน์รหัสจริง
-        // แล้วค่อยค้นทีละบอร์ดด้วยคอลัมน์เท่าที่บอร์ดนั้นมี
-        const schema = await mondayQuery(
-          `query($ids: [ID!]) { boards(ids: $ids) { id name columns { id type } } }`,
-          { ids: boardIds },
+
+        // used_at ของ Monday ไม่ได้เรียงตามที่ทีมใช้จริง บอร์ดของเดือนปัจจุบันหล่นไปอยู่ท้ายแถวได้
+        // เคยจำกัดไว้แค่ 4 บอร์ดแรก รหัสของเดือนนี้เลยหาไม่เจอทั้งที่มีอยู่ ตอนนี้กวาดทุกบอร์ด
+        const all = await mondayQuery(
+          `query { boards(limit: 100, order_by: used_at) { id name columns { id type } } }`,
         );
+        let pool: any[] = all?.boards ?? [];
+        if (input.board_name) {
+          const needle = String(input.board_name).toLowerCase();
+          const hit = pool.filter((b: any) => String(b.name).toLowerCase().includes(needle));
+          if (hit.length === 0) return { error: `ไม่พบบอร์ดชื่อใกล้เคียง "${input.board_name}"` };
+          pool = hit.slice(0, 6);
+        } else {
+          // บัญชีนี้มีบอร์ดเกือบร้อย ถ้ากวาดหมดทุกครั้งจะรอเป็นสิบวินาที
+          // งานที่คนถามหาเกือบทั้งหมดอยู่บอร์ดของเดือนนี้ จึงเรียงบอร์ดเดือนปัจจุบันขึ้นก่อน
+          // ส่วนบอร์ดงานย่อยไม่ได้เก็บรหัสงาน ตัดออกไปเลยเพื่อไม่ให้เปลืองรอบ
+          const now = new Date(Date.now() + 7 * 3600_000);
+          const month = [
+            "january", "february", "march", "april", "may", "june",
+            "july", "august", "september", "october", "november", "december",
+          ][now.getUTCMonth()];
+          const year = String(now.getUTCFullYear());
+          const score = (n: string) => {
+            const x = n.toLowerCase();
+            return (x.includes(month) ? 2 : 0) + (x.includes(year) ? 1 : 0);
+          };
+          pool = pool
+            .filter((b: any) => !String(b.name).toLowerCase().startsWith("subitems of"))
+            .map((b: any, i: number) => ({ b, i, s: score(String(b.name)) }))
+            .sort((x, y) => y.s - x.s || x.i - y.i)
+            .slice(0, 40)
+            .map((x) => x.b);
+        }
+        if (pool.length === 0) return { error: "ไม่พบบอร์ดใน Monday" };
+        let searched = 0;
+
+        // Monday ปฏิเสธทั้งคำขอด้วย "Column not found" ถ้าอ้างคอลัมน์ที่บอร์ดนั้นไม่มี
+        // และรหัสงานอยู่คนละคอลัมน์ในแต่ละบอร์ด จึงค้นทุกคอลัมน์ที่เก็บข้อความของบอร์ดนั้น ๆ
         const wanted = mondayCodeColumns();
-        const boards: any[] = [];
-        for (const b of schema?.boards ?? []) {
-          const all = (b.columns ?? []).map((c: any) => ({ id: String(c.id), type: String(c.type) }));
-          const have = new Set(all.map((c: any) => c.id));
-          // รหัสงานของทีมไม่ได้อยู่คอลัมน์เดียวกันทุกบอร์ด และบอร์ดเก่ากับบอร์ดใหม่ตั้งชื่อคอลัมน์คนละแบบ
-          // การไล่ค้นทุกคอลัมน์ที่เก็บข้อความ จึงเจอรหัสได้โดยไม่ต้องมาตามแก้ค่าคอนฟิกทุกครั้งที่เปิดบอร์ดใหม่
-          const textCols = all
+        const askBoard = async (b: any) => {
+          const cols0 = (b.columns ?? []).map((c: any) => ({ id: String(c.id), type: String(c.type) }));
+          const have = new Set(cols0.map((c: any) => c.id));
+          const textCols = cols0
             .filter((c: any) => c.type === "text" || c.type === "long_text")
             .map((c: any) => c.id);
           const cols = [
@@ -1078,18 +1092,34 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
           const rules = cols
             .map((c) => `{column_id: "${c}", compare_value: [$t], operator: contains_text}`)
             .join(", ");
-          const page = await mondayQuery(
-            `query($t: String!, $id: ID!) {
-              boards(ids: [$id]) {
-                items_page(limit: ${limit}, query_params: {operator: or, rules: [${rules}]}) {
-                  items { id name state column_values { id text } }
+          try {
+            const page = await mondayQuery(
+              `query($t: String!, $id: ID!) {
+                boards(ids: [$id]) {
+                  items_page(limit: ${limit}, query_params: {operator: or, rules: [${rules}]}) {
+                    items { id name state column_values { id text } }
+                  }
                 }
-              }
-            }`,
-            { t: term, id: b.id },
-          );
-          const items = page?.boards?.[0]?.items_page?.items ?? [];
-          if (items.length) boards.push({ id: b.id, name: b.name, items_page: { items } });
+              }`,
+              { t: term, id: b.id },
+            );
+            const items = page?.boards?.[0]?.items_page?.items ?? [];
+            return items.length ? { id: b.id, name: b.name, items_page: { items } } : null;
+          } catch (_e) {
+            // บอร์ดเดียวพังไม่ควรทำให้การค้นทั้งหมดพัง ข้ามไปแล้วรายงานเท่าที่เจอ
+            return null;
+          }
+        };
+
+        // ยิงเป็นชุด ชุดละ 10 บอร์ด แล้วหยุดทันทีที่ชุดไหนเจอ
+        // รหัสงานหนึ่งรหัสอยู่บอร์ดเดียว ค้นต่อหลังเจอแล้วคือรอฟรี
+        const boards: any[] = [];
+        for (let i = 0; i < pool.length; i += 10) {
+          const slice = pool.slice(i, i + 10);
+          searched += slice.length;
+          const batch = await Promise.all(slice.map(askBoard));
+          for (const r of batch) if (r) boards.push(r);
+          if (boards.length > 0) break;
         }
 
         const found: any[] = [];
@@ -1110,7 +1140,11 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
           }
         }
         return found.length === 0
-          ? { count: 0, note: `ไม่พบงานที่ตรงกับ "${term}" ในบอร์ดที่ค้น — อาจอยู่บอร์ดเดือนอื่น ลองระบุ board_name` }
+          ? {
+            count: 0,
+            searched_boards: searched,
+            note: `ค้นครบ ${searched} บอร์ดแล้วไม่พบ "${term}" — บอกไปตรง ๆ ว่าไม่มีใน Monday ห้ามค้นซ้ำด้วยคำที่สั้นลง`,
+          }
           : { count: found.length, items: found };
       } catch (e) {
         return { error: String((e as Error).message) };
@@ -2086,7 +2120,27 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
     }
     messages.push({ role: "user", content: toolResults });
   }
-  return "งานนี้ซับซ้อนเกินรอบที่กำหนด ลองแบ่งคำสั่งเป็นขั้นสั้น ๆ นะครับ";
+  // ครบรอบแล้วยังไม่จบ อย่าทิ้งคนถามไว้มือเปล่า ถามอีกครั้งโดยไม่ให้เครื่องมือ
+  // โมเดลจะได้สรุปจากของที่หามาได้แล้ว ดีกว่าตอบว่า "ซับซ้อนเกินไป" ซึ่งไม่ช่วยอะไรเลย
+  try {
+    const last = await createMessage(spec, {
+      max_tokens: 1024,
+      system: sysNow,
+      messages: [...messages, {
+        role: "user",
+        content: "หาต่อไม่ได้แล้ว สรุปจากที่ได้มาให้คนถามเลย บอกตรง ๆ ว่าส่วนไหนยังไม่รู้",
+      }],
+    });
+    const text = (last.content ?? [])
+      .filter((b: any) => b.type === "text")
+      .map((b: any) => b.text)
+      .join("\n")
+      .trim();
+    if (text) return text;
+  } catch (e) {
+    console.error("สรุปรอบสุดท้ายไม่สำเร็จ", e);
+  }
+  return "แงวหาไม่จบในรอบเดียวค่ะ ลองบอกชื่อบอร์ดหรือแบ่งเป็นคำสั่งสั้น ๆ อีกทีนะคะ 🙏";
   } finally {
     if (opts.usageOut) Object.assign(opts.usageOut, usage);
     if (usage.iterations > 0) {
