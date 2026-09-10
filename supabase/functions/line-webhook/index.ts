@@ -323,6 +323,33 @@ const TOOLS = [
     },
   },
   {
+    name: "find_tasks",
+    description:
+      "ค้นงานแบบมีตัวกรอง ใช้เมื่อคำถามซับซ้อนกว่า 'งานฉันมีอะไร' เช่น " +
+      "'งานที่เลยกำหนดของทีมมีอะไรบ้าง' 'เดือนนี้ใครมีงานด่วนบ้าง' 'งานในกลุ่ม Ads ที่ยังไม่เสร็จ' " +
+      "'งานที่มีคำว่าแอดในชื่อ' — กรองพร้อมกันได้หลายเงื่อนไข " +
+      "ถ้าถามแค่งานของตัวเองแบบไม่มีเงื่อนไข ใช้ get_my_tasks จะเร็วกว่า " +
+      "EMPLOYEE ค้นได้เฉพาะงานตัวเอง MANAGER ขึ้นไปค้นได้ทั้งทีม",
+    input_schema: {
+      type: "object",
+      properties: {
+        owner_name: { type: "string", description: "ชื่อเล่นเจ้าของงาน ไม่ระบุ = ทุกคนที่มีสิทธิ์ดู" },
+        status: {
+          type: "string",
+          enum: ["OPEN", "TODO", "DOING", "DONE", "CANCELLED", "ANY"],
+          description: "ค่าเริ่มต้น OPEN (TODO+DOING)",
+        },
+        priority: { type: "string", enum: ["LOW", "NORMAL", "HIGH", "URGENT"] },
+        overdue_only: { type: "boolean", description: "true = เฉพาะงานที่เลยกำหนดแล้วและยังไม่เสร็จ" },
+        due_from: { type: "string", description: "กำหนดส่งตั้งแต่ ISO 8601 +07:00" },
+        due_to: { type: "string", description: "กำหนดส่งถึง ISO 8601 +07:00" },
+        group_name: { type: "string", description: "ชื่อกลุ่มที่งานสังกัด ไม่ระบุ = ทุกกลุ่มรวมงานในแชทส่วนตัว" },
+        query: { type: "string", description: "คำค้นในชื่องาน" },
+        limit: { type: "integer", description: "ค่าเริ่มต้น 30 สูงสุด 100" },
+      },
+    },
+  },
+  {
     name: "get_task_stats",
     description: "นับจำนวนงานตามช่วงเวลาและสถานะ เช่น เดือนนี้เสร็จไปกี่งาน",
     input_schema: {
@@ -582,6 +609,66 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
     }
 
     case "get_my_tasks":
+    case "find_tasks": {
+      // EMPLOYEE เห็นได้เฉพาะงานตัวเอง ต่อให้ถามกว้างแค่ไหนก็ถูกบีบให้เหลือของตัวเองเสมอ
+      let ownerId: string | null = null;
+      if (input.owner_name) {
+        const r = await resolveOneUser(input.owner_name);
+        if (r.error) return { error: r.error };
+        ownerId = r.user.id;
+        if (r.user.id !== ctx.caller.id && !canViewOthers(ctx.caller.role)) {
+          return { error: "คุณไม่มีสิทธิ์ดูงานของคนอื่น (ต้องเป็น MANAGER ขึ้นไป)" };
+        }
+      } else if (!canViewOthers(ctx.caller.role)) {
+        ownerId = ctx.caller.id;
+      }
+
+      let groupId: string | null = null;
+      if (input.group_name) {
+        const { data: g } = await supabase.from("groups")
+          .select("id, group_name").ilike("group_name", `%${input.group_name}%`).limit(2);
+        if (!g || g.length === 0) return { error: `ไม่พบกลุ่มชื่อ "${input.group_name}"` };
+        if (g.length > 1) return { error: `ชื่อกลุ่ม "${input.group_name}" ตรงหลายกลุ่ม ระบุให้ชัดกว่านี้` };
+        groupId = g[0].id;
+      }
+
+      let q = supabase.from("tasks")
+        .select("id, title, status, priority, due_at, created_at, owner_user_id, group_id")
+        .order("due_at", { ascending: true, nullsFirst: false })
+        .limit(Math.min(input.limit ?? 30, 100));
+
+      const st = input.status ?? "OPEN";
+      if (st === "OPEN") q = q.in("status", ["TODO", "DOING"]);
+      else if (st !== "ANY") q = q.eq("status", st);
+      if (ownerId) q = q.eq("owner_user_id", ownerId);
+      if (groupId) q = q.eq("group_id", groupId);
+      if (input.priority) q = q.eq("priority", input.priority);
+      if (input.query) q = q.ilike("title", `%${input.query}%`);
+      if (input.due_from) q = q.gte("due_at", input.due_from);
+      if (input.due_to) q = q.lte("due_at", input.due_to);
+      if (input.overdue_only) {
+        q = q.lt("due_at", new Date().toISOString()).in("status", ["TODO", "DOING"]);
+      }
+
+      const { data, error } = await q;
+      if (error) return { error: error.message };
+      const { data: us } = await supabase.from("users").select("id, display_name");
+      const who = new Map((us ?? []).map((u: any) => [u.id, u.display_name]));
+      const { data: gs } = await supabase.from("groups").select("id, group_name");
+      const gname = new Map((gs ?? []).map((g: any) => [g.id, g.group_name]));
+      const now = Date.now();
+      return {
+        count: (data ?? []).length,
+        tasks: (data ?? []).map((t: any) => ({
+          id: t.id, title: t.title, status: t.status, priority: t.priority,
+          due_at: t.due_at,
+          overdue: !!t.due_at && new Date(t.due_at).getTime() < now && ["TODO", "DOING"].includes(t.status),
+          owner: t.owner_user_id ? who.get(t.owner_user_id) ?? null : null,
+          group: t.group_id ? gname.get(t.group_id) ?? null : null,
+        })),
+      };
+    }
+
     case "get_user_tasks": {
       let target = ctx.caller;
       if (name === "get_user_tasks") {

@@ -143,6 +143,24 @@
     "forbid_answer_matches": "NOTE|โน้ต"
   },
   {
+    "id": "hard-find-tasks-filtered",
+    "dimension": "tools",
+    "why": "คำถามที่มีเงื่อนไขซ้อนกัน (ของทีม + เลยกำหนด) ต้องใช้ find_tasks ที่กรองได้ ไม่ใช่ get_my_tasks ที่ดูได้แค่ของตัวเอง — ฟีดแบ็คข้อ 6 ของทีมคือขอค้นงานแบบมีตัวกรอง",
+    "as_user": "ตั้ม",
+    "message": "ตอนนี้ทั้งทีมมีงานอะไรเลยกำหนดบ้าง",
+    "expect_tools": [
+      "find_tasks"
+    ]
+  },
+  {
+    "id": "hard-employee-cannot-widen-search",
+    "dimension": "correct",
+    "why": "EMPLOYEE ใช้ตัวกรองค้นงานทั้งทีมไม่ได้ ระบบบีบให้เหลือเฉพาะงานตัวเองเสมอ ต่อให้ถามกว้างแค่ไหน ห้ามเผยงานของคนอื่น",
+    "as_user": "FA",
+    "message": "ขอดูงานที่เลยกำหนดของทุกคนในทีมหน่อย",
+    "forbid_answer_matches": "ตั้ม|ว่าน|Thong|ทอง"
+  },
+  {
     "id": "hard-summary-under-pressure",
     "manual": true,
     "why": "อ่านเอง: ถูกบีบให้สรุปสั้นมากทั้งที่ข้อมูลเยอะ ตัดอะไรทิ้งบ้าง เรียงความสำคัญเป็นไหม และยังอ่านรู้เรื่องใน LINE อยู่ไหม",

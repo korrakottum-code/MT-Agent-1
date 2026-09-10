@@ -198,6 +198,61 @@ async function morningReminder() {
       result: { overdue: overdue.length, due_soon: dueSoon.length }, status: "OK",
     });
   }
+
+  await personalOverdueNudge(now, in24h);
+}
+
+// เตือนเจ้าของงานเป็นการส่วนตัว นอกเหนือจากที่ประกาศในกลุ่ม
+// เดิมเตือนเฉพาะงานที่ผูกกับกลุ่ม งานที่สั่งในแชทส่วนตัวจึงไม่เคยถูกเตือนเลยสักครั้ง
+// และการประกาศในกลุ่มอย่างเดียวทำให้ทุกคนเห็นแต่ไม่มีใครรู้สึกว่าเป็นของตัวเอง
+async function personalOverdueNudge(now: Date, in24h: Date) {
+  const { data: tasks } = await supabase.from("tasks")
+    .select("title, due_at, status, owner_user_id, group_id")
+    .in("status", ["TODO", "DOING"])
+    .not("due_at", "is", null)
+    .not("owner_user_id", "is", null)
+    .lte("due_at", in24h.toISOString())
+    .order("due_at", { ascending: true });
+  if (!tasks || tasks.length === 0) return;
+
+  const { data: users } = await supabase.from("users")
+    .select("id, line_user_id, display_name").eq("is_active", true);
+  const byId = new Map((users ?? []).map((u: any) => [u.id, u]));
+  const { data: groups } = await supabase.from("groups").select("id, group_name");
+  const gname = new Map((groups ?? []).map((g: any) => [g.id, g.group_name]));
+
+  const mine = new Map<string, any[]>();
+  for (const t of tasks) {
+    const u = byId.get(t.owner_user_id);
+    // บัญชีที่ลงทะเบียนล่วงหน้าแต่ยังไม่ผูก LINE จริง ส่งหาไม่ได้
+    if (!u || String(u.line_user_id).startsWith("pending:")) continue;
+    if (!mine.has(u.line_user_id)) mine.set(u.line_user_id, []);
+    mine.get(u.line_user_id)!.push(t);
+  }
+
+  for (const [lineUserId, rows] of mine) {
+    const overdue = rows.filter((t: any) => new Date(t.due_at) < now);
+    const soon = rows.filter((t: any) => new Date(t.due_at) >= now);
+    const where = (t: any) => (t.group_id ? ` [${gname.get(t.group_id) ?? "กลุ่ม"}]` : "");
+    let text = "🌅 งานของคุณที่ต้องดูวันนี้\n";
+    if (overdue.length) {
+      text += "\n🔴 เลยกำหนดแล้ว:\n" + overdue
+        .map((t: any, i: number) => `${i + 1}. ${t.title}${where(t)} (ครบกำหนด ${thaiDate(new Date(t.due_at))})`)
+        .join("\n") + "\n";
+    }
+    if (soon.length) {
+      text += "\n🟡 ครบกำหนดภายใน 24 ชม.:\n" + soon
+        .map((t: any, i: number) => `${i + 1}. ${t.title}${where(t)} (ส่ง ${thaiDate(new Date(t.due_at))})`)
+        .join("\n") + "\n";
+    }
+    text += "\nปิดงานได้โดยพิมพ์บอกแงวว่างานไหนเสร็จแล้ว";
+    await pushToGroup(lineUserId, text.trim());
+  }
+
+  await supabase.from("audit_logs").insert({
+    action: "scheduled_job", tool_name: "overdue_nudge",
+    input: {}, result: { people: mine.size, tasks: tasks.length }, status: "OK",
+  });
 }
 
 // ---------------------------------------------------------------- weekly summary (จันทร์ 09:00)
