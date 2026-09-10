@@ -1448,6 +1448,7 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       if (error) return { error: error.message };
 
       const link = `${Deno.env.get("SUPABASE_URL")}/functions/v1/admin-console?t=${token}`;
+      if (ctx.dryRun) return { sent_to_dm: true, dry_run: "โหมดข้อสอบ ไม่ได้ส่งจริง" };
       const sent = await lineApi("/v2/bot/message/push", {
         to: ctx.caller.line_user_id,
         messages: [{
