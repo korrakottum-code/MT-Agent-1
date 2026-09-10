@@ -462,6 +462,7 @@ const TOOLS = [
       "สร้างห้องประชุมออนไลน์พร้อมลิงก์ ตั้งเวลา และตั้งเตือนให้คนที่เข้าร่วมโดยอัตโนมัติ " +
       "ใช้เมื่อมีคนบอกว่า 'นัดประชุม' 'เปิดห้องมีต' 'ขอลิงก์ประชุม' หรือ 'ประชุมบ่ายสองนะ' " +
       "ลิงก์เข้าได้เลยไม่ต้องล็อกอิน เปิดได้ทั้งมือถือและคอม " +
+      "ห้องนี้ไม่ใช่ Google Meet และไม่ใช่ Zoom ห้ามเรียกว่า Meet หรือ Zoom ให้เรียกว่า 'ห้องประชุมออนไลน์' เฉย ๆ " +
       "ถ้าเป็นการนัดในกลุ่ม ทุกคนที่ระบุจะได้เตือนก่อนถึงเวลา 10 นาที และงานจะไปโผล่ในปฏิทินของแต่ละคนด้วย",
     input_schema: {
       type: "object",
@@ -719,6 +720,9 @@ const TOOLS = [
 ];
 
 type Ctx = {
+  // โหมดข้อสอบ: เรียก tool จริงได้ แต่ห้ามยิงข้อความออกไปหาคนจริง
+  // ข้อสอบใช้ตัวตนของคนจริงในการทดสอบ ถ้าไม่กันไว้ ทุกครั้งที่รันข้อสอบทีมจะได้ข้อความจากบอทโดยไม่มีใครสั่ง
+  dryRun?: boolean;
   // ของที่แนบมากับข้อความนี้ ให้ tool หยิบไปใช้ได้โดยไม่ต้องส่งผ่านพารามิเตอร์
   attachment?: { messageId: string; name: string } | null; caller: any; group: any; lineGroupId: string | null };
 
@@ -1050,30 +1054,37 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
 
         const limit = Math.min(Math.max(input.limit ?? 5, 1), 20);
         const term = String(input.query);
-        const cols = ["name", ...mondayCodeColumns()];
-        const rules = cols
-          .map((c) => `{column_id: "${c}", compare_value: [$t], operator: contains_text}`)
-          .join(", ");
-        const q = `query($t: String!, $ids: [ID!]) {
-          boards(ids: $ids) {
-            id name
-            items_page(limit: ${limit}, query_params: {operator: or, rules: [${rules}]}) {
-              items { id name state column_values { id text } }
-            }
-          }
-        }`;
-
-        let data: any;
-        try {
-          data = await mondayQuery(q, { t: term, ids: boardIds });
-        } catch (_e) {
-          // บอร์ดที่ไม่มีคอลัมน์รหัสจะปฏิเสธทั้งคำขอ ถอยไปค้นเฉพาะชื่อแทนดีกว่าไม่ได้อะไรเลย
-          const nameOnly = q.replace(/\{column_id: "(?!name")[^}]*\}, ?/g, "");
-          data = await mondayQuery(nameOnly, { t: term, ids: boardIds });
+        // Monday ปฏิเสธทั้งคำขอด้วย "Column not found" ถ้าอ้างคอลัมน์ที่บอร์ดนั้นไม่มี
+        // และแต่ละบอร์ดมีคอลัมน์ไม่เหมือนกัน จึงถามก่อนว่าบอร์ดไหนมีคอลัมน์รหัสจริง
+        // แล้วค่อยค้นทีละบอร์ดด้วยคอลัมน์เท่าที่บอร์ดนั้นมี
+        const schema = await mondayQuery(
+          `query($ids: [ID!]) { boards(ids: $ids) { id name columns { id } } }`,
+          { ids: boardIds },
+        );
+        const wanted = mondayCodeColumns();
+        const boards: any[] = [];
+        for (const b of schema?.boards ?? []) {
+          const have = new Set((b.columns ?? []).map((c: any) => String(c.id)));
+          const cols = ["name", ...wanted.filter((c) => have.has(c))];
+          const rules = cols
+            .map((c) => `{column_id: "${c}", compare_value: [$t], operator: contains_text}`)
+            .join(", ");
+          const page = await mondayQuery(
+            `query($t: String!, $id: ID!) {
+              boards(ids: [$id]) {
+                items_page(limit: ${limit}, query_params: {operator: or, rules: [${rules}]}) {
+                  items { id name state column_values { id text } }
+                }
+              }
+            }`,
+            { t: term, id: b.id },
+          );
+          const items = page?.boards?.[0]?.items_page?.items ?? [];
+          if (items.length) boards.push({ id: b.id, name: b.name, items_page: { items } });
         }
 
         const found: any[] = [];
-        for (const b of data?.boards ?? []) {
+        for (const b of boards) {
           for (const it of b.items_page?.items ?? []) {
             const texts = (it.column_values ?? []).filter((c: any) => c.text);
             const pick = (needle: string) =>
@@ -1188,6 +1199,7 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       if (ctx.lineGroupId) {
         const webcalG = feed.replace(/^https?:\/\//, "webcal://");
         const addG = `https://calendar.google.com/calendar/u/0/r?cid=${encodeURIComponent(webcalG)}`;
+        if (ctx.dryRun) return { sent_to_dm: true, dry_run: "โหมดข้อสอบ ไม่ได้ส่งจริง" };
         const ok = await lineApi("/v2/bot/message/push", {
           to: ctx.caller.line_user_id,
           messages: [{
@@ -1301,6 +1313,7 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       if (!isSelf && !canViewOthers(ctx.caller.role)) {
         return { error: "ส่ง DM หาคนอื่นได้เฉพาะ MANAGER ขึ้นไป" };
       }
+      if (ctx.dryRun) return { sent_to: target.display_name, dry_run: "โหมดข้อสอบ ไม่ได้ส่งจริง" };
       const ok = await lineApi("/v2/bot/message/push", {
         to: target.line_user_id,
         messages: [{ type: "text", text: String(input.message).slice(0, 4900) }],
@@ -2244,7 +2257,7 @@ async function runEval(body: string): Promise<Response> {
     if (!g) return Response.json({ error: `ไม่พบกลุ่ม "${in_group}"` }, { status: 400 });
     group = g;
   }
-  const ctx: Ctx = { caller, group, lineGroupId: group?.line_group_id ?? null };
+  const ctx: Ctx = { caller, group, lineGroupId: group?.line_group_id ?? null, dryRun: true };
   const chatId = group?.line_group_id ?? caller.line_user_id;
 
   const toolLog: string[] = [];
