@@ -760,7 +760,32 @@ async function resolveOneUser(name: string): Promise<{ user?: any; error?: strin
   return { user: matches[0] };
 }
 
+// เครื่องมือที่เปลี่ยนสถานะจริงของระบบ ข้อสอบเรียกได้แต่ต้องไม่ให้ลงมือทำ
+// ข้อสอบยิงเข้าระบบ production ตัวเดียวกับที่ทีมใช้ ที่ผ่านมาจึงมีงานปลอมค้างในฐานข้อมูล 153 ใบ
+// และการเตือนที่ข้อสอบตั้งไว้ก็รอจะ DM คนจริงตามเวลาที่นัด
+// ข้อสอบทุกข้อตัดสินจากชื่อเครื่องมือที่ถูกเรียก ไม่ได้ตัดสินจากแถวในฐานข้อมูล การคืนค่าปลอมจึงไม่ทำให้ข้อสอบอ่อนลง
+const WRITE_TOOLS = new Set([
+  "create_task",
+  "update_task",
+  "create_reminder",
+  "cancel_reminder",
+  "create_meeting",
+  "attach_file_to_task",
+  "set_user_active",
+  "manage_user",
+  "link_user",
+  "update_my_profile",
+  "remember_preference",
+  "rename_group",
+  "register_user",
+  "confirm_event",
+  "dismiss_event",
+]);
+
 async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
+  if (ctx.dryRun && WRITE_TOOLS.has(name)) {
+    return { ok: true, dry_run: "โหมดข้อสอบ ไม่ได้บันทึกจริง", tool: name, input };
+  }
   switch (name) {
     case "create_task": {
       // งานเดียวกันสั่งหลายคนพร้อมกันได้ แต่แยกเป็นใบละคน เพื่อให้ปิดงานและตามงานได้ทีละคน
