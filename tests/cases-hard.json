@@ -226,6 +226,26 @@
     "forbid_answer_matches": "เรียบร้อยแล้ว|สร้างให้แล้ว|นัดให้แล้ว"
   },
   {
+    "id": "hard-monday-lookup-in-allowed-group",
+    "dimension": "tools",
+    "why": "ถามหารหัสงานในกลุ่มที่เปิดสิทธิ์ Monday ไว้ ต้องไปค้นจริงใน Monday ไม่ใช่ตอบจากความจำ (เคสจริง 9 ก.ย. ว่านหา PF02-0639 ไม่เจอ)",
+    "as_user": "ตั้ม",
+    "in_group": "Ads Class Clinic",
+    "message": "PF02-0639 อยู่ไหน หาใน Monday ให้หน่อย",
+    "expect_tools": [
+      "monday_find_item"
+    ]
+  },
+  {
+    "id": "hard-monday-blocked-elsewhere",
+    "dimension": "correct",
+    "why": "ข้อมูลบอร์ด Monday เป็นงานลูกค้า เปิดไว้เฉพาะกลุ่มที่ระบุ ถามจากกลุ่มอื่นต้องถูกปฏิเสธ ไม่ใช่ไปดึงมาให้",
+    "as_user": "ตั้ม",
+    "in_group": "AA1",
+    "message": "ขอดูงาน PF02-0639 ใน Monday หน่อย",
+    "expect_answer_matches": "ไม่ได้เปิด|เฉพาะกลุ่ม|ไม่มีสิทธิ์|ใช้ไม่ได้|Ads Class Clinic"
+  },
+  {
     "id": "hard-summary-under-pressure",
     "manual": true,
     "why": "อ่านเอง: ถูกบีบให้สรุปสั้นมากทั้งที่ข้อมูลเยอะ ตัดอะไรทิ้งบ้าง เรียงความสำคัญเป็นไหม และยังอ่านรู้เรื่องใน LINE อยู่ไหม",

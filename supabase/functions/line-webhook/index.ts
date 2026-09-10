@@ -217,6 +217,51 @@ async function findUserByName(name: string) {
   return data ?? [];
 }
 
+
+// ---------------------------------------------------------------- Monday
+
+// เชื่อมกับ Monday ของทีม จำกัดให้ใช้ได้เฉพาะกลุ่มที่ระบุไว้ใน MONDAY_ALLOWED_GROUPS
+// เพราะข้อมูลในบอร์ดเป็นงานของลูกค้า ไม่ควรเปิดให้ถามได้จากทุกห้อง
+function mondayAllowedHere(ctx: Ctx): string | null {
+  const raw = (Deno.env.get("MONDAY_ALLOWED_GROUPS") ?? "").trim();
+  if (!raw) return "ยังไม่ได้เปิดใช้ Monday — ต้องตั้ง secret MONDAY_ALLOWED_GROUPS ว่าให้ใช้ได้ในกลุ่มไหนก่อน";
+  const allowed = raw.split(",").map((x) => x.trim()).filter(Boolean);
+  const here = ctx.group?.group_name ?? null;
+  if (!here) return `Monday ใช้ได้เฉพาะในกลุ่ม ${allowed.join(" หรือ ")} ไม่ใช่ในแชทส่วนตัว`;
+  if (!allowed.includes(here)) return `กลุ่มนี้ไม่ได้เปิดให้ใช้ Monday (เปิดไว้เฉพาะ ${allowed.join(", ")})`;
+  return null;
+}
+
+let mondaySlug: string | null = null;
+
+async function mondayQuery(query: string, variables?: Record<string, unknown>): Promise<any> {
+  const token = Deno.env.get("MONDAY_API_TOKEN") ?? "";
+  if (!token) throw new Error("ยังไม่ได้ตั้ง secret MONDAY_API_TOKEN");
+  const res = await fetch("https://api.monday.com/v2", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: token },
+    body: JSON.stringify({ query, variables: variables ?? {} }),
+  });
+  if (!res.ok) throw new Error(`Monday ตอบ ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  const json = await res.json();
+  if (json.errors) throw new Error(`Monday ปฏิเสธคำขอ: ${JSON.stringify(json.errors).slice(0, 250)}`);
+  return json.data;
+}
+
+async function mondayAccountSlug(): Promise<string> {
+  if (mondaySlug) return mondaySlug;
+  const d = await mondayQuery("query { me { account { slug } } }");
+  mondaySlug = d?.me?.account?.slug ?? "";
+  return mondaySlug!;
+}
+
+// รหัสงานของทีมไม่ได้อยู่ในชื่อรายการ แต่อยู่ในคอลัมน์ ต้องค้นทั้งชื่อและคอลัมน์รหัส
+// คอลัมน์รหัสตั้งได้ที่ MONDAY_CODE_COLUMNS เผื่อบอร์ดใหม่ใช้คอลัมน์คนละตัว
+function mondayCodeColumns(): string[] {
+  const raw = (Deno.env.get("MONDAY_CODE_COLUMNS") ?? "long_text_mkrmqj1d").trim();
+  return raw.split(",").map((x) => x.trim()).filter(Boolean);
+}
+
 // ---------------------------------------------------------------- Tools
 
 const TOOLS = [
@@ -380,6 +425,27 @@ const TOOLS = [
         task_title: { type: "string", description: "ใช้แทน task_id ได้ถ้าชื่อไม่ซ้ำ" },
       },
     },
+  },
+  {
+    name: "monday_find_item",
+    description:
+      "ค้นงานใน Monday ของทีม ค้นได้ทั้งจากชื่องานและจากรหัสงาน (เช่น PF02-0639 PALL00-1030 PO00-0006) " +
+      "ใช้เมื่อมีคนถามว่า 'รหัสนี้อยู่ไหน' 'หาไม่เจอใน Monday' 'งานนี้สถานะอะไรแล้ว' " +
+      "ตอบกลับพร้อมลิงก์เปิดรายการนั้นได้เลย ใช้ได้เฉพาะกลุ่มที่เปิดสิทธิ์ไว้",
+    input_schema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "รหัสงานหรือคำในชื่องาน" },
+        board_name: { type: "string", description: "ชื่อบอร์ด ไม่ระบุ = ค้นบอร์ดที่ใช้ล่าสุด 4 บอร์ด" },
+        limit: { type: "integer", description: "จำนวนผลต่อบอร์ด ค่าเริ่มต้น 5" },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "monday_list_boards",
+    description: "ดูรายชื่อบอร์ดใน Monday ที่ใช้ล่าสุด ใช้ตอนไม่แน่ใจว่างานอยู่บอร์ดไหน",
+    input_schema: { type: "object", properties: {} },
   },
   {
     name: "create_meeting",
@@ -945,6 +1011,80 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       });
       if (insErr) return { error: insErr.message };
       return { attached: { task: task.title, file_name: ctx.attachment.name, size_bytes: got.buf.length } };
+    }
+
+    case "monday_list_boards":
+    case "monday_find_item": {
+      const denied = mondayAllowedHere(ctx);
+      if (denied) return { error: denied };
+      try {
+        if (name === "monday_list_boards") {
+          const d = await mondayQuery("query { boards(limit: 20, order_by: used_at) { id name } }");
+          return { boards: (d?.boards ?? []).map((b: any) => ({ id: b.id, name: b.name })) };
+        }
+
+        const slug = await mondayAccountSlug();
+        let boardIds: string[] = [];
+        if (input.board_name) {
+          const d = await mondayQuery("query { boards(limit: 60, order_by: used_at) { id name } }");
+          const hit = (d?.boards ?? []).filter((b: any) =>
+            String(b.name).toLowerCase().includes(String(input.board_name).toLowerCase())
+          );
+          if (hit.length === 0) return { error: `ไม่พบบอร์ดชื่อใกล้เคียง "${input.board_name}"` };
+          boardIds = hit.slice(0, 3).map((b: any) => b.id);
+        } else {
+          const d = await mondayQuery("query { boards(limit: 4, order_by: used_at) { id } }");
+          boardIds = (d?.boards ?? []).map((b: any) => b.id);
+        }
+        if (boardIds.length === 0) return { error: "ไม่พบบอร์ดใน Monday" };
+
+        const limit = Math.min(Math.max(input.limit ?? 5, 1), 20);
+        const term = String(input.query);
+        const cols = ["name", ...mondayCodeColumns()];
+        const rules = cols
+          .map((c) => `{column_id: "${c}", compare_value: [$t], operator: contains_text}`)
+          .join(", ");
+        const q = `query($t: String!, $ids: [ID!]) {
+          boards(ids: $ids) {
+            id name
+            items_page(limit: ${limit}, query_params: {operator: or, rules: [${rules}]}) {
+              items { id name state column_values { id text } }
+            }
+          }
+        }`;
+
+        let data: any;
+        try {
+          data = await mondayQuery(q, { t: term, ids: boardIds });
+        } catch (_e) {
+          // บอร์ดที่ไม่มีคอลัมน์รหัสจะปฏิเสธทั้งคำขอ ถอยไปค้นเฉพาะชื่อแทนดีกว่าไม่ได้อะไรเลย
+          const nameOnly = q.replace(/\{column_id: "(?!name")[^}]*\}, ?/g, "");
+          data = await mondayQuery(nameOnly, { t: term, ids: boardIds });
+        }
+
+        const found: any[] = [];
+        for (const b of data?.boards ?? []) {
+          for (const it of b.items_page?.items ?? []) {
+            const texts = (it.column_values ?? []).filter((c: any) => c.text);
+            const pick = (needle: string) =>
+              texts.find((c: any) => c.id.includes(needle))?.text ?? null;
+            found.push({
+              name: it.name,
+              board: b.name,
+              state: it.state,
+              status: pick("color_") ?? null,
+              owner: pick("project_owner") ?? pick("people") ?? null,
+              due: pick("date_") ?? null,
+              url: slug ? `https://${slug}.monday.com/boards/${b.id}/pulses/${it.id}` : null,
+            });
+          }
+        }
+        return found.length === 0
+          ? { count: 0, note: `ไม่พบงานที่ตรงกับ "${term}" ในบอร์ดที่ค้น — อาจอยู่บอร์ดเดือนอื่น ลองระบุ board_name` }
+          : { count: found.length, items: found };
+      } catch (e) {
+        return { error: String((e as Error).message) };
+      }
     }
 
     case "create_meeting": {
