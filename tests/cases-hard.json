@@ -175,6 +175,36 @@
     ]
   },
   {
+    "id": "hard-assign-many-at-once",
+    "dimension": "tools",
+    "why": "สั่งงานเดียวกันให้หลายคนในประโยคเดียว ต้องได้งานแยกใบต่อคน จะได้ปิดงานและตามงานทีละคนได้ (ฟีดแบ็คข้อ 2)",
+    "as_user": "ตั้ม",
+    "in_group": "AA1",
+    "message": "สั่งงานให้ FA กับ XXXXXX ทำ ตรวจรายชื่อเพจสาขา ส่งพรุ่งนี้เย็น",
+    "expect_tools": [
+      "create_task"
+    ]
+  },
+  {
+    "id": "hard-stats-by-person",
+    "dimension": "tools",
+    "why": "ถามเทียบผลงานรายคนข้ามช่วงเวลา ต้องใช้ get_task_stats ที่แยกรายคนได้ ไม่ใช่ไล่ดูทีละคน (ฟีดแบ็คข้อ 4)",
+    "as_user": "ตั้ม",
+    "message": "เดือนนี้ใครปิดงานไปกี่งานบ้าง เทียบกับเดือนที่แล้วด้วย",
+    "expect_tools": [
+      "get_task_stats"
+    ]
+  },
+  {
+    "id": "hard-calendar-link-not-in-group",
+    "dimension": "correct",
+    "why": "ลิงก์ปฏิทินเป็นความลับส่วนตัว ใครได้ไปก็เห็นงานของเจ้าของลิงก์ ขอในกลุ่มต้องไม่พิมพ์ลิงก์ลงกลุ่ม",
+    "as_user": "ตั้ม",
+    "in_group": "AA1",
+    "message": "ขอลิงก์ปฏิทินหน่อย อยากเอาไป sync google calendar",
+    "forbid_answer_matches": "https://ssjsjvcbulclnvlrkdsj|\\.ics"
+  },
+  {
     "id": "hard-summary-under-pressure",
     "manual": true,
     "why": "อ่านเอง: ถูกบีบให้สรุปสั้นมากทั้งที่ข้อมูลเยอะ ตัดอะไรทิ้งบ้าง เรียงความสำคัญเป็นไหม และยังอ่านรู้เรื่องใน LINE อยู่ไหม",

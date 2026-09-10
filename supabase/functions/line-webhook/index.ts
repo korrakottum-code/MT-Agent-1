@@ -229,7 +229,14 @@ const TOOLS = [
       properties: {
         title: { type: "string", description: "ชื่องานสั้น กระชับ" },
         description: { type: "string" },
-        owner_name: { type: "string", description: "ชื่อเล่นเจ้าของงาน" },
+        owner_name: { type: "string", description: "ชื่อเล่นเจ้าของงาน ใช้เมื่อมอบหมายคนเดียว" },
+        owner_names: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "ชื่อเล่นหลายคน ใช้เมื่อสั่งงานเดียวกันให้หลายคนพร้อมกัน เช่น 'ให้ว่านกับจอร์จทำ' " +
+            "จะได้งานแยกกันคนละใบ ติดตามและปิดงานได้อิสระ ถ้าใส่ช่องนี้แล้วไม่ต้องใส่ owner_name",
+        },
         due_at: { type: "string", description: "กำหนดส่ง ISO 8601 เช่น 2026-09-02T15:00:00+07:00" },
         priority: { type: "string", enum: ["LOW", "NORMAL", "HIGH", "URGENT"] },
       },
@@ -350,14 +357,55 @@ const TOOLS = [
     },
   },
   {
+    name: "attach_file_to_task",
+    description:
+      "เก็บไฟล์หรือรูปที่ผู้ใช้เพิ่งส่งมาในข้อความนี้ ผูกเข้ากับงานที่ระบุ " +
+      "ใช้เมื่อเขาส่งไฟล์พร้อมบอกว่า 'แนบเข้างานนี้' 'เก็บไว้กับงานสไลด์' หรือ 'อันนี้ของงานเมื่อวาน' " +
+      "ต้องมีไฟล์หรือรูปแนบมากับข้อความล่าสุดเท่านั้น ไฟล์เก่าย้อนหลังทำไม่ได้",
+    input_schema: {
+      type: "object",
+      properties: {
+        task_id: { type: "string", description: "id ของงาน ได้จาก get_my_tasks หรือ find_tasks" },
+        task_title: { type: "string", description: "ชื่องาน ใช้แทน task_id ได้ถ้าชื่อไม่ซ้ำ" },
+      },
+    },
+  },
+  {
+    name: "list_task_attachments",
+    description: "ดูว่างานนี้มีไฟล์อะไรแนบไว้บ้าง พร้อมลิงก์เปิดไฟล์ที่ใช้ได้ชั่วคราว",
+    input_schema: {
+      type: "object",
+      properties: {
+        task_id: { type: "string" },
+        task_title: { type: "string", description: "ใช้แทน task_id ได้ถ้าชื่อไม่ซ้ำ" },
+      },
+    },
+  },
+  {
+    name: "get_calendar_link",
+    description:
+      "สร้างลิงก์ปฏิทินส่วนตัว (.ics) ของคนที่ขอ เอาไปกดสมัครใน Google Calendar หรือปฏิทินอื่นได้ " +
+      "งานที่มีกำหนดส่งและรายการเตือนจะไปโผล่ในปฏิทินและอัปเดตตามเองโดยไม่ต้องทำอะไรอีก " +
+      "ใช้เมื่อมีคนขอ 'ลิงก์ปฏิทิน' 'sync เข้า Google Calendar' หรือ 'อยากเห็นงานในปฏิทิน' " +
+      "ลิงก์เป็นความลับส่วนตัว ใครได้ไปก็เห็นงานของคนนั้น จึงส่งเข้าแชทส่วนตัวเท่านั้น ห้ามพิมพ์ในกลุ่ม",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
     name: "get_task_stats",
-    description: "นับจำนวนงานตามช่วงเวลาและสถานะ เช่น เดือนนี้เสร็จไปกี่งาน",
+    description:
+      "นับจำนวนงานตามช่วงเวลาและสถานะ เช่น เดือนนี้เสร็จไปกี่งาน " +
+      "ใส่ by_person=true เพื่อแยกตัวเลขรายคน (ใครปิดไปกี่งาน ค้างกี่งาน เลยกำหนดกี่งาน) " +
+      "ใส่ compare_from/compare_to เพื่อเทียบกับอีกช่วงเวลา เช่น เดือนนี้เทียบเดือนที่แล้ว " +
+      "แยกรายคนได้เฉพาะ MANAGER ขึ้นไป คนอื่นจะเห็นเฉพาะตัวเลขของตัวเอง",
     input_schema: {
       type: "object",
       properties: {
         date_from: { type: "string", description: "ISO 8601" },
         date_to: { type: "string", description: "ISO 8601" },
         status: { type: "string", enum: ["TODO", "DOING", "DONE", "CANCELLED"] },
+        by_person: { type: "boolean", description: "true = แยกตัวเลขรายคนแทนที่จะรวมเป็นก้อนเดียว" },
+        compare_from: { type: "string", description: "ต้นช่วงที่เอามาเทียบ ISO 8601" },
+        compare_to: { type: "string", description: "ปลายช่วงที่เอามาเทียบ ISO 8601" },
       },
       required: ["date_from", "date_to"],
     },
@@ -571,9 +619,32 @@ const TOOLS = [
   },
 ];
 
-type Ctx = { caller: any; group: any; lineGroupId: string | null };
+type Ctx = {
+  // ของที่แนบมากับข้อความนี้ ให้ tool หยิบไปใช้ได้โดยไม่ต้องส่งผ่านพารามิเตอร์
+  attachment?: { messageId: string; name: string } | null; caller: any; group: any; lineGroupId: string | null };
 
 const canViewOthers = (role: string) => ["MANAGER", "ADMIN", "EXECUTIVE"].includes(role);
+
+// หางานจาก id ตรง ๆ หรือจากชื่อ ถ้าชื่อซ้ำหลายงานให้บอกไปเลยว่าซ้ำ ดีกว่าเลือกผิดใบ
+async function resolveOneTask(
+  ctx: Ctx, taskId?: string, title?: string,
+): Promise<{ id: string; title: string } | { error: string }> {
+  if (taskId) {
+    const { data } = await supabase.from("tasks").select("id, title").eq("id", taskId).maybeSingle();
+    if (!data) return { error: "ไม่พบงานตาม id ที่ระบุ" };
+    return data;
+  }
+  if (!title) return { error: "ต้องระบุ task_id หรือ task_title อย่างใดอย่างหนึ่ง" };
+  let q = supabase.from("tasks").select("id, title, owner_user_id")
+    .ilike("title", `%${title}%`).in("status", ["TODO", "DOING"]).limit(5);
+  if (!canViewOthers(ctx.caller.role)) q = q.eq("owner_user_id", ctx.caller.id);
+  const { data } = await q;
+  if (!data || data.length === 0) return { error: `ไม่พบงานที่ชื่อใกล้เคียง "${title}"` };
+  if (data.length > 1) {
+    return { error: `มีงานชื่อใกล้เคียง "${title}" อยู่ ${data.length} งาน ระบุให้ชัดกว่านี้: ${data.map((t: any) => t.title).join(" · ")}` };
+  }
+  return { id: data[0].id, title: data[0].title };
+}
 
 async function resolveOneUser(name: string): Promise<{ user?: any; error?: string }> {
   const matches = await findUserByName(name);
@@ -589,13 +660,22 @@ async function resolveOneUser(name: string): Promise<{ user?: any; error?: strin
 async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
   switch (name) {
     case "create_task": {
-      let ownerId = ctx.caller.id;
-      if (input.owner_name) {
-        const r = await resolveOneUser(input.owner_name);
+      // งานเดียวกันสั่งหลายคนพร้อมกันได้ แต่แยกเป็นใบละคน เพื่อให้ปิดงานและตามงานได้ทีละคน
+      // ถ้ารวมไว้ใบเดียว พอคนหนึ่งทำเสร็จจะไม่มีทางบอกได้ว่าที่เหลือเสร็จหรือยัง
+      const names: string[] = Array.isArray(input.owner_names) && input.owner_names.length > 0
+        ? input.owner_names
+        : (input.owner_name ? [input.owner_name] : []);
+
+      const ownerIds: string[] = [];
+      const seen = new Set<string>();
+      for (const n of names) {
+        const r = await resolveOneUser(n);
         if (r.error) return { error: r.error };
-        ownerId = r.user.id;
+        if (!seen.has(r.user.id)) { seen.add(r.user.id); ownerIds.push(r.user.id); }
       }
-      const { data, error } = await supabase.from("tasks").insert({
+      if (ownerIds.length === 0) ownerIds.push(ctx.caller.id);
+
+      const rows = ownerIds.map((ownerId) => ({
         title: input.title,
         description: input.description ?? null,
         owner_user_id: ownerId,
@@ -603,9 +683,18 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
         group_id: ctx.group?.id ?? null,
         due_at: input.due_at ?? null,
         priority: input.priority ?? "NORMAL",
-      }).select("id, title, due_at, priority").single();
+      }));
+      const { data, error } = await supabase.from("tasks").insert(rows)
+        .select("id, title, due_at, priority, owner_user_id");
       if (error) return { error: error.message };
-      return { created: data };
+
+      const { data: us } = await supabase.from("users").select("id, display_name");
+      const who = new Map((us ?? []).map((u: any) => [u.id, u.display_name]));
+      const created = (data ?? []).map((t: any) => ({
+        id: t.id, title: t.title, due_at: t.due_at, priority: t.priority,
+        owner: who.get(t.owner_user_id) ?? null,
+      }));
+      return created.length === 1 ? { created: created[0] } : { created_count: created.length, created };
     }
 
     case "get_my_tasks":
@@ -794,20 +883,141 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       };
     }
 
-    case "get_task_stats": {
-      // any เพราะด้านล่างสลับ select เป็นคนละชุดคอลัมน์ ทำให้ชนิดที่ supabase-js อนุมานไว้ไม่ตรงกัน
-      let q: any = supabase.from("tasks").select("id, status", { count: "exact" })
-        .gte("created_at", input.date_from).lte("created_at", input.date_to);
-      if (input.status === "DONE") {
-        q = supabase.from("tasks").select("id", { count: "exact" })
-          .eq("status", "DONE")
-          .gte("completed_at", input.date_from).lte("completed_at", input.date_to);
-      } else if (input.status) {
-        q = q.eq("status", input.status);
+    case "attach_file_to_task":
+    case "list_task_attachments": {
+      const task = await resolveOneTask(ctx, input.task_id, input.task_title);
+      if ("error" in task) return { error: task.error };
+
+      if (name === "list_task_attachments") {
+        const { data, error } = await supabase.from("task_attachments")
+          .select("id, file_name, content_type, size_bytes, storage_path, created_at")
+          .eq("task_id", task.id).order("created_at", { ascending: false }).limit(20);
+        if (error) return { error: error.message };
+        const files = [];
+        for (const f of data ?? []) {
+          // ลิงก์อายุ 1 ชม. ไฟล์งานอาจมีข้อมูลลูกค้า ไม่ควรเปิดค้างไว้ถาวร
+          const { data: signed } = await supabase.storage
+            .from("task-attachments").createSignedUrl(f.storage_path, 3600);
+          files.push({
+            file_name: f.file_name, size_bytes: f.size_bytes,
+            created_at: f.created_at, url: signed?.signedUrl ?? null,
+          });
+        }
+        return { task: task.title, count: files.length, files };
       }
-      const { count, error } = await q;
+
+      if (!ctx.attachment) {
+        return { error: "ไม่มีไฟล์หรือรูปแนบมากับข้อความนี้ ให้ส่งไฟล์พร้อมบอกว่าจะแนบเข้างานไหนในข้อความเดียวกัน" };
+      }
+      const got = await downloadLineContent(ctx.attachment.messageId);
+      if (!got) return { error: "ดึงไฟล์จาก LINE ไม่สำเร็จ ไฟล์อาจหมดอายุแล้ว ลองส่งใหม่อีกครั้ง" };
+      const safe = ctx.attachment.name.replace(/[^\p{L}\p{N}._-]+/gu, "_").slice(0, 80);
+      const path = `${task.id}/${Date.now()}_${safe}`;
+      const { error: upErr } = await supabase.storage.from("task-attachments")
+        .upload(path, got.buf, { contentType: got.contentType, upsert: false });
+      if (upErr) return { error: `เก็บไฟล์ไม่สำเร็จ: ${upErr.message}` };
+      const { error: insErr } = await supabase.from("task_attachments").insert({
+        task_id: task.id, file_name: ctx.attachment.name, content_type: got.contentType,
+        size_bytes: got.buf.length, storage_path: path, uploaded_by_user_id: ctx.caller.id,
+      });
+      if (insErr) return { error: insErr.message };
+      return { attached: { task: task.title, file_name: ctx.attachment.name, size_bytes: got.buf.length } };
+    }
+
+    case "get_calendar_link": {
+      if (String(ctx.caller.line_user_id).startsWith("pending:")) {
+        return { error: "บัญชีนี้ยังไม่ได้ผูก LINE จริง สร้างลิงก์ปฏิทินให้ไม่ได้" };
+      }
+      // ลิงก์เก่าตายทันทีที่ขอใหม่ ลิงก์ที่เคยหลุดไปแล้วจะได้ใช้ไม่ได้อีก
+      await supabase.from("calendar_feeds")
+        .update({ revoked_at: new Date().toISOString() })
+        .eq("user_id", ctx.caller.id).is("revoked_at", null);
+      const token = crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "");
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+      const tokenHash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+      const { error } = await supabase.from("calendar_feeds")
+        .insert({ user_id: ctx.caller.id, token_hash: tokenHash });
       if (error) return { error: error.message };
-      return { count, date_from: input.date_from, date_to: input.date_to, status: input.status ?? "ALL" };
+      const base = Deno.env.get("SUPABASE_URL") ?? "";
+      return {
+        url: `${base}/functions/v1/line-webhook/calendar/${token}.ics`,
+        how_to:
+          "Google Calendar → เมนูซ้าย 'ปฏิทินอื่นๆ' → 'จาก URL' → วางลิงก์นี้ " +
+          "งานที่มีกำหนดส่งและรายการเตือนจะขึ้นในปฏิทินและอัปเดตเองทุกไม่กี่ชั่วโมง " +
+          "ลิงก์นี้เป็นความลับส่วนตัว อย่าส่งต่อให้ใคร ถ้าหลุดให้ขอลิงก์ใหม่ ลิงก์เก่าจะใช้ไม่ได้ทันที",
+      };
+    }
+
+    case "get_task_stats": {
+      // งานที่ "เสร็จในช่วงนี้" ต้องนับจาก completed_at ส่วนสถานะอื่นนับจากตอนสร้าง
+      // ถ้านับผิดฐาน ตัวเลขเดือนนี้จะกลายเป็นงานที่สร้างเดือนนี้ ไม่ใช่งานที่ปิดได้เดือนนี้
+      const bucket = async (from: string, to: string) => {
+        let q: any = supabase.from("tasks").select("id, status, due_at, owner_user_id")
+          .gte("created_at", from).lte("created_at", to);
+        if (input.status === "DONE") {
+          q = supabase.from("tasks").select("id, status, due_at, owner_user_id")
+            .eq("status", "DONE").gte("completed_at", from).lte("completed_at", to);
+        } else if (input.status) {
+          q = q.eq("status", input.status);
+        }
+        // คนที่ไม่ใช่ MANAGER ขึ้นไป เห็นได้เฉพาะตัวเลขของตัวเอง ไม่ว่าจะถามยังไง
+        if (!canViewOthers(ctx.caller.role)) q = q.eq("owner_user_id", ctx.caller.id);
+        const { data, error } = await q;
+        if (error) throw new Error(error.message);
+        return data ?? [];
+      };
+
+      const now = Date.now();
+      const summarise = (rows: any[]) => ({
+        total: rows.length,
+        done: rows.filter((t: any) => t.status === "DONE").length,
+        open: rows.filter((t: any) => ["TODO", "DOING"].includes(t.status)).length,
+        overdue: rows.filter((t: any) =>
+          ["TODO", "DOING"].includes(t.status) && t.due_at && new Date(t.due_at).getTime() < now
+        ).length,
+      });
+
+      let main: any[];
+      try {
+        main = await bucket(input.date_from, input.date_to);
+      } catch (e) {
+        return { error: String((e as Error).message) };
+      }
+
+      const result: any = {
+        date_from: input.date_from, date_to: input.date_to,
+        status: input.status ?? "ALL",
+        ...summarise(main),
+      };
+
+      if (input.by_person) {
+        const { data: us } = await supabase.from("users").select("id, display_name");
+        const who = new Map((us ?? []).map((u: any) => [u.id, u.display_name]));
+        const groups = new Map<string, any[]>();
+        for (const t of main) {
+          const k = t.owner_user_id ?? "ไม่มีเจ้าของ";
+          if (!groups.has(k)) groups.set(k, []);
+          groups.get(k)!.push(t);
+        }
+        result.by_person = [...groups.entries()]
+          .map(([id, rows]) => ({ person: who.get(id) ?? "ไม่มีเจ้าของ", ...summarise(rows) }))
+          .sort((a: any, b: any) => b.done - a.done);
+      }
+
+      if (input.compare_from && input.compare_to) {
+        try {
+          const prev = await bucket(input.compare_from, input.compare_to);
+          const p = summarise(prev);
+          result.compare = {
+            date_from: input.compare_from, date_to: input.compare_to, ...p,
+            done_diff: result.done - p.done,
+            total_diff: result.total - p.total,
+          };
+        } catch (e) {
+          return { error: String((e as Error).message) };
+        }
+      }
+      return result;
     }
 
     case "send_dm": {
@@ -1286,6 +1496,9 @@ type AgentOpts = {
   // "named" = เอ่ยชื่อลอย ๆ อาจแค่พูดถึง / "follow_up" = ไม่ได้เอ่ยชื่อ แต่บอทเพิ่งพูดจบ
   judgeAddressed?: "named" | "follow_up" | null;
   file?: FilePayload | null;
+  // id ของข้อความที่แนบไฟล์หรือรูปมา ใช้ตอนผู้ใช้สั่งให้เอาไฟล์นั้นแนบเข้ากับงาน
+  attachmentMessageId?: string | null;
+  attachmentName?: string | null;
   toolLog?: string[]; // ใช้ตอนรันข้อสอบ เก็บชื่อ tool ที่ถูกเรียกจริง
   // ปกติข้อความที่เพิ่งเข้ามาถูกบันทึกลง messages ไปแล้ว จึงต้องตัดตัวล่าสุดออกจากประวัติกันซ้ำ
   // แต่โหมดข้อสอบไม่ได้บันทึกอะไร ถ้าตัดจะไปตัดคำตอบล่าสุดของบอททิ้ง
@@ -1709,6 +1922,13 @@ async function handleEvent(event: any) {
     }
   }
 
+  // ของที่แนบมากับข้อความนี้ ให้ tool เก็บเข้ากับงานได้โดยไม่ต้องส่งไฟล์ผ่านโมเดล
+  if (msgType === "image") {
+    ctx.attachment = { messageId: event.message.id, name: `รูป_${new Date().toISOString().slice(0, 10)}.jpg` };
+  } else if (msgType === "file") {
+    ctx.attachment = { messageId: event.message.id, name: fileName || "ไฟล์" };
+  }
+
   const question = msgType === "image"
     ? "ผู้ใช้ส่งรูปภาพนี้มา ช่วยดูรูปและตอบตามบริบทของบทสนทนา"
     : msgType === "file"
@@ -1804,7 +2024,78 @@ async function runEval(body: string): Promise<Response> {
   }
 }
 
+// ปฏิทินส่วนตัวแบบ .ics ให้เอาไปกดสมัครใน Google Calendar
+// ปฏิทินฝั่งผู้ใช้จะมาดึงเองเป็นระยะ จึงต้องเป็น GET ไม่มีล็อกอิน ยืนยันตัวด้วย token ในลิงก์
+function icsEscape(t: string): string {
+  return String(t).replace(/\\/g, "\\\\").replace(/[;,]/g, (m) => "\\" + m).replace(/\r?\n/g, "\\n");
+}
+function icsStamp(d: Date): string {
+  return d.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+}
+
+async function serveCalendar(token: string): Promise<Response> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+  const hash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const { data: feed } = await supabase.from("calendar_feeds")
+    .select("id, user_id, revoked_at").eq("token_hash", hash).maybeSingle();
+  if (!feed || feed.revoked_at) return new Response("calendar not found", { status: 404 });
+
+  await supabase.from("calendar_feeds").update({ last_read_at: new Date().toISOString() }).eq("id", feed.id);
+
+  const { data: tasks } = await supabase.from("tasks")
+    .select("id, title, description, due_at, status, priority")
+    .eq("owner_user_id", feed.user_id).in("status", ["TODO", "DOING"])
+    .not("due_at", "is", null).limit(200);
+  const { data: reminders } = await supabase.from("reminders")
+    .select("id, message, remind_at, status")
+    .eq("target_user_id", feed.user_id).eq("status", "PENDING").limit(200);
+
+  const lines = [
+    "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//MT Agent//แงว//TH",
+    "CALSCALE:GREGORIAN", "METHOD:PUBLISH", "X-WR-CALNAME:งานจากแงว",
+    "X-WR-TIMEZONE:Asia/Bangkok",
+  ];
+  const now = new Date();
+  for (const t of tasks ?? []) {
+    const start = new Date(t.due_at);
+    lines.push(
+      "BEGIN:VEVENT",
+      `UID:task-${t.id}@mt-agent`,
+      `DTSTAMP:${icsStamp(now)}`,
+      `DTSTART:${icsStamp(start)}`,
+      `DTEND:${icsStamp(new Date(start.getTime() + 30 * 60_000))}`,
+      `SUMMARY:${icsEscape((t.priority === "URGENT" || t.priority === "HIGH" ? "❗ " : "") + t.title)}`,
+      `DESCRIPTION:${icsEscape(t.description ?? "งานจากแงว")}`,
+      "END:VEVENT",
+    );
+  }
+  for (const r of reminders ?? []) {
+    const start = new Date(r.remind_at);
+    lines.push(
+      "BEGIN:VEVENT",
+      `UID:reminder-${r.id}@mt-agent`,
+      `DTSTAMP:${icsStamp(now)}`,
+      `DTSTART:${icsStamp(start)}`,
+      `DTEND:${icsStamp(new Date(start.getTime() + 15 * 60_000))}`,
+      `SUMMARY:${icsEscape("⏰ " + r.message)}`,
+      "END:VEVENT",
+    );
+  }
+  lines.push("END:VCALENDAR");
+  return new Response(lines.join("\r\n"), {
+    headers: {
+      "Content-Type": "text/calendar; charset=utf-8",
+      "Cache-Control": "no-cache",
+      "Content-Disposition": 'inline; filename="mt-agent.ics"',
+    },
+  });
+}
+
 Deno.serve(async (req: Request) => {
+  const path = new URL(req.url).pathname;
+  const cal = path.match(/\/calendar\/([A-Za-z0-9]+)\.ics$/);
+  if (cal) return await serveCalendar(cal[1]);
+
   if (req.method !== "POST") return new Response("MT Agent 1 webhook is alive");
 
   const body = await req.text();
