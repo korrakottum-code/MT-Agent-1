@@ -769,7 +769,6 @@ const WRITE_TOOLS = new Set([
   "update_task",
   "create_reminder",
   "cancel_reminder",
-  "create_meeting",
   "attach_file_to_task",
   "set_user_active",
   "manage_user",
@@ -1214,6 +1213,7 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
         const chatId = ctx.lineGroupId ?? ctx.caller.line_user_id;
         for (const p of inviteIds) {
           const msg = `${p.name} ประชุม "${input.title}" อีก 10 นาที เข้าห้องที่ ${link}`;
+          if (ctx.dryRun) { reminded.push(p.name); continue; }
           const { error } = await supabase.from("reminders").insert({
             target_user_id: p.id, chat_id: chatId, message: msg,
             remind_at: remindAt.toISOString(), created_by_user_id: ctx.caller.id,
@@ -1222,7 +1222,7 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
         }
       }
 
-      await supabase.from("tasks").insert({
+      if (!ctx.dryRun) await supabase.from("tasks").insert({
         title: `ประชุม: ${input.title}`,
         description: `ห้องประชุม ${link}`,
         owner_user_id: ctx.caller.id,
