@@ -112,6 +112,55 @@ async function fetchImageContent(messageId: string): Promise<{ data: string; med
   return { data: toBase64(got.buf), media_type: got.contentType || "image/jpeg" };
 }
 
+// ข้อความเสียงคือคำสั่งที่หายไปทั้งหมด ทีมส่งเสียงสั่งงานกันบ่อยกว่าพิมพ์
+// แต่เดิมบอทไม่ได้ยินอะไรเลย งานที่สั่งด้วยเสียงจึงไม่เคยเข้าระบบ
+//
+// ถอดที่ขาเข้าแล้วเก็บข้อความลง messages เลย ของที่อยู่ปลายทางทั้งหมด
+// ทั้งการสรุปประจำวัน การค้นย้อนหลัง และการแยกงานกับโน้ต จึงได้ของฟรีโดยไม่ต้องแก้อะไร
+const AUDIO_TRANSCRIBE_MODEL = "gemini-flash";
+const MAX_AUDIO_BYTES = 12 * 1024 * 1024;
+
+async function transcribeAudio(messageId: string): Promise<string | null> {
+  const { spec } = resolveModel(AUDIO_TRANSCRIBE_MODEL);
+  if (!spec || spec.provider !== "gemini") {
+    console.error("ถอดเสียงต้องใช้ Gemini แต่ตอนนี้เรียกไม่ได้ ข้ามการถอดเสียง");
+    return null;
+  }
+  const got = await downloadLineContent(messageId);
+  if (!got) return null;
+  if (got.buf.length > MAX_AUDIO_BYTES) {
+    console.error(`ข้อความเสียงยาวเกิน ${MAX_AUDIO_BYTES} ไบต์ ข้ามการถอดเสียง`);
+    return null;
+  }
+  // LINE ส่ง m4a มา ซึ่งเป็น AAC ในกล่อง MP4 ค่ายโมเดลรู้จักในชื่อ audio/mp4
+  // ถ้า header ไม่ได้บอกชนิดมา ให้เดาเป็นอันนี้แทนที่จะยอมแพ้
+  const mime = (got.contentType || "").startsWith("audio/") ? got.contentType : "audio/mp4";
+  try {
+    const res = await createMessage(spec, {
+      max_tokens: 1024,
+      system: "ถอดเสียงเป็นข้อความภาษาไทยตามที่ได้ยิน ตอบเฉพาะข้อความที่ถอดได้ " +
+        "ห้ามสรุป ห้ามเติมคำอธิบาย ห้ามใส่เครื่องหมายคำพูดครอบ ถ้าไม่ได้ยินอะไรเลยให้ตอบว่า (ไม่มีเสียงพูด)",
+      messages: [{
+        role: "user",
+        content: [
+          { type: "document", source: { type: "base64", media_type: mime, data: toBase64(got.buf) } },
+          { type: "text", text: "ถอดเสียงนี้" },
+        ],
+      }],
+    });
+    const text = (res.content ?? [])
+      .filter((b: any) => b.type === "text")
+      .map((b: any) => b.text)
+      .join(" ")
+      .trim();
+    if (!text || text.includes("ไม่มีเสียงพูด")) return null;
+    return text.slice(0, 2000);
+  } catch (e) {
+    console.error("ถอดเสียงไม่สำเร็จ", e);
+    return null;
+  }
+}
+
 // แปลงไฟล์ที่ส่งใน LINE ให้อยู่ในรูปที่โมเดลอ่านได้
 // PDF ส่งเป็นเอกสารตรง ๆ / ไฟล์ข้อความอ่านเป็นตัวอักษร / Word กับ Excel ถอดข้อความด้วยไลบรารี
 // ไลบรารีโหลดแบบ dynamic import ใน try เพื่อไม่ให้พังทั้ง function ถ้าโหลดไม่สำเร็จ
@@ -2456,12 +2505,21 @@ function isBareName(text: string): boolean {
 async function handleEvent(event: any) {
   if (event.type !== "message") return;
   const msgType: string = event.message?.type ?? "";
-  if (!["text", "image", "file"].includes(msgType)) return;
+  if (!["text", "image", "file", "audio"].includes(msgType)) return;
 
   const fileName: string = event.message?.fileName ?? "ไฟล์";
+  // ถอดเสียงก่อนบันทึก เพื่อให้แถวใน messages เก็บสิ่งที่คนพูด ไม่ใช่คำว่ามีคนส่งเสียงมา
+  const audioFromLine = (event.message?.contentProvider?.type ?? "line") === "line";
+  const spoken = msgType === "audio" && audioFromLine
+    ? await transcribeAudio(event.message.id)
+    : null;
   const text: string = msgType === "text"
     ? event.message.text
-    : msgType === "image" ? "[ส่งรูปภาพ]" : `[ส่งไฟล์: ${fileName}]`;
+    : msgType === "image"
+    ? "[ส่งรูปภาพ]"
+    : msgType === "audio"
+    ? (spoken ? `[เสียง] ${spoken}` : "[ข้อความเสียง ถอดไม่ได้]")
+    : `[ส่งไฟล์: ${fileName}]`;
   const lineUserId: string = event.source?.userId ?? "unknown";
   const lineGroupId: string | null = event.source?.groupId ?? null;
   // chatId ใช้ผูกบทสนทนา: กลุ่ม = groupId, แชทส่วนตัว = userId ของคู่สนทนา
@@ -2480,16 +2538,20 @@ async function handleEvent(event: any) {
   // - แชทส่วนตัว: ตอบทุกข้อความและทุกรูป
   // - ในกลุ่ม: ตอบเมื่อแท็ก เรียกชื่อล้วน ๆ เอ่ยชื่อ หรือกำลังคุยต่อจากที่บอทเพิ่งพูด
   //   (สองอย่างหลัง → โมเดลอ่านบริบทแล้วตัดสินใจเองว่าควรตอบไหม)
-  const tagged = msgType === "text" && (isCallingAI(text) || isBareName(text));
-  const named = msgType === "text" && isNameMention(text);
+  // เสียงที่ถอดได้แล้วนับเป็นข้อความ พูดว่า "แงว เปิดงาน..." ใส่ไมค์จึงได้ผลเหมือนพิมพ์
+  const said = msgType === "audio" && spoken ? spoken : text;
+  const speakable = msgType === "text" || (msgType === "audio" && Boolean(spoken));
+  const tagged = speakable && (isCallingAI(said) || isBareName(said));
+  const named = speakable && isNameMention(said);
   // รูปและไฟล์ในกลุ่มแค่เก็บไว้ก่อน รอให้คนแท็กถามถึง จะได้ไม่รบกวนทุกครั้งที่มีคนแชร์ไฟล์
-  if (lineGroupId && msgType !== "text") return;
+  // เสียงก็เหมือนกัน ถอดเก็บไว้เงียบ ๆ แล้วตอบเฉพาะตอนที่คนพูดเรียกชื่อบอทจริง ๆ
+  if (lineGroupId && !speakable) return;
 
   // ถามต่อจากคำตอบของบอทโดยไม่แท็กซ้ำเป็นเรื่องปกติของการคุยกัน — ถ้าบอทเป็นคนพูดล่าสุด
   // และเพิ่งพูดไปไม่นาน ให้โมเดลอ่านบริบทแล้วตัดสินใจ ไม่ใช่เงียบใส่ไปเลย
   // ผูกกับ "บอทพูดล่าสุด" ไม่ใช่แค่ช่วงเวลา เพราะพอมีคนอื่นพูดแทรก บทสนทนาก็เปลี่ยนมือไปแล้ว
   let followUp = false;
-  if (lineGroupId && msgType === "text" && !tagged && !named) {
+  if (lineGroupId && speakable && !tagged && !named) {
     // ดึงมา 2 แถวแล้วข้ามข้อความปัจจุบันเอง (มันเพิ่งถูกบันทึกไปด้านบน)
     // ห้ามกรองด้วย .neq("line_message_id", ...) เพราะคำตอบของบอทเก็บ line_message_id เป็น NULL
     // และ NULL <> x ใน SQL ได้ NULL ไม่ใช่ true — แถวของบอทจะถูกกรองทิ้งไปด้วย
@@ -2549,7 +2611,11 @@ async function handleEvent(event: any) {
     ctx.attachment = { messageId: event.message.id, name: fileName || "ไฟล์" };
   }
 
-  const question = msgType === "image"
+  const question = msgType === "audio"
+    ? (spoken
+      ? `${spoken.replace(/@\s?(ai|mt\s?agent\s?1?)/i, "").trim()}\n\n(ผู้ใช้พูดมาเป็นข้อความเสียง ถอดมาแล้วตามนี้ ถ้าฟังดูขาดหายให้ถามกลับ)`
+      : "ผู้ใช้ส่งข้อความเสียงมาแต่แงวถอดไม่ได้ บอกตรง ๆ ว่าฟังไม่ออก แล้วขอให้พิมพ์มาแทน")
+    : msgType === "image"
     ? "ผู้ใช้ส่งรูปภาพนี้มา ช่วยดูรูปและตอบตามบริบทของบทสนทนา"
     : msgType === "file"
     ? `ผู้ใช้ส่งไฟล์ "${fileName}" มา อ่านเนื้อหาแล้วสรุปสั้น ๆ ว่าไฟล์นี้เกี่ยวกับอะไร มีงานหรือกำหนดส่งอะไรที่ควรบันทึกเข้าระบบบ้าง แล้วถามว่าให้สร้างงานให้เลยไหม (อย่าเพิ่งสร้างเองจนกว่าจะยืนยัน)`
