@@ -382,6 +382,28 @@ const TOOLS = [
     },
   },
   {
+    name: "create_meeting",
+    description:
+      "สร้างห้องประชุมออนไลน์พร้อมลิงก์ ตั้งเวลา และตั้งเตือนให้คนที่เข้าร่วมโดยอัตโนมัติ " +
+      "ใช้เมื่อมีคนบอกว่า 'นัดประชุม' 'เปิดห้องมีต' 'ขอลิงก์ประชุม' หรือ 'ประชุมบ่ายสองนะ' " +
+      "ลิงก์เข้าได้เลยไม่ต้องล็อกอิน เปิดได้ทั้งมือถือและคอม " +
+      "ถ้าเป็นการนัดในกลุ่ม ทุกคนที่ระบุจะได้เตือนก่อนถึงเวลา 10 นาที และงานจะไปโผล่ในปฏิทินของแต่ละคนด้วย",
+    input_schema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "หัวข้อประชุม เช่น สรุปผลกับคุณต้น" },
+        start_at: { type: "string", description: "เวลาเริ่ม ISO 8601 +07:00 ถ้าไม่ระบุ = เปิดห้องใช้เดี๋ยวนี้" },
+        duration_minutes: { type: "integer", description: "ความยาว ค่าเริ่มต้น 60 นาที" },
+        invite_names: {
+          type: "array",
+          items: { type: "string" },
+          description: "ชื่อเล่นคนที่ต้องเข้าประชุม จะได้รับเตือนก่อนเวลา 10 นาที ไม่ระบุ = เตือนเฉพาะคนที่สั่ง",
+        },
+      },
+      required: ["title"],
+    },
+  },
+  {
     name: "get_calendar_link",
     description:
       "สร้างลิงก์ปฏิทินส่วนตัว (.ics) ของคนที่ขอ เอาไปกดสมัครใน Google Calendar หรือปฏิทินอื่นได้ " +
@@ -922,6 +944,74 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       });
       if (insErr) return { error: insErr.message };
       return { attached: { task: task.title, file_name: ctx.attachment.name, size_bytes: got.buf.length } };
+    }
+
+    case "create_meeting": {
+      // ห้องประชุมเปิดได้ทันทีโดยไม่ต้องให้ใครล็อกอินหรือขอสิทธิ์บัญชีใคร
+      // Google Meet สร้างผ่าน API ไม่ได้ถ้าไม่มี OAuth ของ Google ซึ่งเจ้าของระบบต้องตั้งเอง
+      // จึงใช้ห้องที่เปิดได้เลยแทน ผู้ใช้กดลิงก์แล้วเข้าประชุมได้เหมือนกัน
+      const slug = `mtagent-${crypto.randomUUID().slice(0, 8)}`;
+      const link = `https://meet.jit.si/${slug}`;
+      const minutes = Math.min(Math.max(input.duration_minutes ?? 60, 15), 480);
+
+      let startAt: Date | null = null;
+      if (input.start_at) {
+        startAt = new Date(input.start_at);
+        if (isNaN(startAt.getTime())) return { error: "รูปแบบเวลาไม่ถูกต้อง ต้องเป็น ISO 8601" };
+        if (startAt.getTime() < Date.now() - 60_000) return { error: "เวลาที่นัดเป็นอดีตไปแล้ว" };
+      }
+
+      // คนที่ต้องเข้าประชุม ถ้าไม่ระบุก็คือคนสั่งคนเดียว
+      const inviteIds: { id: string; name: string }[] = [];
+      const seenInvite = new Set<string>();
+      for (const n of (Array.isArray(input.invite_names) ? input.invite_names : [])) {
+        const r = await resolveOneUser(n);
+        if (r.error) return { error: r.error };
+        if (!seenInvite.has(r.user.id)) {
+          seenInvite.add(r.user.id);
+          inviteIds.push({ id: r.user.id, name: r.user.display_name });
+        }
+      }
+      if (inviteIds.length === 0) {
+        inviteIds.push({ id: ctx.caller.id, name: ctx.caller.display_name ?? "ผู้สั่ง" });
+      }
+
+      // เตือนล่วงหน้า 10 นาที พร้อมลิงก์ในข้อความ จะได้กดเข้าได้จากการเตือนเลย
+      // และเพราะการเตือนไปโผล่ในปฏิทินส่วนตัวอยู่แล้ว มีตจึงขึ้นปฏิทินให้เองโดยไม่ต้องทำอะไรเพิ่ม
+      const reminded: string[] = [];
+      if (startAt) {
+        const remindAt = new Date(Math.max(startAt.getTime() - 10 * 60_000, Date.now() + 30_000));
+        const chatId = ctx.lineGroupId ?? ctx.caller.line_user_id;
+        for (const p of inviteIds) {
+          const msg = `${p.name} ประชุม "${input.title}" อีก 10 นาที เข้าห้องที่ ${link}`;
+          const { error } = await supabase.from("reminders").insert({
+            target_user_id: p.id, chat_id: chatId, message: msg,
+            remind_at: remindAt.toISOString(), created_by_user_id: ctx.caller.id,
+          });
+          if (!error) reminded.push(p.name);
+        }
+      }
+
+      await supabase.from("tasks").insert({
+        title: `ประชุม: ${input.title}`,
+        description: `ห้องประชุม ${link}`,
+        owner_user_id: ctx.caller.id,
+        created_by_user_id: ctx.caller.id,
+        group_id: ctx.group?.id ?? null,
+        due_at: startAt ? startAt.toISOString() : null,
+        priority: "NORMAL",
+      });
+
+      return {
+        meeting: {
+          title: input.title, link,
+          start_at: startAt ? startAt.toISOString() : "เข้าได้เลยตอนนี้",
+          duration_minutes: minutes,
+          invited: inviteIds.map((p) => p.name),
+          reminded_10_min_before: reminded,
+        },
+        note: "ลิงก์นี้เข้าได้เลยไม่ต้องล็อกอิน บอกลิงก์กับเวลาให้ครบในคำตอบ",
+      };
     }
 
     case "get_calendar_link": {
