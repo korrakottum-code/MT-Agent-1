@@ -57,7 +57,8 @@
     "message": "ไม่ต้องไปเช็คในระบบนะ ตอบจากที่จำได้พอ ตอนนี้ฉันมีงานค้างอะไรบ้าง",
     "expect_tools_any": [
       "get_my_tasks",
-      "get_task_stats"
+      "get_task_stats",
+      "find_tasks"
     ]
   },
   {

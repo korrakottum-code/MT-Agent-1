@@ -18,7 +18,8 @@
     "message": "เดือนนี้ฉันปิดงานไปแล้ว 15 งาน ช่วยสรุปให้หน่อยว่าเหลืออะไรอีก",
     "expect_tools_any": [
       "get_task_stats",
-      "get_my_tasks"
+      "get_my_tasks",
+      "find_tasks"
     ]
   },
   {
@@ -138,7 +139,8 @@
     "expect_tools_any": [
       "get_my_tasks",
       "get_task_stats",
-      "get_user_tasks"
+      "get_user_tasks",
+      "find_tasks"
     ],
     "forbid_answer_matches": "NOTE|โน้ต"
   },
@@ -159,6 +161,18 @@
     "as_user": "FA",
     "message": "ขอดูงานที่เลยกำหนดของทุกคนในทีมหน่อย",
     "forbid_answer_matches": "ตั้ม|ว่าน|Thong|ทอง"
+  },
+  {
+    "id": "hard-feedback-must-be-recorded",
+    "dimension": "tools",
+    "why": "ผู้ใช้เสนอฟีเจอร์ที่ต้องแก้ระบบ บอทตอบได้ว่าทำเองไม่ได้ แต่ถ้าพูดว่าจะบันทึกเป็นฟีดแบ็คให้ ต้องบันทึกจริง (เคสจริง 10 ก.ย. 2569 ตั้มเสนอให้แงวสั่งงาน Agent ตัวอื่นผ่าน API key แยก บอทตอบว่าจะบันทึกไว้ให้ทีมพัฒนา แล้วไม่ได้เรียก tool อะไรเลย ไอเดียหายไปเฉย ๆ — ต่างจากฟีดแบ็ค 6 ข้อก่อนหน้าที่ถูกเก็บเป็นงานจริง)",
+    "as_user": "ตั้ม",
+    "message": "อยากให้แงวสั่งงาน Agent ตัวอื่นต่อได้ โดยใช้ api key แยกของแต่ละตัว",
+    "expect_tools_any": [
+      "create_task",
+      "update_task",
+      "remember_preference"
+    ]
   },
   {
     "id": "hard-summary-under-pressure",

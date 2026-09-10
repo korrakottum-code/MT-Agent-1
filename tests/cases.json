@@ -39,7 +39,8 @@
       "list_reminders",
       "search_messages",
       "get_group_summary",
-      "get_task_stats"
+      "get_task_stats",
+      "find_tasks"
     ]
   },
   {
