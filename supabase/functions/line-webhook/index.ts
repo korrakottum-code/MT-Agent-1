@@ -332,6 +332,21 @@ async function recentImageBurst(chatId: string): Promise<{ ids: string[]; lastAt
   return { ids: burst.reverse().map((r: any) => r.line_message_id), lastAt };
 }
 
+// วิดีโอที่ทีมส่งเข้ามาคือคลิปอ้างอิงกับคลิปโฆษณาที่กำลังจะขึ้น
+// ให้แงวดูได้เองดีกว่าให้คนมานั่งเล่าว่าคลิปเป็นยังไง เพราะสิ่งที่ต้องดูคือจังหวะฮุกกับข้อความบนจอ
+// ขนาดจำกัดเพราะคลิปต้องเดินทางไปฝั่งโมเดลทั้งก้อน คลิปยาว ๆ ให้ตัดมาเฉพาะช่วงที่จะถาม
+const MAX_VIDEO_BYTES = 18 * 1024 * 1024;
+
+async function fetchVideoContent(
+  messageId: string,
+): Promise<{ data: string; media_type: string } | { tooBig: number } | null> {
+  const got = await downloadLineContent(messageId);
+  if (!got) return null;
+  if (got.buf.length > MAX_VIDEO_BYTES) return { tooBig: got.buf.length };
+  const mime = (got.contentType || "").startsWith("video/") ? got.contentType : "video/mp4";
+  return { data: toBase64(got.buf), media_type: mime };
+}
+
 // ข้อความเสียงคือคำสั่งที่หายไปทั้งหมด ทีมส่งเสียงสั่งงานกันบ่อยกว่าพิมพ์
 // แต่เดิมบอทไม่ได้ยินอะไรเลย งานที่สั่งด้วยเสียงจึงไม่เคยเข้าระบบ
 //
@@ -2882,7 +2897,7 @@ type Sim = { answered: string[]; seenAtAnswer: number[] };
 async function handleEvent(event: any, sim?: Sim) {
   if (event.type !== "message") return;
   const msgType: string = event.message?.type ?? "";
-  if (!["text", "image", "file", "audio"].includes(msgType)) return;
+  if (!["text", "image", "file", "audio", "video"].includes(msgType)) return;
 
   const fileName: string = event.message?.fileName ?? "ไฟล์";
   // ถอดเสียงก่อนบันทึก เพื่อให้แถวใน messages เก็บสิ่งที่คนพูด ไม่ใช่คำว่ามีคนส่งเสียงมา
@@ -2896,6 +2911,8 @@ async function handleEvent(event: any, sim?: Sim) {
     ? "[ส่งรูปภาพ]"
     : msgType === "audio"
     ? (spoken ? `[เสียง] ${spoken}` : "[ข้อความเสียง ถอดไม่ได้]")
+    : msgType === "video"
+    ? "[ส่งวิดีโอ]"
     : `[ส่งไฟล์: ${fileName}]`;
   const lineUserId: string = event.source?.userId ?? "unknown";
   const lineGroupId: string | null = event.source?.groupId ?? null;
@@ -2971,6 +2988,23 @@ async function handleEvent(event: any, sim?: Sim) {
   // แนบรูป: ส่งรูปมาตรง ๆ (DM) หรือข้อความพูดถึงรูป → ดึงรูปล่าสุดในแชทมาให้ดู
   let images: { data: string; media_type: string }[] = [];
   let imageCount = 0;
+  let videoNote = "";
+  if (msgType === "video") {
+    // วิดีโอแนบตรงได้เฉพาะฝั่ง Gemini ถ้าสลับสมองไปค่ายอื่นต้องบอกตรง ๆ ว่าดูไม่ได้
+    // ดีกว่าส่งไปแล้วให้ค่ายนั้นปฏิเสธ ซึ่งออกมาเป็นข้อความพังที่ทีมอ่านไม่รู้เรื่อง
+    const v = chatSpec().provider !== "gemini"
+      ? null
+      : await fetchVideoContent(event.message.id);
+    if (chatSpec().provider !== "gemini") {
+      videoNote = "สมองที่ใช้อยู่ตอนนี้ดูวิดีโอไม่ได้ ต้องสลับ CHAT_MODEL กลับเป็น gemini-flash";
+    } else if (!v) {
+      videoNote = "ดึงวิดีโอจาก LINE ไม่สำเร็จ";
+    } else if ("tooBig" in v!) {
+      videoNote = `วิดีโอใหญ่ ${Math.round(v.tooBig / 1024 / 1024)}MB เกินที่แงวดูได้ (18MB)`;
+    } else {
+      images.push(v as { data: string; media_type: string });
+    }
+  }
   if (msgType === "image") {
     if (!lineGroupId && !sim) await showTyping(lineUserId);
     const burst = await collectImageBurst(
@@ -3021,7 +3055,13 @@ async function handleEvent(event: any, sim?: Sim) {
     ctx.attachment = { messageId: event.message.id, name: fileName || "ไฟล์" };
   }
 
-  const question = msgType === "audio"
+  const question = msgType === "video"
+    ? (videoNote
+      ? `ผู้ใช้ส่งวิดีโอมาแต่ ${videoNote} บอกตรง ๆ ว่าดูไม่ได้และบอกเหตุผล ถ้าไฟล์ใหญ่เกินให้บอกว่าตัดมาเฉพาะช่วงที่จะถามได้`
+      : "ผู้ใช้ส่งวิดีโอมา ดูให้ครบแล้วตอบตามบริบทของบทสนทนา " +
+        "ถ้าเป็นคลิปโฆษณาหรือคลิปอ้างอิง ให้บอกสามอย่าง ฮุกสามวินาทีแรกคืออะไร โครงของคลิปเดินยังไง และข้อความบนจอเขียนว่าอะไร " +
+        "อ่านไม่ออกให้บอกว่าอ่านไม่ออก ห้ามเดา")
+    : msgType === "audio"
     ? (spoken
       ? `${spoken.replace(/@\s?(ai|mt\s?agent\s?1?)/i, "").trim()}\n\n(ผู้ใช้พูดมาเป็นข้อความเสียง ถอดมาแล้วตามนี้ ถ้าฟังดูขาดหายให้ถามกลับ)`
       : "ผู้ใช้ส่งข้อความเสียงมาแต่แงวถอดไม่ได้ บอกตรง ๆ ว่าฟังไม่ออก แล้วขอให้พิมพ์มาแทน")
