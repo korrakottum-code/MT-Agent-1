@@ -112,6 +112,52 @@ async function fetchImageContent(messageId: string): Promise<{ data: string; med
   return { data: toBase64(got.buf), media_type: got.contentType || "image/jpeg" };
 }
 
+// คนส่งรูปทีละหลายใบเป็นเรื่องปกติ แต่ LINE ส่งมาเป็นคนละเหตุการณ์
+// ถ้าตอบทุกใบ คนส่งสามใบจะโดนตอบสามครั้งเรื่องเดียวกัน ซึ่งไม่ใช่วิธีที่คนคุยกัน
+//
+// รอสักครู่ให้ใบที่เหลือมาถึงก่อน แล้วให้ "ใบสุดท้ายของชุด" เป็นคนตอบเพียงคนเดียว
+// ใบก่อนหน้าเงียบไป เพราะเห็นว่ามีใบที่ใหม่กว่าตัวเองอยู่ในชุดแล้ว
+const IMAGE_BURST_WAIT_MS = 2500;
+const IMAGE_BURST_WINDOW_MS = 25_000;
+const MAX_IMAGES_PER_ANSWER = 6;
+
+async function collectImageBurst(chatId: string, myMessageId: string): Promise<string[] | null> {
+  await new Promise((r) => setTimeout(r, IMAGE_BURST_WAIT_MS));
+  const since = new Date(Date.now() - IMAGE_BURST_WINDOW_MS).toISOString();
+  const { data } = await supabase.from("messages")
+    .select("line_message_id, created_at")
+    .eq("line_group_id", chatId)
+    .eq("message_type", "image")
+    .gte("created_at", since)
+    .order("created_at", { ascending: true });
+  const ids = (data ?? []).map((r: any) => r.line_message_id).filter(Boolean);
+  if (ids.length === 0) return [myMessageId];
+  // ไม่ใช่ใบสุดท้าย แปลว่ามีใบที่มาทีหลังกำลังจะตอบแทนทั้งชุด ใบนี้เงียบไว้
+  if (ids[ids.length - 1] !== myMessageId) return null;
+  return ids.slice(-MAX_IMAGES_PER_ANSWER);
+}
+
+// รูปชุดล่าสุดในแชท ใช้ตอนคนพิมพ์ถามถึงรูปทีหลัง เช่น "ดูรูปเมื่อกี้ให้หน่อย"
+// นับเป็นชุดเดียวกันเมื่อส่งห่างกันไม่เกินหน้าต่างเดียวกับตอนรับ
+async function recentImageBurst(chatId: string): Promise<string[]> {
+  const { data } = await supabase.from("messages")
+    .select("line_message_id, created_at")
+    .eq("line_group_id", chatId)
+    .eq("message_type", "image")
+    .gte("created_at", new Date(Date.now() - 24 * 3600_000).toISOString())
+    .order("created_at", { ascending: false })
+    .limit(MAX_IMAGES_PER_ANSWER);
+  const rows = (data ?? []).filter((r: any) => r.line_message_id);
+  const burst: any[] = [];
+  for (const r of rows) {
+    if (burst.length === 0) { burst.push(r); continue; }
+    const gap = new Date(burst[burst.length - 1].created_at).getTime() - new Date(r.created_at).getTime();
+    if (gap > IMAGE_BURST_WINDOW_MS) break;
+    burst.push(r);
+  }
+  return burst.reverse().map((r: any) => r.line_message_id);
+}
+
 // ข้อความเสียงคือคำสั่งที่หายไปทั้งหมด ทีมส่งเสียงสั่งงานกันบ่อยกว่าพิมพ์
 // แต่เดิมบอทไม่ได้ยินอะไรเลย งานที่สั่งด้วยเสียงจึงไม่เคยเข้าระบบ
 //
@@ -2141,7 +2187,7 @@ ${rosterText}
 }
 
 type AgentOpts = {
-  image?: { data: string; media_type: string } | null;
+  images?: { data: string; media_type: string }[] | null;
   // "named" = เอ่ยชื่อลอย ๆ อาจแค่พูดถึง / "follow_up" = ไม่ได้เอ่ยชื่อ แต่บอทเพิ่งพูดจบ
   judgeAddressed?: "named" | "follow_up" | null;
   file?: FilePayload | null;
@@ -2307,8 +2353,8 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
   let usedBackup = false;
 
   const blocks: any[] = [];
-  if (opts.image) {
-    blocks.push({ type: "image", source: { type: "base64", media_type: opts.image.media_type, data: opts.image.data } });
+  for (const img of opts.images ?? []) {
+    blocks.push({ type: "image", source: { type: "base64", media_type: img.media_type, data: img.data } });
   }
   if (opts.file?.kind === "pdf") {
     if (spec.provider !== "openai") {
@@ -2572,18 +2618,20 @@ async function handleEvent(event: any) {
   const ctx: Ctx = { caller, group, lineGroupId };
 
   // แนบรูป: ส่งรูปมาตรง ๆ (DM) หรือข้อความพูดถึงรูป → ดึงรูปล่าสุดในแชทมาให้ดู
-  let image: { data: string; media_type: string } | null = null;
+  let images: { data: string; media_type: string }[] = [];
+  let imageCount = 0;
   if (msgType === "image") {
-    image = await fetchImageContent(event.message.id);
+    const burst = await collectImageBurst(chatId, event.message.id);
+    // ใบก่อน ๆ ของชุดเงียบไว้ ใบสุดท้ายตอบแทนทั้งชุดครั้งเดียว
+    if (!burst) return;
+    imageCount = burst.length;
+    images = (await Promise.all(burst.map(fetchImageContent)))
+      .filter((x): x is { data: string; media_type: string } => Boolean(x));
   } else if (msgType === "text" && /รูป|ภาพ|สกรีน|screenshot|image/i.test(text)) {
-    const { data: img } = await supabase.from("messages")
-      .select("line_message_id")
-      .eq("line_group_id", chatId)
-      .eq("message_type", "image")
-      .gte("created_at", new Date(Date.now() - 24 * 3600_000).toISOString())
-      .order("created_at", { ascending: false })
-      .limit(1).maybeSingle();
-    if (img?.line_message_id) image = await fetchImageContent(img.line_message_id);
+    const burst = await recentImageBurst(chatId);
+    imageCount = burst.length;
+    images = (await Promise.all(burst.map(fetchImageContent)))
+      .filter((x): x is { data: string; media_type: string } => Boolean(x));
   }
 
   // แนบไฟล์: ส่งไฟล์มาตรง ๆ หรือข้อความพูดถึงไฟล์/เอกสาร → ดึงไฟล์ล่าสุดในแชทมาอ่าน
@@ -2616,7 +2664,10 @@ async function handleEvent(event: any) {
       ? `${spoken.replace(/@\s?(ai|mt\s?agent\s?1?)/i, "").trim()}\n\n(ผู้ใช้พูดมาเป็นข้อความเสียง ถอดมาแล้วตามนี้ ถ้าฟังดูขาดหายให้ถามกลับ)`
       : "ผู้ใช้ส่งข้อความเสียงมาแต่แงวถอดไม่ได้ บอกตรง ๆ ว่าฟังไม่ออก แล้วขอให้พิมพ์มาแทน")
     : msgType === "image"
-    ? "ผู้ใช้ส่งรูปภาพนี้มา ช่วยดูรูปและตอบตามบริบทของบทสนทนา"
+    ? (imageCount > 1
+      ? `ผู้ใช้ส่งรูปมา ${imageCount} รูปพร้อมกัน ดูให้ครบทุกรูปแล้วตอบรวดเดียว ` +
+        `ถ้ารูปเป็นเรื่องเดียวกันให้สรุปรวม ถ้าคนละเรื่องให้แยกเป็นข้อ อย่าตอบซ้ำทีละรูป`
+      : "ผู้ใช้ส่งรูปภาพนี้มา ช่วยดูรูปและตอบตามบริบทของบทสนทนา")
     : msgType === "file"
     ? `ผู้ใช้ส่งไฟล์ "${fileName}" มา อ่านเนื้อหาแล้วสรุปสั้น ๆ ว่าไฟล์นี้เกี่ยวกับอะไร มีงานหรือกำหนดส่งอะไรที่ควรบันทึกเข้าระบบบ้าง แล้วถามว่าให้สร้างงานให้เลยไหม (อย่าเพิ่งสร้างเองจนกว่าจะยืนยัน)`
     : text.replace(/@\s?(ai|mt\s?agent\s?1?)/i, "").trim() || "สวัสดี";
@@ -2627,7 +2678,7 @@ async function handleEvent(event: any) {
   const quoteToken: string | null = lineGroupId ? (event.message?.quoteToken ?? null) : null;
 
   try {
-    const answer = await runAgent(question, ctx, chatId, { image, file, judgeAddressed });
+    const answer = await runAgent(question, ctx, chatId, { images, file, judgeAddressed });
     if (judgeAddressed && answer.trim().toUpperCase().startsWith("SILENT")) return;
     await sendReply(event.replyToken, replyTo, answer, quoteToken);
     // เก็บคำตอบของบอทด้วย เพื่อให้ summary/ความจำบทสนทนาเห็นครบทั้งสองฝั่ง
