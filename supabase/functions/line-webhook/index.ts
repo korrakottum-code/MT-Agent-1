@@ -2732,7 +2732,11 @@ function isBareName(text: string): boolean {
   return leftover.length === 0;
 }
 
-async function handleEvent(event: any) {
+// โหมดซ้อม: เดินโค้ดเส้นเดียวกับของจริงทุกบรรทัด แต่ไม่เรียกโมเดลและไม่แตะ LINE
+// มีไว้ตอบคำถามเดียวว่า ส่งมา N บอลลูน แงวจะตอบกี่ครั้ง ซึ่งเป็นสิ่งที่นั่งอ่านโค้ดแล้วเถียงกันเองไม่จบ
+type Sim = { answered: string[]; seenAtAnswer: number[] };
+
+async function handleEvent(event: any, sim?: Sim) {
   if (event.type !== "message") return;
   const msgType: string = event.message?.type ?? "";
   if (!["text", "image", "file", "audio"].includes(msgType)) return;
@@ -2811,9 +2815,22 @@ async function handleEvent(event: any) {
       lineUserId,
       event.message.id,
       willAnswer,
-      lineGroupId ? undefined : () => showTyping(lineUserId),
+      lineGroupId || sim ? undefined : () => showTyping(lineUserId),
     );
     if (!mine) return;
+  }
+
+  // ผ่านด่านตัดสินใจครบแล้ว ของจริงจะเรียกโมเดลต่อ ส่วนโหมดซ้อมจบแค่นี้
+  if (sim) {
+    sim.answered.push(String(event.message.id));
+    // จดด้วยว่าตอนตอบ มีข้อความของคนนั้นอยู่ในแชทกี่อัน
+    // ตอบครั้งเดียวยังไม่พอ ต้องตอบตอนที่เห็นครบแล้วด้วย ไม่งั้นก็คือตอบก่อนฟังจบ
+    const { count } = await supabase.from("messages")
+      .select("id", { count: "exact", head: true })
+      .eq("line_group_id", chatId)
+      .eq("line_user_id", lineUserId);
+    sim.seenAtAnswer.push(count ?? 0);
+    return;
   }
 
   const caller = await ensureUser(lineUserId, lineGroupId);
@@ -2824,7 +2841,7 @@ async function handleEvent(event: any) {
   let images: { data: string; media_type: string }[] = [];
   let imageCount = 0;
   if (msgType === "image") {
-    if (!lineGroupId) await showTyping(lineUserId);
+    if (!lineGroupId && !sim) await showTyping(lineUserId);
     const burst = await collectImageBurst(
       chatId,
       event.message.id,
@@ -2910,8 +2927,62 @@ async function handleEvent(event: any) {
 
 // โหมดข้อสอบ: รัน agent จริงด้วยตัวตนที่ระบุ แต่ไม่ส่งเข้า LINE และไม่บันทึกลง messages
 // ใช้ตรวจว่าการแก้แต่ละครั้งทำให้พฤติกรรมเดิมพังหรือไม่ ก่อนปล่อยให้ทีมใช้
+// ซ้อมส่งข้อความหลายบอลลูนเข้าแชทที่สร้างขึ้นเพื่อการนี้โดยเฉพาะ แล้วนับว่าได้คำตอบกี่ครั้ง
+// ใช้แชทปลอมเพราะการซ้อมต้องเขียนแถวลง messages จริง ถ้าซ้อมในแชทของทีมจะไปปนกับงานจริง
+async function runBurstSim(sim: any): Promise<Response> {
+  const inGroup = Boolean(sim.in_group);
+  const bubbles: any[] = Array.isArray(sim.bubbles) ? sim.bubbles : [];
+  if (bubbles.length === 0) return Response.json({ error: "ต้องมี bubbles อย่างน้อยหนึ่งอัน" }, { status: 400 });
+
+  const tag = crypto.randomUUID().slice(0, 8);
+  const chatId = inGroup ? `SIMGROUP-${tag}` : `SIMUSER-${tag}`;
+  const lineUserId = inGroup ? `SIMUSER-${tag}` : chatId;
+
+  if (inGroup) {
+    await supabase.from("groups").insert({
+      line_group_id: chatId, group_name: `SIMTEST-${tag}`, is_active: true,
+    });
+  }
+
+  const collected: Sim = { answered: [], seenAtAnswer: [] };
+  const ids: string[] = [];
+  const runs: Promise<void>[] = [];
+  for (let i = 0; i < bubbles.length; i++) {
+    const b = bubbles[i];
+    const id = `SIMMSG-${tag}-${i}`;
+    ids.push(id);
+    const event = {
+      type: "message",
+      message: { id, type: String(b.type ?? "text"), text: String(b.text ?? "") },
+      source: inGroup ? { userId: lineUserId, groupId: chatId } : { userId: lineUserId },
+    };
+    // ยิงพร้อมกันแบบไม่รอ เหมือนที่ LINE ส่งเข้ามาทีละเหตุการณ์จริง ๆ
+    runs.push(handleEvent(event, collected).catch((e) => console.error("sim event failed", e)));
+    if (i < bubbles.length - 1) {
+      await new Promise((r) => setTimeout(r, Number(b.gap_ms ?? 300)));
+    }
+  }
+  await Promise.allSettled(runs);
+
+  // เก็บกวาดให้หมด แชทปลอมไม่ควรค้างอยู่ในฐานข้อมูลของทีม
+  await supabase.from("messages").delete().eq("line_group_id", chatId);
+  if (inGroup) await supabase.from("groups").delete().eq("line_group_id", chatId);
+  await supabase.from("users").delete().eq("line_user_id", lineUserId);
+
+  return Response.json({
+    sent: ids.length,
+    answered: collected.answered.length,
+    answered_ids: collected.answered,
+    answered_last: collected.answered.length === 1 && collected.answered[0] === ids[ids.length - 1],
+    seen_at_answer: collected.seenAtAnswer,
+    chat: inGroup ? "group" : "dm",
+  });
+}
+
 async function runEval(body: string): Promise<Response> {
-  const { as_user, message, in_group, model: modelKey, judge } = JSON.parse(body);
+  const parsed = JSON.parse(body);
+  if (parsed.simulate) return runBurstSim(parsed.simulate);
+  const { as_user, message, in_group, model: modelKey, judge } = parsed;
   const { spec: evalSpec, error: modelError } = resolveModel(String(modelKey ?? "sonnet").toLowerCase());
   if (!evalSpec) return Response.json({ error: modelError }, { status: 400 });
   const { data: caller } = await supabase.from("users").select("*")
