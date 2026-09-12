@@ -844,6 +844,23 @@ const TOOLS = [
     },
   },
   {
+    name: "export_report",
+    description:
+      "ทำรายงานงานเป็นไฟล์ Excel แล้วส่งลิงก์ดาวน์โหลดให้ " +
+      "ใช้เมื่อมีคนบอกว่า 'ขอเป็นไฟล์' 'ทำเป็น Excel' 'ส่งรายงานเดือนนี้มาหน่อย' 'เอาไปให้ผู้บริหารดู' " +
+      "เหมาะกับของที่ต้องส่งต่อหรือเก็บไว้ ต่างจากการสรุปในแชทซึ่งเลื่อนหายภายในวันเดียว " +
+      "ลิงก์เปิดได้ 24 ชั่วโมง ใครมีลิงก์ก็เปิดได้ จึงห้ามแปะในกลุ่มที่ไม่เกี่ยวข้อง",
+    input_schema: {
+      type: "object",
+      properties: {
+        from: { type: "string", description: "วันเริ่ม YYYY-MM-DD ไม่ระบุ = ต้นเดือนนี้" },
+        to: { type: "string", description: "วันสิ้นสุด YYYY-MM-DD ไม่ระบุ = วันนี้" },
+        group_name: { type: "string", description: "ชื่อกลุ่ม ไม่ระบุ = ทุกกลุ่ม" },
+        owner_name: { type: "string", description: "ชื่อคน ไม่ระบุ = ทุกคน" },
+      },
+    },
+  },
+  {
     name: "monday_set_status",
     description:
       "เปลี่ยนสถานะของงานใน Monday เช่นจาก Not Started เป็น Working on it หรือ Done " +
@@ -1529,6 +1546,12 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
               .map((c) => ({ field: c.title, value: c.text })),
             owner: pick("project_owner") ?? pick("people") ?? null,
             due: pick("date_") ?? null,
+            // เนื้อความในการ์ด เช่น แคปชั่น ราคา รหัส ใช้เทียบกับตัวหนังสือบนภาพ AW
+            // ตัดให้สั้นเพราะบางการ์ดเก็บแคปชั่นยาวเป็นหน้า ซึ่งกินโควตาโดยไม่ช่วยเทียบ
+            fields: h.columns
+              .filter((c) => c.type === "text" || c.type === "long_text")
+              .slice(0, 6)
+              .map((c) => ({ field: c.title || c.id, value: c.text.slice(0, 300) })),
             url: slug ? `https://${slug}.monday.com/boards/${h.boardId}/pulses/${h.itemId}` : null,
           };
         });
@@ -1542,6 +1565,116 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       } catch (e) {
         return { error: String((e as Error).message) };
       }
+    }
+
+    case "export_report": {
+      // ตาราง Excel จริง ไม่ใช่ CSV เพราะไทยใน CSV เพี้ยนบ่อยเวลาเปิดด้วย Excel บนวินโดวส์
+      const XLSX = await import("npm:xlsx@0.18.5");
+
+      const now = new Date(Date.now() + 7 * 3600_000);
+      const from = String(input.from ?? `${now.toISOString().slice(0, 7)}-01`);
+      const to = String(input.to ?? now.toISOString().slice(0, 10));
+      const fromIso = new Date(`${from}T00:00:00+07:00`).toISOString();
+      const toIso = new Date(`${to}T23:59:59+07:00`).toISOString();
+
+      let q = supabase.from("tasks")
+        .select("title, status, priority, due_at, created_at, completed_at, owner_user_id, group_id")
+        .gte("created_at", fromIso).lte("created_at", toIso)
+        .order("created_at", { ascending: true });
+
+      if (input.group_name) {
+        const { data: g } = await supabase.from("groups").select("id, group_name")
+          .ilike("group_name", `%${input.group_name}%`).maybeSingle();
+        if (!g) return { error: `ไม่พบกลุ่มชื่อ "${input.group_name}"` };
+        q = q.eq("group_id", g.id);
+      }
+      if (input.owner_name) {
+        const r = await resolveOneUser(String(input.owner_name));
+        if (r.error) return { error: r.error };
+        q = q.eq("owner_user_id", r.user.id);
+      }
+
+      const { data: rows, error } = await q;
+      if (error) return { error: error.message };
+      if (!rows || rows.length === 0) {
+        return { count: 0, note: `ไม่มีงานในช่วง ${from} ถึง ${to} จึงยังไม่ได้ทำไฟล์ให้` };
+      }
+
+      const { data: users } = await supabase.from("users").select("id, display_name");
+      const { data: groups } = await supabase.from("groups").select("id, group_name");
+      const userName = new Map((users ?? []).map((u: any) => [u.id, u.display_name]));
+      const groupName = new Map((groups ?? []).map((g: any) => [g.id, g.group_name]));
+      const thaiDate = (v: string | null) =>
+        v ? new Date(new Date(v).getTime() + 7 * 3600_000).toISOString().slice(0, 16).replace("T", " ") : "";
+
+      const sheet = rows.map((t: any) => ({
+        "งาน": t.title,
+        "ผู้รับผิดชอบ": userName.get(t.owner_user_id) ?? "",
+        "กลุ่ม": groupName.get(t.group_id) ?? "แชทส่วนตัว",
+        "สถานะ": t.status,
+        "ความสำคัญ": t.priority ?? "",
+        "กำหนดส่ง": thaiDate(t.due_at),
+        "สร้างเมื่อ": thaiDate(t.created_at),
+        "ปิดเมื่อ": thaiDate(t.completed_at),
+      }));
+
+      // แผ่นสรุปรายคน ผู้บริหารเปิดแล้วเห็นภาพรวมก่อนโดยไม่ต้องไล่อ่านทีละแถว
+      const byPerson = new Map<string, { total: number; done: number }>();
+      for (const t of rows) {
+        const who = userName.get(t.owner_user_id) ?? "ไม่ระบุ";
+        const cur = byPerson.get(who) ?? { total: 0, done: 0 };
+        cur.total++;
+        if (t.status === "DONE") cur.done++;
+        byPerson.set(who, cur);
+      }
+      const summary = [...byPerson.entries()]
+        .sort((a, b) => b[1].total - a[1].total)
+        .map(([who, v]) => ({
+          "ผู้รับผิดชอบ": who,
+          "งานทั้งหมด": v.total,
+          "ปิดแล้ว": v.done,
+          "ยังค้าง": v.total - v.done,
+        }));
+
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summary), "สรุปรายคน");
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheet), "รายการงาน");
+      const buf = new Uint8Array(XLSX.write(wb, { type: "array", bookType: "xlsx" }));
+
+      const name = `รายงานงาน_${from}_ถึง_${to}.xlsx`;
+      // ข้อสอบเดินเส้นนี้ครบทุกขั้นรวมทั้งการอัปโหลดจริง เพราะขั้นที่พังได้คือการสร้างไฟล์กับการเก็บ
+      // ต่างกันแค่เก็บคนละที่แล้วลบทิ้งทันที ที่เก็บของทีมจึงไม่มีไฟล์ข้อสอบค้าง
+      const path = ctx.dryRun
+        ? `reports/_test/${Date.now()}.xlsx`
+        : `reports/${Date.now()}_${name.replace(/[^\p{L}\p{N}._-]+/gu, "_")}`;
+      const { error: upErr } = await supabase.storage.from("task-attachments").upload(path, buf, {
+        contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        upsert: false,
+      });
+      if (upErr) return { error: `เก็บไฟล์ไม่สำเร็จ: ${upErr.message}` };
+
+      const { data: signed, error: signErr } = await supabase.storage
+        .from("task-attachments").createSignedUrl(path, 24 * 3600);
+      if (signErr || !signed?.signedUrl) return { error: "ทำลิงก์ดาวน์โหลดไม่สำเร็จ" };
+
+      if (ctx.dryRun) {
+        await supabase.storage.from("task-attachments").remove([path]);
+        return {
+          report: { file_name: name, rows: rows.length, people: summary.length, bytes: buf.length },
+          dry_run: "โหมดข้อสอบ สร้างไฟล์และอัปโหลดจริงแล้วลบทิ้ง ไม่ได้ส่งลิงก์ให้ใคร",
+        };
+      }
+
+      return {
+        report: {
+          file_name: name,
+          rows: rows.length,
+          people: summary.length,
+          period: `${from} ถึง ${to}`,
+          url: signed.signedUrl,
+        },
+        note: "ส่งลิงก์นี้ให้คนสั่งพร้อมบอกว่ามีกี่งานและช่วงไหน ลิงก์เปิดได้ 24 ชั่วโมง",
+      };
     }
 
     case "monday_set_status":
@@ -2335,7 +2468,14 @@ const SYSTEM_RULES = `คุณคือ "แงว" (MT Agent) — AI น้อ
      NOTE มีไว้ตอบคำถามย้อนหลังเท่านั้น ห้ามเอาไปเสนอเป็นงาน ห้ามนับเป็นสิ่งที่ค้าง ห้ามเอาไปใส่ในสรุปในฐานะงานที่ต้องทำ
      เวลาสรุปว่า "ตอนนี้มีงานอะไร" ให้นับเฉพาะงานจริงในระบบกับ TASK ที่รอยืนยัน อย่าเอา NOTE ไปปน — ใช้ list_events เมื่อถูกถามว่าจับอะไรไว้บ้าง มีอะไรรอยืนยัน หรือถามย้อนว่าเคยตกลงอะไรกัน (ใส่ query เพื่อค้นด้วยคำ, status=CONVERTED เพื่อดูข้อตกลงที่ยืนยันแล้ว) ยืนยันด้วย confirm_event ปัดทิ้งด้วย dismiss_event
 14.1 ก่อนเรียก confirm_event ต้องทวนให้ผู้ใช้เห็นก่อน 1 ครั้งว่าจะสร้างงานชื่ออะไร ให้ใคร ครบกำหนดเมื่อไร แล้วรอเขาตอบรับ — ห้ามยืนยันเองแม้จะดูชัดเจนแค่ไหน เพราะรายการพวกนี้มาจากการตีความบทสนทนา ไม่ใช่คำสั่งตรงจากคน
-14.2 เวลาแสดงรายการให้ใส่เลขข้อกำกับ แล้วจำ id ของแต่ละข้อไว้ตอบคำสั่งต่อเนื่อง เช่น "ยืนยันข้อ 2" หรือ "ทิ้งข้อ 1 กับ 3"`;
+14.2 เวลาแสดงรายการให้ใส่เลขข้อกำกับ แล้วจำ id ของแต่ละข้อไว้ตอบคำสั่งต่อเนื่อง เช่น "ยืนยันข้อ 2" หรือ "ทิ้งข้อ 1 กับ 3"
+
+15. ตรวจ AW: เมื่อมีคนส่งภาพงานโฆษณาแล้วขอให้ตรวจ เทียบกับบรีฟ หรือเอ่ยรหัสงานมาพร้อมภาพ
+15.1 อ่านตัวหนังสือบนภาพออกมาก่อน โดยเฉพาะราคา ชื่อโปรแกรม จำนวนซีซี จำนวนครั้ง เงื่อนไข และวันหมดเขต แล้วบอกว่าอ่านได้ว่าอะไร
+15.2 ถ้ามีรหัสงาน ให้เรียก monday_find_item ด้วยรหัสนั้น แล้วเทียบทีละจุดกับค่า fields ที่การ์ดคืนมา
+15.3 รายงานเป็นสองกอง ตรงกัน กับ ไม่ตรงกัน ของที่ไม่ตรงให้บอกว่าบนภาพเขียนว่าอะไร ในการ์ดเขียนว่าอะไร
+15.4 อ่านไม่ออกให้บอกว่าอ่านไม่ออก ห้ามเดาตัวเลข ราคาผิดหนึ่งหลักคือขึ้นแอดผิดทั้งแคมเปญ
+15.5 ไม่มีรหัสงานและไม่มีบรีฟในแชท ให้ถามว่าเทียบกับอะไร ห้ามตรวจลอย ๆ แล้วบอกว่าผ่าน`;
 
 // ส่วนที่เปลี่ยนทุกครั้ง (เวลา ผู้ใช้ กลุ่ม รายชื่อ) ต้องอยู่หลังจุด cache เสมอ
 function buildContext(ctx: Ctx, roster: any[], groups: any[], orgPersona: string | null, crossChat: string): string {
