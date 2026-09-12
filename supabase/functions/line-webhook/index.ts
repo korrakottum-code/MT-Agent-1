@@ -121,13 +121,23 @@ async function fetchImageContent(messageId: string): Promise<{ data: string; med
 // คนเลือกรูปถัดไปจากคลังภาพใช้เวลาหลายวินาที ถ้ารอสั้นไปก็ตอบไปแล้วก่อนรูปที่สองจะมาถึง
 // ใบที่เห็นว่ามีใบใหม่กว่าตัวเองจะถอยทันที นาฬิกาจึงเริ่มนับใหม่ทุกครั้งที่มีรูปมาเพิ่ม
 // ปรับได้ที่ IMAGE_BURST_QUIET_MS โดยไม่ต้อง deploy เผื่อทีมส่งช้ากว่าหรือเร็วกว่านี้
-const IMAGE_BURST_QUIET_MS = Number(Deno.env.get("IMAGE_BURST_QUIET_MS") ?? 9000);
+// เวลารอคงที่ใช้ไม่ได้ เพราะจังหวะของคนส่งไม่เท่ากัน
+// รอบก่อนตั้งไว้เก้าวินาที แล้วคนส่งห้าใบทีละใบ ช่องว่างระหว่างใบที่สี่กับห้าเกินเก้าวินาที
+// ใบที่สี่เลยชิงตอบทั้งที่ยังส่งไม่ครบ
+//
+// จึงดูจังหวะจากชุดที่กำลังมา ถ้าช่องว่างระหว่างใบกว้าง ก็รอนานขึ้นตามคนส่ง
+// ใบเดียวโดด ๆ ยังตอบไวเหมือนเดิม เพราะไม่มีช่องว่างให้วัด
+const IMAGE_BURST_QUIET_MS = Number(Deno.env.get("IMAGE_BURST_QUIET_MS") ?? 12_000);
+const IMAGE_BURST_QUIET_MAX_MS = Number(Deno.env.get("IMAGE_BURST_QUIET_MAX_MS") ?? 45_000);
+const IMAGE_BURST_GAP_FACTOR = 2.5;
 const IMAGE_BURST_POLL_MS = 1500;
-const IMAGE_BURST_MAX_WAIT_MS = 60_000;
-const IMAGE_BURST_WINDOW_MS = 120_000;
-const MAX_IMAGES_PER_ANSWER = 6;
+const IMAGE_BURST_MAX_WAIT_MS = 120_000;
+const IMAGE_BURST_WINDOW_MS = 180_000;
+const MAX_IMAGES_PER_ANSWER = 8;
+const TYPING_REFRESH_MS = 25_000;
+const RECENT_IMAGE_MS = 3 * 60_000;
 
-async function imageIdsInWindow(chatId: string): Promise<string[]> {
+async function imagesInWindow(chatId: string): Promise<{ id: string; at: number }[]> {
   const since = new Date(Date.now() - IMAGE_BURST_WINDOW_MS).toISOString();
   const { data } = await supabase.from("messages")
     .select("line_message_id, created_at")
@@ -135,30 +145,67 @@ async function imageIdsInWindow(chatId: string): Promise<string[]> {
     .eq("message_type", "image")
     .gte("created_at", since)
     .order("created_at", { ascending: true });
-  return (data ?? []).map((r: any) => r.line_message_id).filter(Boolean);
+  return (data ?? [])
+    .filter((r: any) => r.line_message_id)
+    .map((r: any) => ({ id: r.line_message_id, at: new Date(r.created_at).getTime() }));
 }
 
-async function collectImageBurst(chatId: string, myMessageId: string): Promise<string[] | null> {
+// รอเท่าไหร่ถึงจะเชื่อว่าส่งครบแล้ว: ยาวกว่าช่องว่างที่กว้างที่สุดที่เพิ่งเห็นสามเท่า
+// คนที่ส่งห่างกันสิบวินาทีจะได้เวลารอยี่สิบห้าวินาที คนที่รัว ๆ ได้ค่าตั้งต้น
+function quietNeededMs(rows: { at: number }[]): number {
+  let widest = 0;
+  for (let i = 1; i < rows.length; i++) widest = Math.max(widest, rows[i].at - rows[i - 1].at);
+  const want = widest * IMAGE_BURST_GAP_FACTOR;
+  return Math.min(Math.max(want, IMAGE_BURST_QUIET_MS), IMAGE_BURST_QUIET_MAX_MS);
+}
+
+async function saidSomethingAfter(chatId: string, afterIso: string): Promise<boolean> {
+  const { data } = await supabase.from("messages")
+    .select("id")
+    .eq("line_group_id", chatId)
+    .gt("created_at", afterIso)
+    .in("message_type", ["text", "audio"])
+    .neq("line_user_id", "bot")
+    .limit(1);
+  return (data ?? []).length > 0;
+}
+
+async function collectImageBurst(
+  chatId: string,
+  myMessageId: string,
+  onWait?: () => Promise<void>,
+): Promise<string[] | null> {
   const startedAt = Date.now();
   let quietSince = Date.now();
+  let lastTyping = Date.now();
   let seen = 0;
 
   while (true) {
     await new Promise((r) => setTimeout(r, IMAGE_BURST_POLL_MS));
-    const ids = await imageIdsInWindow(chatId);
+    const rows = await imagesInWindow(chatId);
     // มีใบที่มาทีหลัง ใบนั้นจะตอบแทนทั้งชุด ใบนี้ถอยเงียบ ๆ
-    if (ids.length > 0 && ids[ids.length - 1] !== myMessageId) return null;
-    if (ids.length !== seen) {
-      seen = ids.length;
+    if (rows.length > 0 && rows[rows.length - 1].id !== myMessageId) return null;
+
+    const done = () =>
+      rows.length === 0 ? [myMessageId] : rows.slice(-MAX_IMAGES_PER_ANSWER).map((r) => r.id);
+
+    // พิมพ์ตามมาแล้ว แปลว่าส่งรูปครบและกำลังถาม ฝั่งข้อความจะตอบพร้อมรูปทั้งชุดเอง
+    const mine = rows.find((r) => r.id === myMessageId);
+    if (mine && await saidSomethingAfter(chatId, new Date(mine.at).toISOString())) return null;
+
+    if (rows.length !== seen) {
+      seen = rows.length;
       quietSince = Date.now();
       continue;
     }
-    if (Date.now() - quietSince >= IMAGE_BURST_QUIET_MS) {
-      return ids.length === 0 ? [myMessageId] : ids.slice(-MAX_IMAGES_PER_ANSWER);
-    }
+    if (Date.now() - quietSince >= quietNeededMs(rows)) return done();
     // กันค้างถ้ามีคนส่งรูปรัวไม่หยุด ตอบเท่าที่มีตอนนี้ดีกว่าไม่ตอบเลย
-    if (Date.now() - startedAt >= IMAGE_BURST_MAX_WAIT_MS) {
-      return ids.length === 0 ? [myMessageId] : ids.slice(-MAX_IMAGES_PER_ANSWER);
+    if (Date.now() - startedAt >= IMAGE_BURST_MAX_WAIT_MS) return done();
+
+    // จุดกำลังพิมพ์ของ LINE อยู่ได้ไม่เกินหนึ่งนาที ต่ออายุระหว่างรอ
+    if (onWait && Date.now() - lastTyping >= TYPING_REFRESH_MS) {
+      lastTyping = Date.now();
+      await onWait();
     }
   }
 }
@@ -175,7 +222,7 @@ async function showTyping(lineUserId: string) {
 
 // รูปชุดล่าสุดในแชท ใช้ตอนคนพิมพ์ถามถึงรูปทีหลัง เช่น "ดูรูปเมื่อกี้ให้หน่อย"
 // นับเป็นชุดเดียวกันเมื่อส่งห่างกันไม่เกินหน้าต่างเดียวกับตอนรับ
-async function recentImageBurst(chatId: string): Promise<string[]> {
+async function recentImageBurst(chatId: string): Promise<{ ids: string[]; lastAt: number }> {
   const { data } = await supabase.from("messages")
     .select("line_message_id, created_at")
     .eq("line_group_id", chatId)
@@ -191,7 +238,8 @@ async function recentImageBurst(chatId: string): Promise<string[]> {
     if (gap > IMAGE_BURST_WINDOW_MS) break;
     burst.push(r);
   }
-  return burst.reverse().map((r: any) => r.line_message_id);
+  const lastAt = burst.length ? new Date(burst[0].created_at).getTime() : 0;
+  return { ids: burst.reverse().map((r: any) => r.line_message_id), lastAt };
 }
 
 // ข้อความเสียงคือคำสั่งที่หายไปทั้งหมด ทีมส่งเสียงสั่งงานกันบ่อยกว่าพิมพ์
@@ -2658,17 +2706,27 @@ async function handleEvent(event: any) {
   let imageCount = 0;
   if (msgType === "image") {
     if (!lineGroupId) await showTyping(lineUserId);
-    const burst = await collectImageBurst(chatId, event.message.id);
+    const burst = await collectImageBurst(
+      chatId,
+      event.message.id,
+      lineGroupId ? undefined : () => showTyping(lineUserId),
+    );
     // ใบก่อน ๆ ของชุดเงียบไว้ ใบสุดท้ายตอบแทนทั้งชุดครั้งเดียว
     if (!burst) return;
     imageCount = burst.length;
     images = (await Promise.all(burst.map(fetchImageContent)))
       .filter((x): x is { data: string; media_type: string } => Boolean(x));
-  } else if (msgType === "text" && /รูป|ภาพ|สกรีน|screenshot|image/i.test(text)) {
+  } else if (msgType === "text") {
+    // พูดถึงรูปตรง ๆ หรือเพิ่งส่งรูปมาแล้วพิมพ์ตามภายในไม่กี่นาที ก็คือกำลังถามถึงรูปชุดนั้น
+    // เดิมบังคับว่าต้องมีคำว่ารูปในประโยค คนที่ส่งรูปแล้วพิมพ์ว่า "ดูให้หน่อย" จึงไม่ได้อะไรเลย
+    const asksAboutImages = /รูป|ภาพ|สกรีน|screenshot|image/i.test(text);
     const burst = await recentImageBurst(chatId);
-    imageCount = burst.length;
-    images = (await Promise.all(burst.map(fetchImageContent)))
-      .filter((x): x is { data: string; media_type: string } => Boolean(x));
+    const justSent = burst.lastAt > 0 && Date.now() - burst.lastAt < RECENT_IMAGE_MS;
+    if (burst.ids.length > 0 && (asksAboutImages || justSent)) {
+      imageCount = burst.ids.length;
+      images = (await Promise.all(burst.ids.map(fetchImageContent)))
+        .filter((x): x is { data: string; media_type: string } => Boolean(x));
+    }
   }
 
   // แนบไฟล์: ส่งไฟล์มาตรง ๆ หรือข้อความพูดถึงไฟล์/เอกสาร → ดึงไฟล์ล่าสุดในแชทมาอ่าน
