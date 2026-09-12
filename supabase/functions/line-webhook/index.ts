@@ -123,7 +123,10 @@ async function fetchImageContent(messageId: string): Promise<{ data: string; med
 //
 // หลักการเดียวกับรูป: ใครเห็นว่ามีข้อความใหม่กว่าตัวเองที่จะได้ตอบอยู่แล้ว ก็ถอยไป
 // เหลือบอลลูนสุดท้ายตอบคนเดียว ซึ่งตอนนั้นประวัติแชทมีครบทุกบอลลูนแล้ว
-const TEXT_BURST_QUIET_MS = Number(Deno.env.get("TEXT_BURST_QUIET_MS") ?? 2000);
+// วัดจากของจริง: ตั้มพิมพ์ต่อเนื่องห่างกัน 1.8 ถึง 3.5 วินาที
+// ตั้งไว้สองวินาทีจึงชิงตอบตั้งแต่บอลลูนที่สอง ต้องยาวกว่าจังหวะพิมพ์ของคน ไม่ใช่แค่ยาวกว่าศูนย์
+// ราคาคือข้อความเดียวโดด ๆ จะช้าลงราวสี่วินาทีครึ่ง ซึ่งถูกกว่าการได้คำตอบซ้ำหลายอัน
+const TEXT_BURST_QUIET_MS = Number(Deno.env.get("TEXT_BURST_QUIET_MS") ?? 4500);
 const TEXT_BURST_QUIET_MAX_MS = Number(Deno.env.get("TEXT_BURST_QUIET_MAX_MS") ?? 20_000);
 const TEXT_BURST_GAP_FACTOR = 2.5;
 const TEXT_BURST_POLL_MS = 1000;
@@ -2810,6 +2813,7 @@ async function handleEvent(event: any, sim?: Sim) {
       if (!lineGroupId) return true;
       return isCallingAI(m.text) || isBareName(m.text) || isNameMention(m.text);
     };
+    if (!lineGroupId && !sim) await showTyping(lineUserId);
     const mine = await waitForSenderToFinish(
       chatId,
       lineUserId,
@@ -2818,19 +2822,6 @@ async function handleEvent(event: any, sim?: Sim) {
       lineGroupId || sim ? undefined : () => showTyping(lineUserId),
     );
     if (!mine) return;
-  }
-
-  // ผ่านด่านตัดสินใจครบแล้ว ของจริงจะเรียกโมเดลต่อ ส่วนโหมดซ้อมจบแค่นี้
-  if (sim) {
-    sim.answered.push(String(event.message.id));
-    // จดด้วยว่าตอนตอบ มีข้อความของคนนั้นอยู่ในแชทกี่อัน
-    // ตอบครั้งเดียวยังไม่พอ ต้องตอบตอนที่เห็นครบแล้วด้วย ไม่งั้นก็คือตอบก่อนฟังจบ
-    const { count } = await supabase.from("messages")
-      .select("id", { count: "exact", head: true })
-      .eq("line_group_id", chatId)
-      .eq("line_user_id", lineUserId);
-    sim.seenAtAnswer.push(count ?? 0);
-    return;
   }
 
   const caller = await ensureUser(lineUserId, lineGroupId);
@@ -2907,6 +2898,19 @@ async function handleEvent(event: any, sim?: Sim) {
     !lineGroupId || tagged ? null : named ? "named" : followUp ? "follow_up" : null;
   // อ้างข้อความต้นทางเฉพาะในกลุ่ม จะได้รู้ว่าบอทตอบเรื่องไหนตอนหลายคนคุยกันพร้อมกัน
   const quoteToken: string | null = lineGroupId ? (event.message?.quoteToken ?? null) : null;
+
+  // ผ่านด่านตัดสินใจครบแล้ว รวมทั้งการรวมรูปเป็นชุด ของจริงจะเรียกโมเดลต่อ โหมดซ้อมจบแค่นี้
+  if (sim) {
+    sim.answered.push(String(event.message.id));
+    // จดด้วยว่าตอนตอบ มีข้อความของคนนั้นอยู่ในแชทกี่อัน
+    // ตอบครั้งเดียวยังไม่พอ ต้องตอบตอนที่เห็นครบแล้วด้วย ไม่งั้นก็คือตอบก่อนฟังจบ
+    const { count } = await supabase.from("messages")
+      .select("id", { count: "exact", head: true })
+      .eq("line_group_id", chatId)
+      .eq("line_user_id", lineUserId);
+    sim.seenAtAnswer.push(count ?? 0);
+    return;
+  }
 
   try {
     const answer = await runAgent(question, ctx, chatId, { images, file, judgeAddressed });
