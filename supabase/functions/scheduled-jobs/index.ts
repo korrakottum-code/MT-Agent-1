@@ -1,6 +1,6 @@
 // MT Agent 1 — Scheduled Jobs (MVP 0.2)
 // ถูกเรียกโดย pg_cron: daily_summary (18:00), morning_reminder (09:00), weekly_summary (จันทร์ 09:00),
-// due_reminders (ทุกนาที) และ extract_events (ทุก 3 ชม.)
+// due_reminders (ทุกนาที), extract_events (ทุก 3 ชม.) และ daily_context (ตี 2)
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { createMessage, DEFAULT_MODEL, type ModelSpec, resolveModel } from "../_shared/models.ts";
 
@@ -368,6 +368,90 @@ const EXTRACT_TOOL = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// อ่านบทสนทนาของเมื่อวานทั้งวัน แล้วเขียนบริบทไว้ให้ตัวเองอ่านพรุ่งนี้
+//
+// ประวัติแชทดิบบอกได้แค่ว่าใครพิมพ์อะไร ไม่ได้บอกว่าตกลงกันว่าอะไร ใครรับงานไหนไป
+// เรื่องไหนยังค้างคำตอบ และเคยพลาดอะไรที่ห้ามพลาดซ้ำ พอเช้าวันใหม่บริบทพวกนี้หายหมด
+// คนในกลุ่มจึงต้องเล่าซ้ำทุกเช้า สรุปคืนละครั้งแล้วใช้ทั้งวันถูกกว่าไล่อ่านย้อนหลังทุกข้อความ
+// ---------------------------------------------------------------------------
+const CONTEXT_MAX_CHARS = 900;
+
+async function dailyContext() {
+  const now = new Date();
+  // วันที่ของเมื่อวานตามเวลาไทย งานนี้ตั้งให้วิ่งตอนตีสอง จึงสรุปของวันก่อนหน้าเสมอ
+  const bkkNow = new Date(now.getTime() + 7 * 3600_000);
+  const dayEnd = new Date(Date.UTC(bkkNow.getUTCFullYear(), bkkNow.getUTCMonth(), bkkNow.getUTCDate()) - 7 * 3600_000);
+  const dayStart = new Date(dayEnd.getTime() - 24 * 3600_000);
+  const forDate = new Date(dayStart.getTime() + 7 * 3600_000).toISOString().slice(0, 10);
+
+  const { data: users } = await supabase.from("users")
+    .select("line_user_id, display_name").eq("is_active", true);
+  const nameOf = new Map((users ?? []).map((u: any) => [u.line_user_id, u.display_name]));
+  nameOf.set("bot", "แงว");
+
+  const { data: allActive } = await supabase.from("groups").select("*").eq("is_active", true);
+  const groups = pickGroups(allActive ?? []);
+  const groupNameOf = new Map((groups ?? []).map((g: any) => [g.line_group_id, g.group_name]));
+
+  // แชทส่วนตัวก็ต้องมีบริบทเหมือนกัน จึงไล่จากแชทที่มีคนพิมพ์จริงเมื่อวาน ไม่ใช่จากรายชื่อกลุ่ม
+  const { data: active } = await supabase.from("messages")
+    .select("line_group_id")
+    .gte("created_at", dayStart.toISOString())
+    .lt("created_at", dayEnd.toISOString())
+    .neq("line_user_id", "bot");
+  const chatIds = [...new Set((active ?? []).map((r: any) => r.line_group_id).filter(Boolean))];
+
+  let written = 0;
+  for (const chatId of chatIds) {
+    try {
+      // ถ้าตั้ง JOB_ONLY_GROUPS ไว้ ให้ทำเฉพาะกลุ่มที่ระบุ แชทส่วนตัวข้ามไปตอนทดสอบ
+      if (onlyGroups() && !groupNameOf.has(chatId)) continue;
+
+      const { data: msgs } = await supabase.from("messages")
+        .select("line_user_id, message_text, created_at")
+        .eq("line_group_id", chatId)
+        .gte("created_at", dayStart.toISOString())
+        .lt("created_at", dayEnd.toISOString())
+        .order("created_at", { ascending: true }).limit(500);
+      const human = (msgs ?? []).filter((m: any) => m.line_user_id !== "bot");
+      if (human.length < 5) continue; // คุยกันไม่กี่คำ ไม่มีบริบทให้เก็บ
+
+      const transcript = (msgs ?? [])
+        .map((m: any) => `${nameOf.get(m.line_user_id) ?? "?"}: ${String(m.message_text ?? "").slice(0, 300)}`)
+        .join("\n").slice(0, 24000);
+
+      const res = await createMessage(specCheap(), {
+        max_tokens: 700,
+        system: "คุณกำลังเขียนโน้ตไว้ให้ตัวเองอ่านพรุ่งนี้ ไม่ได้เขียนรายงานให้คนอ่าน\n" +
+          "สรุปจากบทสนทนาเมื่อวานให้สั้นที่สุดเท่าที่ยังใช้งานได้ ภาษาไทย ไม่เกิน " + CONTEXT_MAX_CHARS + " ตัวอักษร\n" +
+          "เขียนเป็นบรรทัดสั้น ๆ ขึ้นต้นด้วยขีด เอาเฉพาะสี่อย่างนี้\n" +
+          "1. ตกลงกันว่าอะไร ใครสั่ง ใครรับ\n" +
+          "2. ใครกำลังทำอะไรค้างอยู่\n" +
+          "3. คำถามที่ถามไว้แล้วยังไม่มีใครตอบ\n" +
+          "4. เรื่องที่พลาดหรือเข้าใจผิดกัน ซึ่งพรุ่งนี้ไม่ควรพลาดซ้ำ\n" +
+          "ห้ามเดาสิ่งที่ไม่ได้พูดกันจริง ถ้าหมวดไหนไม่มีก็ข้ามไป ห้ามเขียนคำนำหรือคำลงท้าย",
+        messages: [{ role: "user", content: `บทสนทนาเมื่อวานของแชทนี้:\n\n${transcript}` }],
+      });
+      const summary = (res.content ?? [])
+        .filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n").trim()
+        .slice(0, CONTEXT_MAX_CHARS);
+      if (!summary) continue;
+
+      await supabase.from("chat_context").upsert({
+        chat_id: chatId,
+        for_date: forDate,
+        summary,
+        message_count: human.length,
+      }, { onConflict: "chat_id,for_date" });
+      written++;
+    } catch (e) {
+      console.error(`เขียนบริบทของ ${chatId} ไม่สำเร็จ`, e);
+    }
+  }
+  console.log(`daily_context: เขียนบริบทของวันที่ ${forDate} ไป ${written} แชท`);
+}
+
 async function extractEvents() {
   const runStart = new Date();
   const { data: cursorRow } = await supabase.from("org_settings")
@@ -551,6 +635,7 @@ Deno.serve(async (req: Request) => {
     else if (job === "weekly_summary") await weeklySummary();
     else if (job === "due_reminders") await dueReminders();
     else if (job === "extract_events") await extractEvents();
+    else if (job === "daily_context") await dailyContext();
     else return new Response("unknown job", { status: 400 });
     return new Response("OK");
   } catch (e) {
