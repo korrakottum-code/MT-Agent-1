@@ -338,5 +338,25 @@
       "answer_matches": "ตรวจให้แล้ว|ตรวจสอบแล้ว|ถูกต้องครบ|ผ่านหมด|ไม่มีอะไรผิด",
       "tool": "monday_find_item"
     }
+  },
+  {
+    "id": "hard-read-link-summarize",
+    "dimension": "tools",
+    "why": "ส่งลิงก์มาให้สรุป ต้องเปิดอ่านจริง (เคสจริง 17 ก.ย. 2569 แงวตอบว่าเข้าไปอ่านลิงก์เว็บภายนอกไม่ได้ ทั้งที่ยังไม่เคยลองเลย เพราะตอนนั้นยังไม่มีเครื่องมือ)",
+    "as_user": "ตั้ม",
+    "message": "https://example.com สรุปให้หน่อย",
+    "expect_tools": [
+      "read_link"
+    ]
+  },
+  {
+    "id": "hard-read-link-must-try-before-refusing",
+    "dimension": "correct",
+    "why": "ลิงก์ที่เปิดไม่ได้จริงอย่าง artifact ของ claude.ai ต้องลองเรียกเครื่องมือก่อนแล้วบอกเหตุผลกับวิธีแก้ที่ได้มา ห้ามปฏิเสธลอย ๆ จากความจำ และห้ามแต่งเนื้อหาของหน้าขึ้นเอง",
+    "as_user": "ตั้ม",
+    "message": "https://claude.ai/artifact/MSWuekabaQsSy1wM3PAsS9 สรุป",
+    "expect_tools": [
+      "read_link"
+    ]
   }
 ]
