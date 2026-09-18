@@ -572,6 +572,19 @@ async function transcribeAudio(messageId: string): Promise<string | null> {
         ],
       }],
     });
+    // ถอดเสียงเรียกโมเดลตรงโดยไม่ผ่านลูปหลัก ถ้าไม่บันทึกตรงนี้ ค่าเสียงจะไม่โผล่ในยอดเลย
+    const u = res.usage ?? {};
+    await logTokenUsage({
+      purpose: "transcribe",
+      model: spec.model,
+      chat_id: null,
+      user_id: null,
+      input_tokens: u.input_tokens ?? 0,
+      output_tokens: u.output_tokens ?? 0,
+      cache_read_tokens: u.cache_read_input_tokens ?? 0,
+      cache_write_tokens: u.cache_creation_input_tokens ?? 0,
+      iterations: 1,
+    });
     const text = (res.content ?? [])
       .filter((b: any) => b.type === "text")
       .map((b: any) => b.text)
@@ -3049,6 +3062,13 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
         content: "หาต่อไม่ได้แล้ว สรุปจากที่ได้มาให้คนถามเลย บอกตรง ๆ ว่าส่วนไหนยังไม่รู้",
       }],
     });
+    // รอบนี้อยู่ในบล็อกที่บันทึกยอดตอนจบอยู่แล้ว แต่เดิมลืมบวกเข้าไป
+    const lu = last.usage ?? {};
+    usage.iterations++;
+    usage.input += lu.input_tokens ?? 0;
+    usage.output += lu.output_tokens ?? 0;
+    usage.cacheRead += lu.cache_read_input_tokens ?? 0;
+    usage.cacheWrite += lu.cache_creation_input_tokens ?? 0;
     const text = (last.content ?? [])
       .filter((b: any) => b.type === "text")
       .map((b: any) => b.text)

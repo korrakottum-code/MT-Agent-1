@@ -421,7 +421,8 @@ async function dailyContext() {
         .map((m: any) => `${nameOf.get(m.line_user_id) ?? "?"}: ${String(m.message_text ?? "").slice(0, 300)}`)
         .join("\n").slice(0, 24000);
 
-      const res = await createMessage(specCheap(), {
+      const spec = specCheap();
+      const res = await createMessage(spec, {
         max_tokens: 700,
         system: "คุณกำลังเขียนโน้ตไว้ให้ตัวเองอ่านพรุ่งนี้ ไม่ได้เขียนรายงานให้คนอ่าน\n" +
           "สรุปจากบทสนทนาเมื่อวานให้สั้นที่สุดเท่าที่ยังใช้งานได้ ภาษาไทย ไม่เกิน " + CONTEXT_MAX_CHARS + " ตัวอักษร\n" +
@@ -433,6 +434,7 @@ async function dailyContext() {
           "ห้ามเดาสิ่งที่ไม่ได้พูดกันจริง ถ้าหมวดไหนไม่มีก็ข้ามไป ห้ามเขียนคำนำหรือคำลงท้าย",
         messages: [{ role: "user", content: `บทสนทนาเมื่อวานของแชทนี้:\n\n${transcript}` }],
       });
+      await logTokenUsage("daily_context", spec.model, chatId, res);
       const summary = (res.content ?? [])
         .filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n").trim()
         .slice(0, CONTEXT_MAX_CHARS);
