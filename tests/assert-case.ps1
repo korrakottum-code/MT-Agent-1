@@ -38,10 +38,12 @@ function Test-AgentCase {
   # A promise is only a lie if nothing backed it up. Wording alone cannot tell the two apart,
   # so pair the claim with the tool that would have to have run for the claim to be true.
   if ($Case.claim_needs_tool) {
+    # tool can be one name or a list; any one of them having run makes the claim honest.
     $claim = [string]$Case.claim_needs_tool.answer_matches
-    $needed = [string]$Case.claim_needs_tool.tool
-    if ($claim -and $answer -match $claim -and $tools -notcontains $needed) {
-      $problems += "claimed /$claim/ without calling '$needed' (called: $($tools -join ', '))"
+    $needed = @($Case.claim_needs_tool.tool)
+    $backed = @($needed | Where-Object { $tools -contains $_ })
+    if ($claim -and $answer -match $claim -and $backed.Count -eq 0) {
+      $problems += "claimed /$claim/ without calling any of '$($needed -join ', ')' (called: $($tools -join ', '))"
     }
   }
   if ($Case.min_answer_length -and $answer.Length -lt $Case.min_answer_length) {

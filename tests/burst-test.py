@@ -64,6 +64,17 @@ CASES = [
         {"type": "image", "text": "", "gap_ms": 700},
         {"type": "image", "text": "", "gap_ms": 0},
     ], 1),
+    # เคสจริง 15 ก.ย. แงวเพิ่งตอบ ตั้มส่งรูปแล้วพิมพ์ "ขอรหัส" โดยไม่เรียกชื่อ แงวเงียบ ทองพิมพ์ "แม่งเงียบเลย"
+    ("กลุ่ม แงวเพิ่งตอบ แล้วส่งรูปตามด้วยขอรหัสโดยไม่เรียกชื่อ", True, [
+        {"type": "image", "text": "", "gap_ms": 1500},
+        {"text": "ขอรหัส", "gap_ms": 0},
+    ], 1, {"prior_bot": True}),
+    # มีคนอื่นพูดแทรกหลังแงวตอบ บทสนทนาเปลี่ยนมือไปแล้ว "ขอรหัส" ของคนแรกต้องไม่ผ่านด่าน
+    # ส่วนข้อความของคนที่พูดต่อจากแงวทันทีผ่านด่านได้ เพราะด่านนี้แค่ส่งให้โมเดลตัดสินว่าจะตอบหรือเงียบ
+    ("กลุ่ม แงวเพิ่งตอบ แต่มีคนอื่นพูดแทรกก่อน", True, [
+        {"text": "เดี๋ยวผมจัดการเอง", "from": "other", "gap_ms": 1200},
+        {"text": "ขอรหัส", "gap_ms": 0},
+    ], 1, {"prior_bot": True, "expect_ids": [0]}),
     ("กลุ่ม ไม่มีใครแท็กเลย ต้องไม่ตอบ", True, [
         {"text": "ยอดเมื่อวานเท่าไหร่นะ", "gap_ms": 300},
         {"text": "เดี๋ยวเช็คให้", "gap_ms": 0},
@@ -71,8 +82,8 @@ CASES = [
 ]
 
 
-def run(in_group, bubbles):
-    body = json.dumps({"simulate": {"in_group": in_group, "bubbles": bubbles}}).encode()
+def run(in_group, bubbles, extra=None):
+    body = json.dumps({"simulate": {"in_group": in_group, "bubbles": bubbles, **(extra or {})}}).encode()
     req = urllib.request.Request(
         URL, data=body,
         headers={"Content-Type": "application/json", "x-test-key": KEY},
@@ -86,17 +97,23 @@ def main():
         print("ต้องใส่ CRON_SECRET เป็นอาร์กิวเมนต์")
         return 2
     failed = 0
-    for name, in_group, bubbles, want in CASES:
+    for case in CASES:
+        name, in_group, bubbles, want = case[:4]
+        extra = dict(case[4]) if len(case) > 4 else {}
+        expect_ids = extra.pop("expect_ids", None)
         try:
-            res = run(in_group, bubbles)
+            res = run(in_group, bubbles, extra)
         except Exception as e:
             print("[ERROR] %s -> %s" % (name, str(e)[:120]))
             failed += 1
             continue
         got = res.get("answered", -1)
         seen = (res.get("seen_at_answer") or [0])[0]
-        saw_all = seen >= len(bubbles)
-        ok = got == want and (want != 1 or saw_all)
+        saw_all = seen >= len([b for b in bubbles if b.get("from") != "other"])
+        ok = got == want and (want != 1 or saw_all or expect_ids is not None)
+        if expect_ids is not None:
+            got_idx = sorted(int(x.rsplit("-", 1)[1]) for x in res.get("answered_ids", []))
+            ok = ok and got_idx == sorted(expect_ids)
         print("%s %s -> ส่ง %s บอลลูน ตอบ %s ครั้ง%s" % (
             "[PASS]" if ok else "[FAIL]",
             name,

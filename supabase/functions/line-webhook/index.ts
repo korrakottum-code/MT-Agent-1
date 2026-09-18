@@ -756,6 +756,8 @@ type MondayHit = {
   boardId: string;
   boardName: string;
   state: string;
+  // ความใหม่ของบอร์ดที่เจอ 3 = เดือนนี้ปีนี้ ใช้บอกโมเดลว่าการ์ดนี้เป็นงานเดือนไหน
+  fresh: number;
   // ชื่อกับชนิดของคอลัมน์มาด้วย เพราะบอร์ดของทีมมีคอลัมน์สถานะหลายอัน
   // ถ้าเดาจากไอดีอย่างเดียวจะหยิบผิดอัน แล้วรายงานสถานะบริการว่าเป็นสถานะงาน
   columns: { id: string; text: string; title: string; type: string }[];
@@ -764,38 +766,49 @@ type MondayHit = {
 // ค้นรายการใน Monday จากคำเดียว ใช้ได้ทั้งชื่องานและรหัสงาน
 // แยกออกมาเป็นฟังก์ชันเพราะเครื่องมือที่เขียนกลับเข้า Monday ต้องหาให้เจอก่อนถึงจะเขียนได้
 // และต้องหาด้วยวิธีเดียวกันเป๊ะ ไม่งั้นสิ่งที่ผู้ใช้เห็นตอนค้น กับสิ่งที่ถูกแก้ จะเป็นคนละใบ
+// รายชื่อบอร์ดกับคอลัมน์เปลี่ยนไม่บ่อย แต่เดิมถามใหม่ทุกครั้งที่ค้น เสียไปเกือบสองวินาทีต่อครั้ง
+// เก็บไว้ในหน่วยความจำของเครื่องที่รันอยู่สิบนาที บอร์ดใหม่ของเดือนหน้าจะโผล่เองหลังหมดเวลา
+const BOARDS_CACHE_MS = 10 * 60_000;
+let boardsCache: { at: number; boards: any[] } | null = null;
+
+async function mondayBoards(): Promise<any[]> {
+  if (boardsCache && Date.now() - boardsCache.at < BOARDS_CACHE_MS) return boardsCache.boards;
+  const all = await mondayQuery(
+    `query { boards(limit: 100, order_by: used_at) { id name columns { id type title } } }`,
+  );
+  boardsCache = { at: Date.now(), boards: all?.boards ?? [] };
+  return boardsCache.boards;
+}
+
+// คะแนนความใหม่ของบอร์ดจากชื่อ บอร์ดของทีมตั้งชื่อตามเดือนกับปีเสมอ
+// 3 = เดือนนี้ปีนี้ 2 = เดือนนี้ 1 = ปีนี้ 0 = อื่น ๆ
+function boardFreshness(name: string): number {
+  const now = new Date(Date.now() + 7 * 3600_000);
+  const month = [
+    "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november", "december",
+  ][now.getUTCMonth()];
+  const year = String(now.getUTCFullYear());
+  const x = name.toLowerCase();
+  return (x.includes(month) ? 2 : 0) + (x.includes(year) ? 1 : 0);
+}
+
 async function mondaySearchItems(
   term: string,
   boardName: string | null,
   limit: number,
-): Promise<{ searched: number; hits: MondayHit[] }> {
-  // used_at ของ Monday ไม่ได้เรียงตามที่ทีมใช้จริง บอร์ดของเดือนปัจจุบันหล่นไปอยู่ท้ายแถวได้
-  const all = await mondayQuery(
-    `query { boards(limit: 100, order_by: used_at) { id name columns { id type title } } }`,
-  );
-  let pool: any[] = all?.boards ?? [];
+): Promise<{ searched: number; failed: number; hits: MondayHit[] }> {
+  let pool: any[] = await mondayBoards();
   if (boardName) {
     const needle = boardName.toLowerCase();
     const hit = pool.filter((b: any) => String(b.name).toLowerCase().includes(needle));
     if (hit.length === 0) throw new Error(`ไม่พบบอร์ดชื่อใกล้เคียง "${boardName}"`);
     pool = hit.slice(0, 6);
   } else {
-    // บัญชีนี้มีบอร์ดเกือบร้อย ถ้ากวาดหมดทุกครั้งจะรอเป็นสิบวินาที
-    // งานที่คนถามหาเกือบทั้งหมดอยู่บอร์ดของเดือนนี้ จึงเรียงบอร์ดเดือนปัจจุบันขึ้นก่อน
-    // ส่วนบอร์ดงานย่อยไม่ได้เก็บรหัสงาน ตัดออกไปเลยเพื่อไม่ให้เปลืองรอบ
-    const now = new Date(Date.now() + 7 * 3600_000);
-    const month = [
-      "january", "february", "march", "april", "may", "june",
-      "july", "august", "september", "october", "november", "december",
-    ][now.getUTCMonth()];
-    const year = String(now.getUTCFullYear());
-    const score = (n: string) => {
-      const x = n.toLowerCase();
-      return (x.includes(month) ? 2 : 0) + (x.includes(year) ? 1 : 0);
-    };
+    // บอร์ดงานย่อยไม่ได้เก็บรหัสงาน ตัดออกไปเลยเพื่อไม่ให้เปลืองรอบ
     pool = pool
       .filter((b: any) => !String(b.name).toLowerCase().startsWith("subitems of"))
-      .map((b: any, i: number) => ({ b, i, s: score(String(b.name)) }))
+      .map((b: any, i: number) => ({ b, i, s: boardFreshness(String(b.name)) }))
       .sort((x, y) => y.s - x.s || x.i - y.i)
       .slice(0, 40)
       .map((x) => x.b);
@@ -805,6 +818,7 @@ async function mondaySearchItems(
   // Monday ปฏิเสธทั้งคำขอด้วย "Column not found" ถ้าอ้างคอลัมน์ที่บอร์ดนั้นไม่มี
   // และรหัสงานอยู่คนละคอลัมน์ในแต่ละบอร์ด จึงค้นทุกคอลัมน์ที่เก็บข้อความของบอร์ดนั้น ๆ
   const wanted = mondayCodeColumns();
+  let failed = 0;
   const askBoard = async (b: any): Promise<MondayHit[]> => {
     const cols0 = (b.columns ?? []).map((c: any) => ({
       id: String(c.id),
@@ -841,6 +855,7 @@ async function mondaySearchItems(
         boardId: String(b.id),
         boardName: String(b.name),
         state: String(it.state),
+        fresh: boardFreshness(String(b.name)),
         columns: (it.column_values ?? [])
           .filter((c: any) => c.text)
           .map((c: any) => {
@@ -854,23 +869,31 @@ async function mondaySearchItems(
           }),
       }));
     } catch (_e) {
-      // บอร์ดเดียวพังไม่ควรทำให้การค้นทั้งหมดพัง ข้ามไปแล้วรายงานเท่าที่เจอ
+      // บอร์ดเดียวพังไม่ควรทำให้การค้นทั้งหมดพัง แต่ต้องนับไว้
+      // ไม่งั้นจะรายงานว่า "ค้นครบแล้วไม่พบ" ทั้งที่บางบอร์ดไม่ได้ตอบกลับมาเลย ซึ่งไม่จริง
+      failed++;
       return [];
     }
   };
 
-  // ยิงเป็นชุด ชุดละ 10 บอร์ด แล้วหยุดทันทีที่ชุดไหนเจอ
-  // รหัสงานหนึ่งรหัสอยู่บอร์ดเดียว ค้นต่อหลังเจอแล้วคือรอฟรี
+  // ค้นทีละระดับความใหม่ของบอร์ด เดือนนี้ก่อน แล้วค่อยถอยไปเดือนเก่า
+  // เดิมแบ่งชุดละ 10 บอร์ดตายตัว บอร์ดเดือนนี้มีแค่ห้าหกบอร์ด ชุดแรกจึงพ่วงบอร์ดเดือนเก่ามาด้วย
+  // พอเดือนเก่ามีคำตรง แงวก็หยุดค้นแล้วเอาการ์ดเดือนมิถุนายนมาตอบงานของเดือนกันยายน
+  // ตอนนี้ถ้าเดือนนี้เจอ จะไม่ไปแตะเดือนเก่าเลย
   const hits: MondayHit[] = [];
   let searched = 0;
-  for (let i = 0; i < pool.length; i += 10) {
-    const slice = pool.slice(i, i + 10);
-    searched += slice.length;
-    const batch = await Promise.all(slice.map(askBoard));
-    for (const r of batch) hits.push(...r);
+  const tiers = [...new Set(pool.map((b: any) => boardFreshness(String(b.name))))].sort((a, b) => b - a);
+  for (const tier of tiers) {
+    const inTier = pool.filter((b: any) => boardFreshness(String(b.name)) === tier);
+    for (let i = 0; i < inTier.length; i += 10) {
+      const slice = inTier.slice(i, i + 10);
+      searched += slice.length;
+      const batch = await Promise.all(slice.map(askBoard));
+      for (const r of batch) hits.push(...r);
+    }
     if (hits.length > 0) break;
   }
-  return { searched, hits };
+  return { searched, failed, hits };
 }
 
 // รหัสงานของทีมไม่ได้อยู่ในชื่อรายการ แต่อยู่ในคอลัมน์ ต้องค้นทั้งชื่อและคอลัมน์รหัส
@@ -1049,15 +1072,52 @@ const TOOLS = [
     description:
       "ค้นงานใน Monday ของทีม ค้นได้ทั้งจากชื่องานและจากรหัสงาน (เช่น PF02-0639 PALL00-1030 PO00-0006) " +
       "ใช้เมื่อมีคนถามว่า 'รหัสนี้อยู่ไหน' 'หาไม่เจอใน Monday' 'งานนี้สถานะอะไรแล้ว' " +
-      "ตอบกลับพร้อมลิงก์เปิดรายการนั้นได้เลย ใช้ได้เฉพาะกลุ่มที่เปิดสิทธิ์ไว้ และแชทส่วนตัวของคนที่ระบุไว้",
+      "ถ้าจะลองหลายคำ ให้ใส่ทั้งหมดใน queries ในครั้งเดียว ไม่ต้องเรียกทีละคำ " +
+      "ผลแต่ละใบบอก board_is_current_month และ fields ไว้เทียบกับข้อความบนรูป " +
+      "ห้ามตอบว่าใบไหนคือใบที่ถามจนกว่าจะเทียบ fields แล้วตรง ดูกฎข้อ 18 " +
+      "ใช้ได้เฉพาะกลุ่มที่เปิดสิทธิ์ไว้ และแชทส่วนตัวของคนที่ระบุไว้",
     input_schema: {
       type: "object",
       properties: {
         query: { type: "string", description: "รหัสงานหรือคำในชื่องาน" },
+        queries: {
+          type: "array",
+          items: { type: "string" },
+          description: "หลายคำค้นพร้อมกัน ไม่เกิน 3 คำ เช่น ราคากับชื่อโปรที่อ่านได้จากรูป",
+        },
         board_name: { type: "string", description: "ชื่อบอร์ด ไม่ระบุ = ค้นทุกบอร์ด โดยเริ่มจากบอร์ดของเดือนปัจจุบัน" },
         limit: { type: "integer", description: "จำนวนผลต่อบอร์ด ค่าเริ่มต้น 5" },
       },
-      required: ["query"],
+    },
+  },
+  {
+    name: "monday_send_images",
+    description:
+      "ส่งรูปงานจากการ์ด Monday เข้าแชทนี้เป็นรูปจริง ไม่ใช่ลิงก์ ใช้เมื่อมีคนขอ 'ขอรูปรหัสนี้' 'ส่งรูปมาให้หน่อย' 'ขอ AW ตัวนี้' " +
+      "ถ้าคนขอแยกเป็นชุดมา เช่น เซ็ต Diode กับเซ็ต Hifu ให้ใส่ตามนั้นใน sets จะส่งเป็นชุดพร้อมหัวข้อให้ " +
+      "ส่งได้เฉพาะไฟล์ jpg กับ png ไฟล์วิดีโอหรือไฟล์ชนิดอื่นจะบอกกลับมาว่าส่งไม่ได้ " +
+      "รูปจะถูกส่งเข้าแชทก่อนคำตอบของแงว คำตอบจึงควรสั้น บอกแค่ว่าส่งกี่รูปและรหัสไหนไม่พบ",
+    input_schema: {
+      type: "object",
+      properties: {
+        sets: {
+          type: "array",
+          description: "ชุดรูปตามที่คนขอแยกไว้",
+          items: {
+            type: "object",
+            properties: {
+              label: { type: "string", description: "ชื่อชุด เช่น Diode หรือ Hifu" },
+              codes: { type: "array", items: { type: "string" }, description: "รหัสงานในชุดนี้" },
+            },
+            required: ["codes"],
+          },
+        },
+        codes: {
+          type: "array",
+          items: { type: "string" },
+          description: "รหัสงาน ใช้เมื่อไม่ได้แยกชุด",
+        },
+      },
     },
   },
   {
@@ -1298,7 +1358,7 @@ const TOOLS = [
   {
     name: "update_my_profile",
     description:
-      "บันทึก/แก้ไขโปรไฟล์ของคนที่กำลังคุยอยู่: ชื่อเล่น ตำแหน่งงาน แผนก ใช้ตอนผู้ใช้แนะนำตัวในแชทส่วนตัว",
+      "บันทึก/แก้ไขโปรไฟล์ของคนที่กำลังคุยอยู่: ชื่อเล่น ตำแหน่งงาน แผนก ใช้ตอนผู้ใช้แนะนำตัวในแชทส่วนตัว ใส่เฉพาะช่องที่เจ้าตัวบอกมาเองในข้อความนี้ ช่องที่ไม่ได้บอกให้เว้นไว้ ห้ามเดาตำแหน่งหรือแผนกให้",
     input_schema: {
       type: "object",
       properties: {
@@ -1757,8 +1817,29 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
 
         const slug = await mondayAccountSlug();
         const limit = Math.min(Math.max(input.limit ?? 5, 1), 20);
-        const term = String(input.query);
-        const { searched, hits } = await mondaySearchItems(term, input.board_name ?? null, limit);
+        // ค้นหลายคำพร้อมกันในรอบเดียว เดิมโมเดลลองทีละคำ แต่ละคำคือหนึ่งรอบคุยกับโมเดลบวกหนึ่งรอบค้น
+        // งานดูรูปแล้วหาการ์ดจึงช้าถึงห้าสิบวินาที ยิงขนานไปพร้อมกันไม่เกินสามคำ
+        const terms: string[] = [
+          ...(Array.isArray(input.queries) ? input.queries : []),
+          ...(input.query ? [input.query] : []),
+        ].map((t: any) => String(t).trim()).filter(Boolean);
+        const uniqueTerms = [...new Set(terms)].slice(0, 3);
+        if (uniqueTerms.length === 0) return { error: "ต้องมีคำค้นอย่างน้อยหนึ่งคำ" };
+        const term = uniqueTerms.join(" / ");
+        const results = await Promise.all(
+          uniqueTerms.map((t) => mondaySearchItems(t, input.board_name ?? null, limit)),
+        );
+        const searched = Math.max(...results.map((r) => r.searched));
+        const failed = results.reduce((n, r) => n + r.failed, 0);
+        const seen = new Set<string>();
+        const hits: (MondayHit & { matched: string })[] = [];
+        results.forEach((r, i) => {
+          for (const h of r.hits) {
+            if (seen.has(h.itemId)) continue;
+            seen.add(h.itemId);
+            hits.push({ ...h, matched: uniqueTerms[i] });
+          }
+        });
 
         const found = hits.map((h) => {
           const pick = (needle: string) => h.columns.find((c) => c.id.includes(needle))?.text ?? null;
@@ -1785,18 +1866,246 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
               .slice(0, 6)
               .map((c) => ({ field: c.title || c.id, value: c.text.slice(0, 300) })),
             url: slug ? `https://${slug}.monday.com/boards/${h.boardId}/pulses/${h.itemId}` : null,
+            matched_query: h.matched,
+            // บอกให้ชัดว่าการ์ดนี้อยู่บอร์ดเดือนนี้หรือเดือนเก่า จะได้ไม่เอางานเดือนก่อนมาตอบงานเดือนนี้
+            board_is_current_month: h.fresh >= 2,
           };
         });
+        // บอร์ดที่ไม่ตอบกลับต้องบอก ไม่งั้นคำว่า "ค้นครบแล้วไม่พบ" จะเป็นคำโกหก
+        const partial = failed > 0
+          ? ` มี ${failed} บอร์ดไม่ตอบกลับ ผลนี้จึงอาจไม่ครบ ให้บอกคนถามตามนั้น`
+          : "";
         return found.length === 0
           ? {
             count: 0,
             searched_boards: searched,
-            note: `ค้นครบ ${searched} บอร์ดแล้วไม่พบ "${term}" — บอกไปตรง ๆ ว่าไม่มีใน Monday ห้ามค้นซ้ำด้วยคำที่สั้นลง`,
+            failed_boards: failed,
+            note: failed > 0
+              ? `ค้น ${searched} บอร์ดแล้วไม่พบ "${term}"${partial} อย่ายืนยันว่าไม่มี`
+              : `ค้นครบ ${searched} บอร์ดแล้วไม่พบ "${term}" บอกไปตรง ๆ ว่าไม่มีใน Monday ห้ามค้นซ้ำด้วยคำที่สั้นลง`,
           }
-          : { count: found.length, items: found };
+          : {
+            count: found.length,
+            items: found,
+            ...(failed > 0 ? { failed_boards: failed, note: `มี ${failed} บอร์ดไม่ตอบกลับ ผลอาจไม่ครบ` } : {}),
+          };
       } catch (e) {
         return { error: String((e as Error).message) };
       }
+    }
+
+    case "monday_send_images": {
+      // ส่งรูปงานจากการ์ด Monday เข้าแชท ทีมขอบ่อยเวลาจะขึ้นแอดหรือส่งต่อให้แอดมิน
+      // (เคสจริง 16 ก.ย. ออฟขอรูปของรหัสชุดหนึ่งสองรอบ แงวส่งได้แค่ลิงก์)
+      //
+      // เครื่องที่รันแงวให้เวลาประมวลผลแค่ 2 วินาทีต่อข้อความ ย่อรูปเองได้ไม่เกินหนึ่งสองใบก็โดนตัด
+      // จึงไม่ย่อเอง ให้ที่เก็บไฟล์ของ Supabase ย่อรูปตัวอย่างให้ตอนเปิดลิงก์แทน
+      // รูปตัวอย่างของไลน์ต้องไม่เกิน 1MB แต่ไฟล์งานของทีมหนักถึง 2MB
+      const denied = mondayAllowedHere(ctx);
+      if (denied) return { error: denied };
+
+      const BUCKET = "task-attachments";
+      const TTL = 7 * 24 * 3600;
+      // ไลน์เขียนเพดานว่า 1MB กับ 10MB โดยไม่บอกว่านับแบบไหน ทดสอบจริงเจอรูป 1,002,328 ไบต์
+      // ซึ่งผ่านถ้านับ 1MB เป็น 1,048,576 แต่ตกถ้านับเป็นล้าน จึงเผื่อระยะไว้ต่ำกว่าทั้งสองแบบ
+      const PREVIEW_MAX = 900_000;
+      const ORIGINAL_MAX = 9_500_000;
+      const MAX_CODES = 12;
+      const MAX_IMAGES = 20;
+
+      // รับได้ทั้งแบบแยกชุดและแบบรายการเดียว
+      type ImgSet = { label: string | null; codes: string[] };
+      const rawSets: ImgSet[] = Array.isArray(input.sets) && input.sets.length > 0
+        ? input.sets.map((s: any) => ({
+          label: s.label ? String(s.label) : null,
+          codes: (Array.isArray(s.codes) ? s.codes : []).map((c: any) => String(c).trim()).filter(Boolean),
+        }))
+        : [{
+          label: null,
+          codes: (Array.isArray(input.codes) ? input.codes : []).map((c: any) => String(c).trim()).filter(Boolean),
+        }];
+      const allCodes = [...new Set(rawSets.flatMap((s) => s.codes).map((c) => c.toUpperCase()))];
+      if (allCodes.length === 0) return { error: "ต้องระบุรหัสงานอย่างน้อยหนึ่งรหัส" };
+      const codes = allCodes.slice(0, MAX_CODES);
+      const skippedCodes = allCodes.slice(MAX_CODES);
+
+      // 1) หาการ์ดของแต่ละรหัส เอาเฉพาะใบที่มีรหัสนี้ตรงตัว ไม่เอาใบที่แค่มีคำคล้าย
+      const slug = await mondayAccountSlug();
+      const cardOf = new Map<string, MondayHit>();
+      let searchFailed = 0;
+      for (let i = 0; i < codes.length; i += 3) {
+        await Promise.all(codes.slice(i, i + 3).map(async (code) => {
+          const { hits, failed } = await mondaySearchItems(code, null, 3);
+          searchFailed += failed;
+          const exact = hits.filter((h) =>
+            h.itemName.toUpperCase().includes(code) ||
+            h.columns.some((c) => c.text.trim().toUpperCase() === code)
+          ).sort((a, b) => b.fresh - a.fresh);
+          if (exact[0]) cardOf.set(code, exact[0]);
+        }));
+      }
+
+      // 2) ไฟล์ในการ์ด เลือกคอลัมน์ที่เก็บงานจริง ไม่เอาคอลัมน์บรีฟหรือไฟล์อ้างอิง
+      //    บอร์ด MK CLASS เก็บที่คอลัมน์ "Graphic/VDO" บอร์ด Class BKK เก็บที่ "Files"
+      const assetIdsOf = new Map<string, string[]>();
+      const itemIds = [...new Set([...cardOf.values()].map((h) => h.itemId))];
+      if (itemIds.length > 0) {
+        const d = await mondayQuery(
+          `query($i: [ID!]) { items(ids: $i) { id board { columns { id title type } } column_values { id type value } } }`,
+          { i: itemIds },
+        );
+        for (const it of d?.items ?? []) {
+          const titleOf = new Map<string, string>(
+            (it.board?.columns ?? []).map((c: any) => [String(c.id), String(c.title ?? "")]),
+          );
+          const fileCols = (it.column_values ?? [])
+            .filter((c: any) => c.type === "file" && c.value)
+            .map((c: any) => {
+              let ids: string[] = [];
+              try {
+                ids = (JSON.parse(c.value).files ?? [])
+                  .map((f: any) => String(f.assetId ?? ""))
+                  .filter(Boolean);
+              } catch (_e) { /* ค่าเสียก็ข้ามไป */ }
+              return { title: titleOf.get(String(c.id)) ?? "", ids };
+            })
+            .filter((c: any) => c.ids.length > 0);
+          const isBrief = (t: string) => /brief|ref|บรีฟ|อ้างอิง/i.test(t);
+          const isWork = (t: string) => /graphic|vdo|artwork|\baw\b|ไฟล์งาน|final|^files?$/i.test(t);
+          const chosen = fileCols.find((c: any) => isWork(c.title) && !isBrief(c.title)) ??
+            fileCols.find((c: any) => !isBrief(c.title));
+          assetIdsOf.set(String(it.id), chosen ? chosen.ids : []);
+        }
+      }
+
+      const allAssetIds = [...new Set([...assetIdsOf.values()].flat())];
+      const assetOf = new Map<string, any>();
+      if (allAssetIds.length > 0) {
+        const a = await mondayQuery(
+          `query($i: [ID!]!) { assets(ids: $i) { id name file_extension file_size public_url } }`,
+          { i: allAssetIds },
+        );
+        for (const x of a?.assets ?? []) assetOf.set(String(x.id), x);
+      }
+
+      // 3) เก็บรูปไว้ที่ของเรา แล้วทำลิงก์ให้ไลน์ดึง ลิงก์ของ Monday หมดอายุภายในชั่วโมง ใช้ส่งตรงไม่ได้
+      const stored: string[] = [];
+      const checks: any[] = [];
+      let imageCount = 0;
+      const prepared = new Map<string, { original: string; preview: string } | { skip: string }>();
+      const prepare = async (assetId: string) => {
+        const x = assetOf.get(assetId);
+        if (!x) return prepared.set(assetId, { skip: "หาไฟล์ใน Monday ไม่เจอ" });
+        const ext = String(x.file_extension ?? "").toLowerCase();
+        if (![".jpg", ".jpeg", ".png"].includes(ext)) {
+          return prepared.set(assetId, { skip: `เป็นไฟล์ ${ext || "ไม่ทราบชนิด"} ส่งเป็นรูปไม่ได้` });
+        }
+        const res = await fetch(x.public_url);
+        if (!res.ok) return prepared.set(assetId, { skip: "ดาวน์โหลดจาก Monday ไม่สำเร็จ" });
+        const buf = new Uint8Array(await res.arrayBuffer());
+        const path = `line-images/${assetId}${ext === ".png" ? ".png" : ".jpg"}`;
+        const { error: upErr } = await supabase.storage.from(BUCKET).upload(path, buf, {
+          contentType: ext === ".png" ? "image/png" : "image/jpeg",
+          upsert: true,
+        });
+        if (upErr) return prepared.set(assetId, { skip: `เก็บรูปไม่สำเร็จ: ${upErr.message}` });
+        stored.push(path);
+
+        const sign = async (width?: number) => {
+          const { data, error } = await supabase.storage.from(BUCKET).createSignedUrl(
+            path,
+            TTL,
+            width ? { transform: { width, quality: 75, resize: "contain" } } : undefined,
+          );
+          return error ? null : data?.signedUrl ?? null;
+        };
+        const original = buf.length <= ORIGINAL_MAX ? await sign() : await sign(2048);
+        const preview = buf.length <= PREVIEW_MAX ? original : await sign(1024);
+        if (!original || !preview) return prepared.set(assetId, { skip: "ทำลิงก์รูปไม่สำเร็จ" });
+        // ตอนข้อสอบ ดึงลิงก์ที่ไลน์จะดึงจริงมาวัดขนาด จะได้รู้ว่ารูปตัวอย่างเล็กพอให้ไลน์รับจริงไหม
+        if (ctx.dryRun) {
+          for (const [kind, u] of [["original", original], ["preview", preview]] as const) {
+            const r = await fetch(u);
+            const n = r.ok ? (await r.arrayBuffer()).byteLength : 0;
+            checks.push({ asset: x.name, kind, status: r.status, bytes: n, type: r.headers.get("content-type") });
+          }
+        }
+        prepared.set(assetId, { original, preview });
+      };
+
+      const wanted: string[] = [];
+      for (const s of rawSets) {
+        for (const code of s.codes.map((c) => c.toUpperCase())) {
+          const card = cardOf.get(code);
+          for (const id of card ? assetIdsOf.get(card.itemId) ?? [] : []) {
+            if (!wanted.includes(id)) wanted.push(id);
+          }
+        }
+      }
+      const toPrepare = wanted.slice(0, MAX_IMAGES);
+      for (let i = 0; i < toPrepare.length; i += 4) {
+        await Promise.all(toPrepare.slice(i, i + 4).map(prepare));
+      }
+
+      // 4) ประกอบข้อความเป็นชุดตามที่คนขอแยกไว้ หัวชุดเป็นข้อความ ตามด้วยรูปของชุดนั้น
+      const messages: any[] = [];
+      const report: any[] = [];
+      for (const s of rawSets) {
+        const lines: string[] = [];
+        const images: any[] = [];
+        for (const code of s.codes.map((c) => c.toUpperCase())) {
+          const card = cardOf.get(code);
+          if (!card) {
+            lines.push(`${code} ไม่พบการ์ด`);
+            report.push({ code, found: false });
+            continue;
+          }
+          const ids = (assetIdsOf.get(card.itemId) ?? []).filter((id) => toPrepare.includes(id));
+          const ok = ids.map((id) => prepared.get(id)).filter((p: any) => p && !("skip" in p)) as any[];
+          const bad = ids.map((id) => prepared.get(id)).filter((p: any) => p && "skip" in p) as any[];
+          const link = slug ? `https://${slug}.monday.com/boards/${card.boardId}/pulses/${card.itemId}` : "";
+          if (ok.length === 0) {
+            lines.push(`${code} ${card.itemName} ไม่มีรูปในการ์ด${bad[0] ? ` (${bad[0].skip})` : ""} ${link}`.trim());
+          } else {
+            lines.push(`${code} ${card.itemName}`);
+          }
+          for (const p of ok) {
+            images.push({ type: "image", originalContentUrl: p.original, previewImageUrl: p.preview });
+          }
+          imageCount += ok.length;
+          report.push({ code, found: true, card: card.itemName, images: ok.length, problems: bad.map((b) => b.skip) });
+        }
+        const head = s.label ? `${s.label}\n${lines.join("\n")}` : lines.join("\n");
+        messages.push({ type: "text", text: head.slice(0, 4900) }, ...images);
+      }
+
+      // 5) ส่งเข้าแชทนี้ ไลน์รับได้ครั้งละไม่เกิน 5 ข้อความ
+      const to = ctx.lineGroupId ?? ctx.caller.line_user_id;
+      let pushed = 0;
+      let pushFailed = 0;
+      if (ctx.dryRun) {
+        // ข้อสอบเดินครบทุกขั้นยกเว้นการส่งจริง แล้วลบรูปที่เก็บไว้ทิ้ง
+        if (stored.length > 0) await supabase.storage.from(BUCKET).remove(stored);
+      } else {
+        for (let i = 0; i < messages.length; i += 5) {
+          const ok = await lineApi("/v2/bot/message/push", { to, messages: messages.slice(i, i + 5) });
+          if (ok) pushed += Math.min(5, messages.length - i);
+          else pushFailed++;
+        }
+      }
+
+      return {
+        images_sent: ctx.dryRun ? 0 : imageCount,
+        images_prepared: imageCount,
+        codes: report,
+        ...(skippedCodes.length ? { not_processed: skippedCodes, limit: `ส่งได้ครั้งละไม่เกิน ${MAX_CODES} รหัส` } : {}),
+        ...(wanted.length > MAX_IMAGES ? { images_cut: wanted.length - MAX_IMAGES } : {}),
+        ...(searchFailed > 0 ? { failed_boards: searchFailed } : {}),
+        ...(pushFailed > 0 ? { push_failed_batches: pushFailed } : {}),
+        ...(ctx.dryRun ? { dry_run: "โหมดข้อสอบ เตรียมรูปครบแต่ไม่ได้ส่งจริง และลบทิ้งแล้ว", url_checks: checks } : {}),
+        note: "รูปถูกส่งเข้าแชทไปแล้วก่อนคำตอบนี้ ตอบสั้น ๆ แค่ว่าส่งไปกี่รูป และรหัสไหนไม่พบหรือไม่มีรูป " +
+          "ห้ามพูดว่าส่งรูปที่ไม่ได้ส่งจริง ตัวเลขต้องตรงกับ images_sent",
+      };
     }
 
     case "read_link": {
@@ -2711,7 +3020,31 @@ const SYSTEM_RULES = `คุณคือ "แงว" (MT Agent) — AI น้อ
 15.2 ถ้ามีรหัสงาน ให้เรียก monday_find_item ด้วยรหัสนั้น แล้วเทียบทีละจุดกับค่า fields ที่การ์ดคืนมา
 15.3 รายงานเป็นสองกอง ตรงกัน กับ ไม่ตรงกัน ของที่ไม่ตรงให้บอกว่าบนภาพเขียนว่าอะไร ในการ์ดเขียนว่าอะไร
 15.4 อ่านไม่ออกให้บอกว่าอ่านไม่ออก ห้ามเดาตัวเลข ราคาผิดหนึ่งหลักคือขึ้นแอดผิดทั้งแคมเปญ
-15.5 ไม่มีรหัสงานและไม่มีบรีฟในแชท ให้ถามว่าเทียบกับอะไร ห้ามตรวจลอย ๆ แล้วบอกว่าผ่าน`;
+15.5 ไม่มีรหัสงานและไม่มีบรีฟในแชท ให้ถามว่าเทียบกับอะไร ห้ามตรวจลอย ๆ แล้วบอกว่าผ่าน
+
+16. ความเป็นส่วนตัว ต้องพูดความจริงเสมอ
+16.1 ทุกข้อความทั้งในกลุ่มและแชทส่วนตัวถูกบันทึกไว้ในระบบ และแอดมินเข้าดูประวัติได้
+16.2 ถ้ามีคนถามว่าใครเห็นแชทนี้ได้ไหม หัวหน้าเห็นไหม ให้ตอบตามจริงว่าข้อความถูกบันทึกไว้และแอดมินดูได้
+16.3 ห้ามรับปากว่าเป็นความลับ ห้ามบอกว่าไม่มีใครอ่านได้ ห้ามชวนให้นินทาหรือระบายโดยอ้างว่าไม่มีใครเห็น
+16.4 ต่อให้กำลังคุยเล่นอยู่ก็ใช้กฎนี้ บุคลิกขี้เล่นไม่ใช่ข้ออ้างให้พูดไม่จริง
+
+17. พูดเฉพาะสิ่งที่ทำจริงและรู้จริง
+17.1 คำว่า บันทึกแล้ว จำไว้แล้ว อัปเดตในระบบแล้ว ส่งแล้ว ใช้ได้เฉพาะเมื่อเครื่องมือที่ทำเรื่องนั้นสำเร็จในรอบนี้จริง ถ้ายังไม่ได้ทำ ให้ถามว่าจะให้บันทึกไหม หรือไม่ต้องพูดถึง
+17.2 แก้ข้อมูลของใคร ให้แก้เฉพาะช่องที่คนนั้นบอกมาเองในข้อความนี้ ห้ามเติมช่องอื่นจากการเดาหรือจากบริบทที่เคยเห็น เช่น เขาบอกแค่ชื่อ ก็แก้แค่ชื่อ
+17.3 ไม่รู้ให้บอกว่าไม่รู้ ไม่แน่ใจให้บอกว่าไม่แน่ใจ ห้ามเสนอสิ่งที่เดาเป็นข้อเท็จจริง
+17.4 โดนทักว่าผิด ให้บอกสั้น ๆ ว่าผิดตรงไหน แล้วแก้ให้ถูก หรือบอกว่าต้องการข้อมูลอะไรเพิ่ม ไม่ต้องขอโทษยืดยาวแบบออดอ้อน
+
+18. หารหัสงานหรือการ์ดจากรูป ต้องชัวร์ก่อนตอบ
+18.1 ถ้าบนรูปมีรหัสงาน ให้ค้นด้วยรหัสนั้นก่อนเสมอ
+18.2 ถ้าไม่มีรหัส ให้อ่านรูปก่อน แล้วค้นด้วยราคากับชื่อโปรที่เห็นบนรูป ใส่รวมใน queries ครั้งเดียว ห้ามค้นด้วยชื่อเล่นที่คนพิมพ์เรียกแทนการอ่านรูป เช่น "โบม่วง"
+18.3 เทียบ fields ของการ์ดที่ได้กับข้อความบนรูปทีละจุด ตอบว่า "ตัวนี้คือ ..." ได้เฉพาะเมื่อทั้งราคาและชื่อโปรในการ์ดตรงกับบนรูป
+18.4 ถ้าตรงไม่ครบ ให้บอกตรง ๆ ว่ายังไม่ชัวร์ แล้วยกตัวเลือกไม่เกิน 3 ใบ บอกว่าแต่ละใบตรงตรงไหน ไม่ตรงตรงไหน ให้คนเลือกเอง ห้ามเลือกให้
+18.5 การ์ดที่ board_is_current_month เป็น false ใช้ตอบได้เฉพาะเมื่อข้อความตรงเป๊ะ และต้องบอกว่าเป็นการ์ดของบอร์ดไหน
+18.6 ถ้าผลค้นบอกว่ามีบอร์ดไม่ตอบกลับ ห้ามยืนยันว่าไม่มีการ์ดนั้น ให้บอกว่าค้นได้ไม่ครบ
+
+19. รวมตัวเลขเงิน
+19.1 ถ้ามีรายการที่ยอดเท่ากันเป๊ะตั้งแต่สองบรรทัดขึ้นไป ให้บวกตามที่ส่งมา แต่ทักว่ายอดเท่ากันถึงสตางค์ อาจเป็นรายการซ้ำ แล้วบอกยอดรวมทั้งสองแบบ คือรวมทั้งหมด กับรวมแบบตัดตัวซ้ำออก ให้คนส่งยืนยัน
+19.2 ห้ามตัดตัวที่สงสัยว่าซ้ำออกเองโดยไม่บอก`;
 
 // ส่วนที่เปลี่ยนทุกครั้ง (เวลา ผู้ใช้ กลุ่ม รายชื่อ) ต้องอยู่หลังจุด cache เสมอ
 function buildContext(ctx: Ctx, roster: any[], groups: any[], orgPersona: string | null, crossChat: string): string {
@@ -3178,13 +3511,22 @@ async function handleEvent(event: any, sim?: Sim) {
     // ห้ามกรองด้วย .neq("line_message_id", ...) เพราะคำตอบของบอทเก็บ line_message_id เป็น NULL
     // และ NULL <> x ใน SQL ได้ NULL ไม่ใช่ true — แถวของบอทจะถูกกรองทิ้งไปด้วย
     // ซึ่งเป็นแถวเดียวที่เงื่อนไขนี้ต้องการเห็น ทำให้ followUp เป็น false ตลอดกาล
+    // เดิมดูแค่ข้อความก่อนหน้าข้อความเดียว ถ้าคนส่งรูปคั่นแล้วค่อยพิมพ์ "ขอรหัส" ข้อความก่อนหน้าคือรูป
+    // แงวจึงไม่รู้ว่ากำลังถูกคุยด้วย เงียบไปจนคนต้องเรียกชื่อ (เคสจริง 15 ก.ย. ทองพิมพ์ว่า "แม่งเงียบเลย")
+    // ตอนนี้ย้อนหาคำตอบล่าสุดของแงว ถ้าหลังจากนั้นมีแต่คนนี้คนเดียวที่ส่งอะไรมา ก็ถือว่าคุยต่อกับแงวอยู่
+    // ถ้ามีคนอื่นพูดแทรก บทสนทนาเปลี่ยนมือไปแล้ว ไม่นับ
     const { data: prevRows } = await supabase.from("messages")
       .select("line_user_id, line_message_id, created_at")
       .eq("line_group_id", chatId)
-      .order("created_at", { ascending: false }).limit(2);
-    const prev = (prevRows ?? []).find((r: any) => r.line_message_id !== event.message.id);
-    followUp = Boolean(prev && prev.line_user_id === "bot" &&
-      Date.now() - new Date(prev.created_at).getTime() < FOLLOW_UP_WINDOW_MS);
+      .order("created_at", { ascending: false }).limit(8);
+    const earlier = (prevRows ?? []).filter((r: any) => r.line_message_id !== event.message.id);
+    const botAt = earlier.findIndex((r: any) => r.line_user_id === "bot");
+    if (botAt >= 0) {
+      const bot = earlier[botAt];
+      const between = earlier.slice(0, botAt);
+      followUp = Date.now() - new Date(bot.created_at).getTime() < FOLLOW_UP_WINDOW_MS &&
+        between.every((r: any) => r.line_user_id === lineUserId);
+    }
   }
 
   if (lineGroupId && !tagged && !named && !followUp) return;
@@ -3356,6 +3698,15 @@ async function runBurstSim(sim: any): Promise<Response> {
     });
   }
 
+  // จำลองว่าแงวเพิ่งตอบไปในแชทนี้ ใช้ทดสอบว่าคนส่งรูปแล้วพิมพ์ตามโดยไม่เรียกชื่อ แงวยังรู้ว่ากำลังคุยต่อ
+  if (sim.prior_bot) {
+    await supabase.from("messages").insert({
+      line_message_id: null, line_user_id: "bot", line_group_id: chatId,
+      message_text: "ข้อความก่อนหน้าของแงวในการซ้อม", message_type: "bot",
+    });
+    await new Promise((r) => setTimeout(r, 300));
+  }
+
   const collected: Sim = { answered: [], seenAtAnswer: [] };
   const ids: string[] = [];
   const runs: Promise<void>[] = [];
@@ -3363,10 +3714,12 @@ async function runBurstSim(sim: any): Promise<Response> {
     const b = bubbles[i];
     const id = `SIMMSG-${tag}-${i}`;
     ids.push(id);
+    // บอลลูนที่ใส่ from: "other" มาจากอีกคนในกลุ่ม ใช้ทดสอบว่ามีคนพูดแทรกแล้วแงวไม่ตอบผิดคน
+    const who = b.from === "other" ? `SIMOTHER-${tag}` : lineUserId;
     const event = {
       type: "message",
       message: { id, type: String(b.type ?? "text"), text: String(b.text ?? "") },
-      source: inGroup ? { userId: lineUserId, groupId: chatId } : { userId: lineUserId },
+      source: inGroup ? { userId: who, groupId: chatId } : { userId: who },
     };
     // ยิงพร้อมกันแบบไม่รอ เหมือนที่ LINE ส่งเข้ามาทีละเหตุการณ์จริง ๆ
     runs.push(handleEvent(event, collected).catch((e) => console.error("sim event failed", e)));
@@ -3379,7 +3732,7 @@ async function runBurstSim(sim: any): Promise<Response> {
   // เก็บกวาดให้หมด แชทปลอมไม่ควรค้างอยู่ในฐานข้อมูลของทีม
   await supabase.from("messages").delete().eq("line_group_id", chatId);
   if (inGroup) await supabase.from("groups").delete().eq("line_group_id", chatId);
-  await supabase.from("users").delete().eq("line_user_id", lineUserId);
+  await supabase.from("users").delete().in("line_user_id", [lineUserId, `SIMOTHER-${tag}`]);
 
   return Response.json({
     sent: ids.length,
@@ -3394,7 +3747,7 @@ async function runBurstSim(sim: any): Promise<Response> {
 async function runEval(body: string): Promise<Response> {
   const parsed = JSON.parse(body);
   if (parsed.simulate) return runBurstSim(parsed.simulate);
-  const { as_user, message, in_group, model: modelKey, judge } = parsed;
+  const { as_user, message, in_group, model: modelKey, judge, image_url, image_base64, image_mime } = parsed;
   const { spec: evalSpec, error: modelError } = resolveModel(String(modelKey ?? "sonnet").toLowerCase());
   if (!evalSpec) return Response.json({ error: modelError }, { status: 400 });
   const { data: caller } = await supabase.from("users").select("*")
@@ -3418,7 +3771,19 @@ async function runEval(body: string): Promise<Response> {
   try {
     // judge = จำลองกรณีที่ในกลุ่มไม่ได้แท็กบอท แล้วต้องให้โมเดลตัดสินเองว่าจะตอบหรือเงียบ
     // ข้อสอบตรวจได้ด้วยการดูว่าคำตอบขึ้นต้นด้วย SILENT หรือไม่
+    // รูปของข้อสอบดึงจากลิงก์ ใช้รูปงานจริงจาก Monday ได้ ไม่ต้องฝังไฟล์ไว้ในรีโป
+    let images: { data: string; media_type: string }[] = [];
+    // ส่งรูปมาเป็นก้อนตรง ๆ ก็ได้ ใช้กับรูปที่สร้างขึ้นเพื่อทดสอบซึ่งไม่มีที่อยู่บนเว็บ
+    if (image_base64) {
+      images = [{ data: String(image_base64), media_type: String(image_mime ?? "image/jpeg") }];
+    } else if (image_url) {
+      const r = await fetch(String(image_url));
+      if (!r.ok) return Response.json({ error: `ดึงรูปของข้อสอบไม่ได้ ${r.status}` }, { status: 400 });
+      const buf = new Uint8Array(await r.arrayBuffer());
+      images = [{ data: toBase64(buf), media_type: r.headers.get("content-type")?.split(";")[0] || "image/jpeg" }];
+    }
     const answer = await runAgent(message, ctx, chatId, {
+      images,
       toolLog, usageOut: usage, skipLatestMessage: false, purpose: "eval", spec: evalSpec,
       judgeAddressed: judge === "named" || judge === "follow_up" ? judge : null,
     });
