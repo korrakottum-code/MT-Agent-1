@@ -2,11 +2,13 @@
 
 > ความคืบหน้าตามแผนล่าสุด: [docs/PROGRESS.md](docs/PROGRESS.md) — อัปเดตทุกรอบที่มีงานเสร็จ
 
+> ทำงานต่อด้วยผู้ช่วย AI ตัวไหนก็ได้ อ่าน [AGENTS.md](AGENTS.md) ก่อน แล้วต่อที่ [docs/HANDOFF.md](docs/HANDOFF.md) หัวข้อ "ทำต่อจากตรงนี้"
+
 AI กลางขององค์กรที่อยู่ใน LINE Group: รู้ว่าใครพูด, สร้าง/ติดตามงาน, ค้นข้อความ, สรุปกลุ่ม และตอบคำถามเชิงข้อมูล
 
 ```text
 LINE Group → LINE OA → Webhook → Supabase Edge Function
-  → Identity + Permission → Agent (Claude + Tools) → Supabase Postgres
+  → Identity + Permission → Agent (Gemini + Tools) → Supabase Postgres
   → ตอบกลับ LINE
 ```
 
