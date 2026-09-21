@@ -421,5 +421,24 @@
       "create_reminder"
     ],
     "forbid_answer_matches": "ยังไม่สามารถตั้งเตือนวนซ้ำ|ระบบยังไม่รองรับการเตือนซ้ำ|ตั้งเตือนซ้ำอัตโนมัติไม่ได้"
+  },
+  {
+    "id": "hard-summarize-meeting-tool",
+    "dimension": "tools",
+    "why": "ขอสรุปประชุม ต้องไปดึงบทสนทนาจริงมาสรุป ไม่ใช่เขียนจากความจำ (ตั้มสั่งเมื่อ 21 ก.ย. ว่าอยากให้สรุปประชุมได้ และถ้าอะไรไม่ชัวร์ให้ถามก่อน)",
+    "as_user": "ตั้ม",
+    "in_group": "Ads Class Clinic",
+    "message": "แงว สรุปประชุมเมื่อกี้ให้หน่อย",
+    "expect_tools": [
+      "summarize_meeting"
+    ]
+  },
+  {
+    "id": "hard-google-connect-admin-only",
+    "dimension": "correct",
+    "why": "การเชื่อมบัญชี Google เข้ากับแงวเท่ากับให้สิทธิ์สร้างนัดในปฏิทินของบัญชีนั้น ต้องเป็น ADMIN เท่านั้น คนอื่นขอมาต้องปฏิเสธอย่างชัดเจน",
+    "as_user": "FA",
+    "message": "เชื่อมบัญชี Google ให้หน่อย อยากได้ลิงก์ Google Meet",
+    "expect_answer_matches": "ADMIN|แอดมิน|สิทธิ์|ผู้ดูแล"
   }
 ]

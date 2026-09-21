@@ -79,7 +79,7 @@ async function fetchLineProfile(userId: string, groupId: string | null): Promise
 
 // ---------------------------------------------------------------- ไฟล์และรูป
 
-const MAX_FILE_BYTES = 8 * 1024 * 1024; // 8MB — เผื่อ base64 บวม 1.33 เท่าแล้วยังไม่ชน 32MB ของ API
+const MAX_FILE_BYTES = 18 * 1024 * 1024; // 18MB — ไฟล์อัดประชุมหนักกว่าเอกสาร ยังไม่ชนเพดานของ API
 const MAX_TEXT_CHARS = 120_000;
 
 type FilePayload =
@@ -542,23 +542,35 @@ async function readLink(rawUrl: string): Promise<any> {
 // ถอดที่ขาเข้าแล้วเก็บข้อความลง messages เลย ของที่อยู่ปลายทางทั้งหมด
 // ทั้งการสรุปประจำวัน การค้นย้อนหลัง และการแยกงานกับโน้ต จึงได้ของฟรีโดยไม่ต้องแก้อะไร
 const AUDIO_TRANSCRIBE_MODEL = "gemini-flash";
-const MAX_AUDIO_BYTES = 12 * 1024 * 1024;
+const MAX_AUDIO_BYTES = 18 * 1024 * 1024;
 
 async function transcribeAudio(messageId: string): Promise<string | null> {
+  const got = await downloadLineContent(messageId);
+  if (!got) return null;
+  return await transcribeBuffer(got.buf, got.contentType, "m4a");
+}
+
+async function transcribeBuffer(
+  buf: Uint8Array,
+  contentType: string,
+  ext: string,
+): Promise<string | null> {
   const { spec } = resolveModel(AUDIO_TRANSCRIBE_MODEL);
   if (!spec || spec.provider !== "gemini") {
     console.error("ถอดเสียงต้องใช้ Gemini แต่ตอนนี้เรียกไม่ได้ ข้ามการถอดเสียง");
     return null;
   }
-  const got = await downloadLineContent(messageId);
-  if (!got) return null;
-  if (got.buf.length > MAX_AUDIO_BYTES) {
-    console.error(`ข้อความเสียงยาวเกิน ${MAX_AUDIO_BYTES} ไบต์ ข้ามการถอดเสียง`);
+  if (buf.length > MAX_AUDIO_BYTES) {
+    console.error(`ไฟล์เสียงใหญ่เกิน ${MAX_AUDIO_BYTES} ไบต์ ข้ามการถอดเสียง`);
     return null;
   }
   // LINE ส่ง m4a มา ซึ่งเป็น AAC ในกล่อง MP4 ค่ายโมเดลรู้จักในชื่อ audio/mp4
-  // ถ้า header ไม่ได้บอกชนิดมา ให้เดาเป็นอันนี้แทนที่จะยอมแพ้
-  const mime = (got.contentType || "").startsWith("audio/") ? got.contentType : "audio/mp4";
+  // ถ้า header ไม่ได้บอกชนิดมา ให้เดาจากนามสกุลแทนที่จะยอมแพ้
+  const guess: Record<string, string> = {
+    mp3: "audio/mpeg", wav: "audio/wav", aac: "audio/aac", ogg: "audio/ogg",
+    opus: "audio/ogg", m4a: "audio/mp4", mp4: "video/mp4", mov: "video/mp4",
+  };
+  const mime = /^(audio|video)\//.test(contentType || "") ? contentType : (guess[ext] ?? "audio/mp4");
   try {
     const res = await createMessage(spec, {
       max_tokens: 1024,
@@ -567,7 +579,7 @@ async function transcribeAudio(messageId: string): Promise<string | null> {
       messages: [{
         role: "user",
         content: [
-          { type: "document", source: { type: "base64", media_type: mime, data: toBase64(got.buf) } },
+          { type: "document", source: { type: "base64", media_type: mime, data: toBase64(buf) } },
           { type: "text", text: "ถอดเสียงนี้" },
         ],
       }],
@@ -611,6 +623,19 @@ async function extractFile(messageId: string, fileName: string): Promise<FilePay
   }
 
   if (ext === "pdf") return { kind: "pdf", name: fileName, data: toBase64(buf) };
+
+  // ไฟล์อัดประชุมส่งเข้ามาเป็นไฟล์ ไม่ใช่ข้อความเสียง ถอดให้เหมือนกันจะได้เอาไปสรุปต่อได้
+  if (["m4a", "mp3", "wav", "aac", "ogg", "opus", "mp4", "mov"].includes(ext)) {
+    const spoken = await transcribeBuffer(buf, got.contentType, ext);
+    if (!spoken) {
+      return {
+        kind: "unsupported",
+        name: fileName,
+        reason: "ถอดเสียงจากไฟล์นี้ไม่ได้ ไฟล์อาจยาวเกินหรือไม่มีเสียงพูด ลองตัดเฉพาะช่วงที่ต้องการแล้วส่งใหม่",
+      };
+    }
+    return { kind: "text", name: fileName, text: `ถอดเสียงจากไฟล์ "${fileName}":\n${spoken}` };
+  }
 
   if (["txt", "md", "csv", "tsv", "json", "log"].includes(ext)) {
     const text = new TextDecoder().decode(buf).slice(0, MAX_TEXT_CHARS);
@@ -1208,12 +1233,37 @@ const TOOLS = [
     input_schema: { type: "object", properties: {} },
   },
   {
+    name: "summarize_meeting",
+    description:
+      "สรุปการประชุมจากบทสนทนาในแชทช่วงเวลาที่ระบุ ใช้เมื่อมีคนบอกว่า 'สรุปประชุมให้หน่อย' 'ประชุมเมื่อกี้สรุปว่าอะไร' " +
+      "ถ้าคนส่งไฟล์อัดเสียงประชุมเข้ามา ไม่ต้องใช้เครื่องมือนี้ เพราะข้อความที่ถอดได้จะแนบมากับข้อความอยู่แล้ว " +
+      "เครื่องมือนี้คืนบทสนทนาดิบมาให้ ไม่ได้สรุปให้ ต้องสรุปเองตามรูปแบบในกฎข้อ 21 " +
+      "และต้องถามก่อนถ้ามีจุดที่ไม่ชัด ห้ามเดาแล้วสรุปไปเลย",
+    input_schema: {
+      type: "object",
+      properties: {
+        hours_back: { type: "integer", description: "ย้อนหลังกี่ชั่วโมง ค่าเริ่มต้น 3" },
+        group_name: { type: "string", description: "ชื่อกลุ่ม ไม่ระบุ = แชทนี้ (ข้ามกลุ่มต้อง MANAGER ขึ้นไป)" },
+      },
+    },
+  },
+  {
+    name: "google_connect_link",
+    description:
+      "ขอลิงก์สำหรับเชื่อมบัญชี Google เข้ากับแงว เพื่อให้สร้างลิงก์ Google Meet จริงได้ ใช้ได้เฉพาะ ADMIN " +
+      "ลิงก์จะถูกส่งเข้าแชทส่วนตัวของคนขอ ใช้ได้ครั้งเดียวภายใน 15 นาที " +
+      "ใช้เมื่อมีคนบอกว่า 'เชื่อม Google' 'ต่อ Google Meet' หรือเมื่อสร้างมีตแล้วระบบบอกว่ายังไม่ได้เชื่อมบัญชี",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
     name: "create_meeting",
     description:
       "สร้างห้องประชุมออนไลน์พร้อมลิงก์ ตั้งเวลา และตั้งเตือนให้คนที่เข้าร่วมโดยอัตโนมัติ " +
       "ใช้เมื่อมีคนบอกว่า 'นัดประชุม' 'เปิดห้องมีต' 'ขอลิงก์ประชุม' หรือ 'ประชุมบ่ายสองนะ' " +
       "ลิงก์เข้าได้เลยไม่ต้องล็อกอิน เปิดได้ทั้งมือถือและคอม " +
-      "ห้องนี้ไม่ใช่ Google Meet และไม่ใช่ Zoom ห้ามเรียกว่า Meet หรือ Zoom ให้เรียกว่า 'ห้องประชุมออนไลน์' เฉย ๆ " +
+      "ผลลัพธ์บอก kind มาด้วย ถ้าเป็น google_meet คือลิงก์ Google Meet จริงจากปฏิทินของบัญชีที่เชื่อมไว้ เรียกว่า Google Meet ได้ " +
+      "ถ้าเป็น jitsi คือห้องสำรอง ห้ามเรียกว่า Google Meet หรือ Zoom ให้เรียกว่าห้องประชุมออนไลน์ และบอกเหตุผลจาก google_not_used_because " +
+      "ถ้าเหตุผลคือยังไม่ได้เชื่อมบัญชี ให้บอกว่า ADMIN สั่ง 'เชื่อม Google' ได้เพื่อให้ได้ลิงก์ Google Meet จริง " +
       "ถ้าเป็นการนัดในกลุ่ม ทุกคนที่ระบุจะได้เตือนก่อนถึงเวลา 10 นาที และงานจะไปโผล่ในปฏิทินของแต่ละคนด้วย",
     input_schema: {
       type: "object",
@@ -2414,12 +2464,83 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       }
     }
 
+    case "summarize_meeting": {
+      const hours = Math.min(Math.max(input.hours_back ?? 3, 1), 24);
+      let chatId = ctx.lineGroupId ?? ctx.caller.line_user_id;
+      if (input.group_name) {
+        if (!canViewOthers(ctx.caller.role)) return { error: "สรุปประชุมของกลุ่มอื่นได้เฉพาะ MANAGER ขึ้นไป" };
+        const { data: g } = await supabase.from("groups").select("line_group_id")
+          .ilike("group_name", `%${input.group_name}%`).maybeSingle();
+        if (!g) return { error: `ไม่พบกลุ่มชื่อ "${input.group_name}"` };
+        chatId = g.line_group_id;
+      }
+      const since = new Date(Date.now() - hours * 3600_000).toISOString();
+      const { data: msgs } = await supabase.from("messages")
+        .select("line_user_id, message_text, created_at")
+        .eq("line_group_id", chatId).gte("created_at", since)
+        .order("created_at", { ascending: true }).limit(400);
+      const human = (msgs ?? []).filter((m: any) => m.line_user_id !== "bot");
+      if (human.length < 3) {
+        return { count: 0, note: `ย้อนหลัง ${hours} ชั่วโมงมีข้อความไม่ถึงสามอัน ไม่พอสรุป ถามว่าให้ย้อนไกลกว่านี้ไหม` };
+      }
+      const { data: roster } = await supabase.from("users").select("line_user_id, display_name");
+      const nameOf = new Map((roster ?? []).map((u: any) => [u.line_user_id, u.display_name]));
+      return {
+        hours_back: hours,
+        count: human.length,
+        people: [...new Set(human.map((m: any) => nameOf.get(m.line_user_id) ?? "ไม่ทราบชื่อ"))],
+        transcript: (msgs ?? []).map((m: any) =>
+          `${new Date(new Date(m.created_at).getTime() + 7 * 3600_000).toISOString().slice(11, 16)} ` +
+          `${m.line_user_id === "bot" ? "แงว" : nameOf.get(m.line_user_id) ?? "?"}: ` +
+          String(m.message_text ?? "").slice(0, 400)
+        ),
+        note: "สรุปตามรูปแบบในกฎข้อ 21 และถ้ามีจุดไหนไม่ชัด ให้ถามก่อน ห้ามเดา",
+      };
+    }
+
+    case "google_connect_link": {
+      if (ctx.caller.role !== "ADMIN") return { error: "เชื่อมบัญชี Google ได้เฉพาะ ADMIN" };
+      if (!googleClient()) {
+        return {
+          error: "ยังตั้งค่าไม่ครบ",
+          how_to: "ต้องใส่ GOOGLE_CLIENT_ID กับ GOOGLE_CLIENT_SECRET ใน Supabase หน้า Edge Functions แล้ว Secrets ก่อน แล้วค่อยขอลิงก์นี้ใหม่",
+        };
+      }
+      const token = crypto.randomUUID().replace(/-/g, "");
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+      const tokenHash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+      const { error } = await supabase.from("admin_sessions").insert({
+        user_id: ctx.caller.id,
+        kind: "GOOGLE",
+        token_hash: tokenHash,
+        expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
+      });
+      if (error) return { error: error.message };
+
+      const link = `${Deno.env.get("SUPABASE_URL")}/functions/v1/line-webhook/google/start/${token}`;
+      if (ctx.dryRun) return { sent_to_dm: true, dry_run: "โหมดข้อสอบ ไม่ได้ส่งจริง" };
+      const sent = await lineApi("/v2/bot/message/push", {
+        to: ctx.caller.line_user_id,
+        messages: [{
+          type: "text",
+          text: `ลิงก์เชื่อมบัญชี Google ค่ะ 🐾\n${link}\n\n` +
+            `กดแล้วเลือกบัญชีที่จะให้แงวใช้สร้างห้องประชุม ใช้ได้ครั้งเดียวภายใน 15 นาที\n` +
+            `อย่าส่งต่อให้ใครนะคะ ใครมีลิงก์ก็เชื่อมบัญชีตัวเองเข้ามาแทนได้`,
+        }],
+      });
+      if (!sent) {
+        return { error: "ส่งลิงก์ไม่สำเร็จ ต้องเพิ่ม MT agent 1 เป็นเพื่อนใน LINE ก่อน" };
+      }
+      return {
+        sent_to_dm: true,
+        note: "ส่งลิงก์เข้าแชทส่วนตัวให้แล้ว บอกสั้น ๆ ว่าส่งไปทางแชทส่วนตัว ห้ามพูดถึงตัวลิงก์",
+      };
+    }
+
     case "create_meeting": {
       // ห้องประชุมเปิดได้ทันทีโดยไม่ต้องให้ใครล็อกอินหรือขอสิทธิ์บัญชีใคร
       // Google Meet สร้างผ่าน API ไม่ได้ถ้าไม่มี OAuth ของ Google ซึ่งเจ้าของระบบต้องตั้งเอง
       // จึงใช้ห้องที่เปิดได้เลยแทน ผู้ใช้กดลิงก์แล้วเข้าประชุมได้เหมือนกัน
-      const slug = `mtagent-${crypto.randomUUID().slice(0, 8)}`;
-      const link = `https://meet.jit.si/${slug}`;
       const minutes = Math.min(Math.max(input.duration_minutes ?? 60, 15), 480);
 
       let startAt: Date | null = null;
@@ -2427,6 +2548,28 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
         startAt = new Date(input.start_at);
         if (isNaN(startAt.getTime())) return { error: "รูปแบบเวลาไม่ถูกต้อง ต้องเป็น ISO 8601" };
         if (startAt.getTime() < Date.now() - 60_000) return { error: "เวลาที่นัดเป็นอดีตไปแล้ว" };
+      }
+
+      // ทีมอยากได้ Google Meet จริง ถ้าเชื่อมบัญชีไว้แล้วก็สร้างผ่านปฏิทินของบัญชีนั้น
+      // ถ้ายังไม่ได้เชื่อม เปิดห้องสำรองให้ใช้ไปก่อน แต่ต้องบอกตรง ๆ ว่ายังไม่ใช่ Google Meet
+      let link = "";
+      let kind = "jitsi";
+      let calendarLink = "";
+      let googleProblem: string | null = null;
+      const meetStart = startAt ?? new Date(Date.now() + 60_000);
+      const g = await googleCreateMeet({
+        title: String(input.title ?? "ประชุม"),
+        start: meetStart,
+        minutes,
+        description: `สร้างโดยแงว ตามคำสั่งของ ${ctx.caller.display_name ?? "ทีม"}`,
+      });
+      if ("error" in g) {
+        googleProblem = g.error;
+        link = `https://meet.jit.si/mtagent-${crypto.randomUUID().slice(0, 8)}`;
+      } else {
+        link = g.link;
+        calendarLink = g.htmlLink;
+        kind = "google_meet";
       }
 
       // คนที่ต้องเข้าประชุม ถ้าไม่ระบุก็คือคนสั่งคนเดียว
@@ -2473,7 +2616,11 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
 
       return {
         meeting: {
-          title: input.title, link,
+          title: input.title,
+          link,
+          kind,
+          ...(calendarLink ? { calendar_link: calendarLink } : {}),
+          ...(googleProblem ? { google_not_used_because: googleProblem } : {}),
           start_at: startAt ? startAt.toISOString() : "เข้าได้เลยตอนนี้",
           duration_minutes: minutes,
           invited: inviteIds.map((p) => p.name),
@@ -3122,7 +3269,16 @@ const SYSTEM_RULES = `คุณคือ "แงว" (MT Agent) — AI น้อ
 20.2 หลายเรื่องในข้อความเดียว ให้เปิดงานแยกใบและตั้งเตือนแยกอันต่อเรื่อง จะได้ปิดทีละเรื่องได้
 20.3 ไม่ได้ระบุเวลา ให้ถามว่าจะให้เตือนกี่โมง อย่าเดาเวลาเอง
 20.3.1 ไม่ได้ระบุว่าใครรับผิดชอบ ให้เปิดงานไว้โดยไม่ระบุเจ้าของ แล้วบอกว่ายังไม่ได้ระบุเจ้าของ ห้ามเดาชื่อคนจากบริบท
-20.4 พอมีคนบอกว่าเรื่องไหนเสร็จแล้ว ให้ปิดงานนั้นด้วย update_task การเตือนซ้ำจะหยุดเอง แล้วบอกว่าหยุดให้แล้ว`;
+20.4 พอมีคนบอกว่าเรื่องไหนเสร็จแล้ว ให้ปิดงานนั้นด้วย update_task การเตือนซ้ำจะหยุดเอง แล้วบอกว่าหยุดให้แล้ว
+
+21. สรุปการประชุม
+21.1 สรุปเป็นสี่หัวข้อตามลำดับนี้เสมอ ใครอยู่ในวง / ตกลงอะไรกัน / งานที่ต้องทำ ใครทำ ภายในเมื่อไร / เรื่องที่ยังไม่จบ
+21.2 เขียนเฉพาะสิ่งที่พูดกันจริงในบทสนทนา ห้ามเติมเนื้อหาจากความเข้าใจของตัวเอง
+21.3 ก่อนสรุป ถ้ามีจุดไหนไม่ชัด ให้ถามก่อนแล้วรอคำตอบ ห้ามเดาแล้วสรุปไปเลย จุดที่ต้องถามเช่น
+     ตกลงกันจริงหรือแค่คุยค้างไว้ / งานนี้ใครรับ / กำหนดส่งวันไหน / ตัวเลขหรือราคาที่ได้ยินไม่ชัด / ชื่อคนหรือสาขาที่ไม่แน่ใจ
+21.4 ถามรวมทีเดียวเป็นข้อ ๆ ไม่เกินห้าข้อ แล้วบอกว่าตอบแล้วจะสรุปให้ทันที
+21.5 ถ้าทุกอย่างชัดอยู่แล้ว สรุปได้เลยไม่ต้องถาม
+21.6 สรุปเสร็จแล้วถามว่าจะให้เปิดเป็นงานในระบบไหม ห้ามเปิดงานเองโดยไม่ถาม`;
 
 // ส่วนที่เปลี่ยนทุกครั้ง (เวลา ผู้ใช้ กลุ่ม รายชื่อ) ต้องอยู่หลังจุด cache เสมอ
 function buildContext(ctx: Ctx, roster: any[], groups: any[], orgPersona: string | null, crossChat: string): string {
@@ -3915,6 +4071,190 @@ function icsStamp(d: Date): string {
   return d.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
 }
 
+// ---------------------------------------------------------------------------
+// ต่อกับ Google เพื่อสร้างลิงก์ Google Meet จริง
+//
+// ลิงก์ Meet สร้างได้ทางเดียวคือผ่าน Google Calendar API และต้องทำในนามคนที่ล็อกอินจริง
+// บัญชีบริการเปล่า ๆ สร้างไม่ได้ จึงให้เจ้าของกดยินยอมครั้งเดียว แล้วเก็บ refresh token ไว้ใช้ตลอด
+// ถ้ายังไม่ได้ต่อ แงวจะเปิดห้องสำรองให้แทน และบอกตรง ๆ ว่ายังไม่ใช่ Google Meet
+// ---------------------------------------------------------------------------
+const GOOGLE_SCOPE = "https://www.googleapis.com/auth/calendar.events";
+
+function googleClient(): { id: string; secret: string } | null {
+  const id = (Deno.env.get("GOOGLE_CLIENT_ID") ?? "").trim();
+  const secret = (Deno.env.get("GOOGLE_CLIENT_SECRET") ?? "").trim();
+  return id && secret ? { id, secret } : null;
+}
+
+function googleRedirectUri(): string {
+  return `${Deno.env.get("SUPABASE_URL")}/functions/v1/line-webhook/google/callback`;
+}
+
+// แลก refresh token เป็น access token ชั่วคราว เก็บไว้ในหน่วยความจำของเครื่องที่รันอยู่จนกว่าจะหมดอายุ
+let googleAccess: { token: string; until: number } | null = null;
+
+async function googleAccessToken(): Promise<{ token: string; email: string | null } | { error: string }> {
+  const client = googleClient();
+  if (!client) {
+    return { error: "ยังไม่ได้ตั้ง GOOGLE_CLIENT_ID กับ GOOGLE_CLIENT_SECRET ใน Secrets" };
+  }
+  const { data: acc } = await supabase.from("google_accounts")
+    .select("email, refresh_token")
+    .order("is_default", { ascending: false })
+    .order("updated_at", { ascending: false })
+    .limit(1).maybeSingle();
+  if (!acc?.refresh_token) return { error: "ยังไม่มีใครกดเชื่อมบัญชี Google" };
+
+  if (googleAccess && Date.now() < googleAccess.until) {
+    return { token: googleAccess.token, email: acc.email ?? null };
+  }
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: client.id,
+      client_secret: client.secret,
+      refresh_token: acc.refresh_token,
+      grant_type: "refresh_token",
+    }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || !body.access_token) {
+    console.error("ขอ access token จาก Google ไม่สำเร็จ", res.status, JSON.stringify(body).slice(0, 300));
+    return { error: "กุญแจ Google ใช้ไม่ได้แล้ว ต้องกดเชื่อมบัญชีใหม่" };
+  }
+  googleAccess = {
+    token: body.access_token,
+    until: Date.now() + Math.max(60, (body.expires_in ?? 3600) - 120) * 1000,
+  };
+  return { token: body.access_token, email: acc.email ?? null };
+}
+
+// สร้างนัดในปฏิทินของบัญชีที่ต่อไว้ พร้อมขอห้อง Meet ให้อัตโนมัติ
+async function googleCreateMeet(opts: {
+  title: string;
+  start: Date;
+  minutes: number;
+  description?: string;
+}): Promise<{ link: string; htmlLink: string; organizer: string | null } | { error: string }> {
+  const auth = await googleAccessToken();
+  if ("error" in auth) return auth;
+  const end = new Date(opts.start.getTime() + opts.minutes * 60_000);
+  const res = await fetch(
+    "https://www.googleapis.com/calendar/v3/calendars/primary/events?conferenceDataVersion=1&sendUpdates=none",
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${auth.token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        summary: opts.title,
+        description: opts.description ?? "สร้างโดยแงว",
+        start: { dateTime: opts.start.toISOString(), timeZone: "Asia/Bangkok" },
+        end: { dateTime: end.toISOString(), timeZone: "Asia/Bangkok" },
+        conferenceData: {
+          createRequest: {
+            requestId: crypto.randomUUID(),
+            conferenceSolutionKey: { type: "hangoutsMeet" },
+          },
+        },
+      }),
+    },
+  );
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    console.error("สร้างนัดใน Google ไม่สำเร็จ", res.status, JSON.stringify(body).slice(0, 300));
+    return { error: `Google ปฏิเสธคำขอ (${res.status})` };
+  }
+  const link = body.hangoutLink ??
+    (body.conferenceData?.entryPoints ?? []).find((e: any) => e.entryPointType === "video")?.uri;
+  if (!link) return { error: "Google สร้างนัดให้แล้วแต่ไม่ได้แนบห้อง Meet มา" };
+  return { link, htmlLink: body.htmlLink ?? "", organizer: auth.email };
+}
+
+// หน้าเว็บสำหรับกดเชื่อมบัญชี เข้าได้ด้วยลิงก์ครั้งเดียวที่ ADMIN ขอจากแงวเท่านั้น
+async function serveGoogleStart(token: string): Promise<Response> {
+  const client = googleClient();
+  if (!client) return new Response("ยังไม่ได้ตั้งค่า GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET", { status: 400 });
+
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+  const hash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const { data: sess } = await supabase.from("admin_sessions")
+    .select("id, user_id, expires_at, used_at, revoked_at")
+    .eq("token_hash", hash).eq("kind", "GOOGLE").maybeSingle();
+  if (!sess || sess.used_at || sess.revoked_at || new Date(sess.expires_at) < new Date()) {
+    return new Response("ลิงก์นี้ใช้ไม่ได้แล้ว ขอลิงก์ใหม่จากแงว", { status: 403 });
+  }
+
+  const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+  url.searchParams.set("client_id", client.id);
+  url.searchParams.set("redirect_uri", googleRedirectUri());
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("scope", GOOGLE_SCOPE);
+  url.searchParams.set("access_type", "offline");
+  url.searchParams.set("prompt", "consent");
+  url.searchParams.set("state", token);
+  return Response.redirect(url.toString(), 302);
+}
+
+async function serveGoogleCallback(reqUrl: URL): Promise<Response> {
+  const client = googleClient();
+  const code = reqUrl.searchParams.get("code");
+  const state = reqUrl.searchParams.get("state") ?? "";
+  if (!client || !code) return new Response("คำขอไม่ครบ", { status: 400 });
+
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(state));
+  const hash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const { data: sess } = await supabase.from("admin_sessions")
+    .select("id, user_id, expires_at, used_at, revoked_at")
+    .eq("token_hash", hash).eq("kind", "GOOGLE").maybeSingle();
+  if (!sess || sess.used_at || sess.revoked_at || new Date(sess.expires_at) < new Date()) {
+    return new Response("ลิงก์นี้ใช้ไม่ได้แล้ว ขอลิงก์ใหม่จากแงว", { status: 403 });
+  }
+
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: client.id,
+      client_secret: client.secret,
+      code,
+      grant_type: "authorization_code",
+      redirect_uri: googleRedirectUri(),
+    }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || !body.refresh_token) {
+    console.error("แลกกุญแจกับ Google ไม่สำเร็จ", res.status, JSON.stringify(body).slice(0, 300));
+    return new Response("เชื่อมบัญชีไม่สำเร็จ ลองใหม่อีกครั้ง", { status: 400 });
+  }
+
+  // ถามอีเมลของบัญชีที่เพิ่งเชื่อม ไว้บอกในแชทว่าใช้บัญชีไหนอยู่
+  let email: string | null = null;
+  try {
+    const me = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
+      headers: { Authorization: `Bearer ${body.access_token}` },
+    });
+    if (me.ok) email = (await me.json()).email ?? null;
+  } catch (_e) { /* ไม่รู้อีเมลก็ยังใช้งานได้ */ }
+
+  await supabase.from("google_accounts").upsert({
+    email,
+    refresh_token: body.refresh_token,
+    scope: body.scope ?? GOOGLE_SCOPE,
+    connected_by_user_id: sess.user_id,
+    is_default: true,
+    updated_at: new Date().toISOString(),
+  }, { onConflict: "email" });
+  await supabase.from("admin_sessions").update({ used_at: new Date().toISOString() }).eq("id", sess.id);
+  googleAccess = null;
+
+  return new Response(
+    `<meta charset="utf-8"><h2>เชื่อมบัญชี Google เรียบร้อย</h2>` +
+      `<p>บัญชี: ${email ?? "(ไม่ทราบอีเมล)"}</p>` +
+      `<p>ปิดหน้านี้ได้เลย ต่อไปสั่งแงวนัดประชุมจะได้ลิงก์ Google Meet จริง</p>`,
+    { headers: { "Content-Type": "text/html; charset=utf-8" } },
+  );
+}
+
 async function serveCalendar(token: string): Promise<Response> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
   const hash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -3977,6 +4317,9 @@ Deno.serve(async (req: Request) => {
   const path = new URL(req.url).pathname;
   const cal = path.match(/\/calendar\/([A-Za-z0-9]+)\.ics$/);
   if (cal) return await serveCalendar(cal[1]);
+  const gStart = path.match(/\/google\/start\/([A-Za-z0-9]+)$/);
+  if (gStart) return await serveGoogleStart(gStart[1]);
+  if (path.endsWith("/google/callback")) return await serveGoogleCallback(new URL(req.url));
 
   if (req.method !== "POST") return new Response("MT Agent 1 webhook is alive");
 
