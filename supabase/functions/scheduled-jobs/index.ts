@@ -601,24 +601,75 @@ async function extractEvents() {
 
 // ---------------------------------------------------------------- due reminders (ทุกนาที)
 
+// รอบถัดไปของการเตือนซ้ำ คิดจากเวลาเดิมของวันถัดไป ไม่ใช่จากเวลาที่ส่งจริง
+// ถ้าคิดจากเวลาส่ง เวลาเตือนจะคืบไปเรื่อย ๆ วันละไม่กี่วินาที สุดท้ายเพี้ยนไปเป็นชั่วโมง
+function nextOccurrence(from: Date, rule: string): Date | null {
+  const next = new Date(from.getTime());
+  const bump = (days: number) => next.setUTCDate(next.getUTCDate() + days);
+  if (rule === "daily") bump(1);
+  else if (rule === "weekly") bump(7);
+  else if (rule === "weekdays") {
+    bump(1);
+    // วันในสัปดาห์คิดตามเวลาไทย เพราะคนอ่านเตือนอยู่ที่ไทย
+    while ([0, 6].includes(new Date(next.getTime() + 7 * 3600_000).getUTCDay())) bump(1);
+  } else return null;
+  // ถ้าเครื่องหยุดไปหลายวัน อย่ายิงย้อนหลังรัว ๆ ให้ข้ามมาที่รอบถัดไปที่ยังไม่ถึง
+  while (next.getTime() <= Date.now()) {
+    const after = nextOccurrence(next, rule);
+    if (!after) return next;
+    next.setTime(after.getTime());
+  }
+  return next;
+}
+
 async function dueReminders() {
   const { data: due } = await supabase.from("reminders")
-    .select("id, chat_id, message")
+    .select("id, chat_id, message, repeat_rule, repeat_count, repeat_until, remind_at, task_id")
     .eq("status", "PENDING")
     .lte("remind_at", new Date().toISOString())
     .order("remind_at", { ascending: true })
     .limit(50);
   if (!due || due.length === 0) return;
 
+  let sent = 0, repeated = 0, stopped = 0;
   for (const r of due) {
+    // งานที่ผูกไว้ปิดแล้ว ไม่ต้องเตือนอีก นี่คือความหมายของ "จนกว่าจะบอกว่าเสร็จ"
+    let taskDone = false;
+    if (r.task_id) {
+      const { data: t } = await supabase.from("tasks").select("status").eq("id", r.task_id).maybeSingle();
+      taskDone = ["DONE", "CANCELLED"].includes(String(t?.status ?? ""));
+    }
+    if (taskDone) {
+      // ตารางนี้อนุญาตสถานะแค่ PENDING SENT CANCELLED เคยเขียน DONE ลงไปแล้วมันเงียบ ๆ ไม่ผ่าน
+      // เพราะไม่ได้เช็ค error ตอนนี้เช็คแล้วและเขียนค่าที่ตารางรับจริง
+      const { error } = await supabase.from("reminders")
+        .update({ status: "CANCELLED" }).eq("id", r.id);
+      if (error) console.error("หยุดเตือนซ้ำไม่สำเร็จ", r.id, error.message);
+      else stopped++;
+      continue;
+    }
+
     await pushToGroup(r.chat_id, `⏰ ${r.message}`);
-    await supabase.from("reminders")
-      .update({ status: "SENT", sent_at: new Date().toISOString() })
-      .eq("id", r.id);
+    sent++;
+
+    const next = r.repeat_rule ? nextOccurrence(new Date(r.remind_at), String(r.repeat_rule)) : null;
+    const pastEnd = r.repeat_until && next && next.getTime() > new Date(r.repeat_until).getTime();
+    if (next && !pastEnd) {
+      await supabase.from("reminders").update({
+        remind_at: next.toISOString(),
+        sent_at: new Date().toISOString(),
+        repeat_count: (r.repeat_count ?? 0) + 1,
+      }).eq("id", r.id);
+      repeated++;
+    } else {
+      await supabase.from("reminders")
+        .update({ status: "SENT", sent_at: new Date().toISOString() })
+        .eq("id", r.id);
+    }
   }
   await supabase.from("audit_logs").insert({
     action: "scheduled_job", tool_name: "due_reminders",
-    input: {}, result: { sent: due.length }, status: "OK",
+    input: {}, result: { sent, repeated, stopped_because_task_done: stopped }, status: "OK",
   });
 }
 

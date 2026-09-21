@@ -1265,13 +1265,24 @@ const TOOLS = [
     name: "create_reminder",
     description:
       "ตั้งเตือนตามเวลา เช่น 'เตือนอีก 2 นาที' หรือ 'พรุ่งนี้เตือนแพรวส่งภาพก่อนเที่ยง' " +
-      "การเตือนจะถูกส่งเข้าแชทที่สั่ง ระบุ to_name ถ้าเตือนคนอื่น (จะแท็กชื่อในข้อความ)",
+      "การเตือนจะถูกส่งเข้าแชทที่สั่ง ระบุ to_name ถ้าเตือนคนอื่น (จะแท็กชื่อในข้อความ) " +
+      "เตือนซ้ำได้ด้วย repeat และผูกกับงานด้วย until_task_done เพื่อให้หยุดเองเมื่อปิดงาน " +
+      "เวลามีคนบอกว่า 'ถามทุกวันจนกว่าจะเสร็จ' ให้เปิดงานก่อนด้วย create_task แล้วตั้งเตือนซ้ำผูกกับงานนั้น",
     input_schema: {
       type: "object",
       properties: {
         message: { type: "string", description: "ข้อความที่จะเตือน" },
-        remind_at: { type: "string", description: "เวลาเตือน ISO 8601 +07:00 เช่น 2026-09-02T12:00:00+07:00" },
+        remind_at: { type: "string", description: "เวลาเตือนครั้งแรก ISO 8601 +07:00 เช่น 2026-09-02T12:00:00+07:00" },
         to_name: { type: "string", description: "ชื่อเล่นคนที่ถูกเตือน ไม่ระบุ = ตัวเอง" },
+        repeat: {
+          type: "string",
+          enum: ["daily", "weekdays", "weekly"],
+          description: "เตือนซ้ำทุกวัน ทุกวันทำงาน หรือทุกสัปดาห์ ไม่ใส่ = เตือนครั้งเดียว",
+        },
+        until_task_done: {
+          type: "string",
+          description: "ชื่องานที่ผูกไว้ พอปิดงานนั้นการเตือนซ้ำจะหยุดเอง ใช้คู่กับ repeat ทุกครั้งที่มีคนบอกว่าให้เตือนจนกว่าจะเสร็จ",
+        },
       },
       required: ["message", "remind_at"],
     },
@@ -1698,7 +1709,21 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       const { data, error } = await supabase.from("tasks").update(patch)
         .eq("id", task.id).select("id, title, status, due_at").single();
       if (error) return { error: error.message };
-      return { updated: data };
+
+      // ปิดงานแล้วต้องหยุดเตือนซ้ำที่ผูกไว้ทันที ไม่ต้องรอรอบถัดไป
+      // ไม่งั้นรายการเตือนจะยังโชว์ว่ารออยู่ ทั้งที่งานจบแล้ว
+      let stoppedReminders = 0;
+      if (["DONE", "CANCELLED"].includes(String(data.status))) {
+        const { data: off, error: offErr } = await supabase.from("reminders")
+          .update({ status: "CANCELLED" })
+          .eq("task_id", task.id).eq("status", "PENDING").select("id");
+        if (offErr) console.error("หยุดเตือนซ้ำไม่สำเร็จ", offErr.message);
+        stoppedReminders = (off ?? []).length;
+      }
+      return {
+        updated: data,
+        ...(stoppedReminders ? { stopped_repeating_reminders: stoppedReminders } : {}),
+      };
     }
 
     case "search_messages": {
@@ -2614,20 +2639,46 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
         };
       }
 
+      // เตือนซ้ำ ผูกกับงานได้ พอปิดงานแล้วหยุดเตือนเอง
+      const rule = ["daily", "weekdays", "weekly"].includes(String(input.repeat ?? ""))
+        ? String(input.repeat)
+        : null;
+      let linkedTask: { id: string; title: string } | null = null;
+      if (input.until_task_done) {
+        const t = await resolveOneTask(ctx, undefined, String(input.until_task_done));
+        if ("error" in t) return { error: `งานที่จะผูกกับการเตือน: ${t.error}` };
+        linkedTask = t;
+      }
+      // กันเตือนวนไม่รู้จบถ้าไม่มีใครปิดงาน หยุดเองใน 60 วัน
+      const until = rule ? new Date(when.getTime() + 60 * 24 * 3600_000).toISOString() : null;
+
       const { data, error } = await supabase.from("reminders").insert({
         target_user_id: targetId,
         chat_id: reminderChatId,
         message: fullMessage,
         remind_at: when.toISOString(),
         created_by_user_id: ctx.caller.id,
+        repeat_rule: rule,
+        task_id: linkedTask?.id ?? null,
+        repeat_until: until,
       }).select("id, message, remind_at").single();
       if (error) return { error: error.message };
-      return { reminder_set: data };
+      return {
+        reminder_set: data,
+        repeat: rule,
+        stops_when_done: linkedTask?.title ?? null,
+        note: rule
+          ? `เตือนซ้ำแบบ ${rule} ตั้งแล้ว` +
+            (linkedTask
+              ? ` จะหยุดเองเมื่อปิดงาน "${linkedTask.title}" บอกคนสั่งด้วยว่าให้พิมพ์บอกเมื่อเสร็จ`
+              : " ไม่ได้ผูกกับงานไหน จะเตือนไปจนกว่าจะสั่งยกเลิก หรือครบ 60 วัน บอกคนสั่งตามนี้")
+          : undefined,
+      };
     }
 
     case "list_reminders": {
       const { data, error } = await supabase.from("reminders")
-        .select("id, message, remind_at")
+        .select("id, message, remind_at, repeat_rule, repeat_count")
         .eq("chat_id", ctx.lineGroupId ?? ctx.caller.line_user_id)
         .eq("status", "PENDING")
         .order("remind_at", { ascending: true }).limit(20);
@@ -3044,7 +3095,15 @@ const SYSTEM_RULES = `คุณคือ "แงว" (MT Agent) — AI น้อ
 
 19. รวมตัวเลขเงิน
 19.1 ถ้ามีรายการที่ยอดเท่ากันเป๊ะตั้งแต่สองบรรทัดขึ้นไป ให้บวกตามที่ส่งมา แต่ทักว่ายอดเท่ากันถึงสตางค์ อาจเป็นรายการซ้ำ แล้วบอกยอดรวมทั้งสองแบบ คือรวมทั้งหมด กับรวมแบบตัดตัวซ้ำออก ให้คนส่งยืนยัน
-19.2 ห้ามตัดตัวที่สงสัยว่าซ้ำออกเองโดยไม่บอก`;
+19.2 ห้ามตัดตัวที่สงสัยว่าซ้ำออกเองโดยไม่บอก
+
+20. เตือนซ้ำจนกว่าจะเสร็จ
+20.1 มีคนบอกว่า "ถามทุกวันจนกว่าจะบอกว่าเสร็จ" "ตามให้หน่อยทุกวัน" "เตือนจนกว่าจะทำ" ให้ทำสองอย่างคู่กัน
+     เปิดงานด้วย create_task ก่อน แล้วตั้ง create_reminder โดยใส่ repeat กับ until_task_done เป็นชื่องานนั้น
+20.2 หลายเรื่องในข้อความเดียว ให้เปิดงานแยกใบและตั้งเตือนแยกอันต่อเรื่อง จะได้ปิดทีละเรื่องได้
+20.3 ไม่ได้ระบุเวลา ให้ถามว่าจะให้เตือนกี่โมง อย่าเดาเวลาเอง
+20.3.1 ไม่ได้ระบุว่าใครรับผิดชอบ ให้เปิดงานไว้โดยไม่ระบุเจ้าของ แล้วบอกว่ายังไม่ได้ระบุเจ้าของ ห้ามเดาชื่อคนจากบริบท
+20.4 พอมีคนบอกว่าเรื่องไหนเสร็จแล้ว ให้ปิดงานนั้นด้วย update_task การเตือนซ้ำจะหยุดเอง แล้วบอกว่าหยุดให้แล้ว`;
 
 // ส่วนที่เปลี่ยนทุกครั้ง (เวลา ผู้ใช้ กลุ่ม รายชื่อ) ต้องอยู่หลังจุด cache เสมอ
 function buildContext(ctx: Ctx, roster: any[], groups: any[], orgPersona: string | null, crossChat: string): string {
