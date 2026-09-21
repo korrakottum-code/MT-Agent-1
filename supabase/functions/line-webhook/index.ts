@@ -1546,8 +1546,27 @@ const WRITE_TOOLS = new Set([
   "monday_create_item",
 ]);
 
+// ด่านตรวจสิทธิ์ที่ต้องทำงานแม้ในโหมดข้อสอบ
+//
+// เดิมโหมดข้อสอบตัดหัวเครื่องมือที่เขียนข้อมูลตั้งแต่ต้นทาง ด่านตรวจสิทธิ์ที่อยู่ในตัวเครื่องมือจึงไม่ได้ทำงานเลย
+// ผลคือข้อสอบเรื่อง "กลุ่มนี้ห้ามแตะ Monday" คืนค่าว่า ok แล้วแงวก็รายงานว่าเปลี่ยนสถานะให้แล้ว
+// ทั้งที่ของจริงจะถูกปฏิเสธ ข้อสอบจึงวัดสิ่งที่ตรงข้ามกับความจริง
+const ADMIN_ONLY_TOOLS = new Set([
+  "manage_user", "register_user", "link_user", "set_user_active", "rename_group", "create_admin_link",
+]);
+
+function dryRunGuard(name: string, ctx: Ctx): string | null {
+  if (name.startsWith("monday_")) return mondayAllowedHere(ctx);
+  if (ADMIN_ONLY_TOOLS.has(name) && ctx.caller.role !== "ADMIN") {
+    return "ทำรายการนี้ได้เฉพาะ ADMIN";
+  }
+  return null;
+}
+
 async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
   if (ctx.dryRun && WRITE_TOOLS.has(name)) {
+    const denied = dryRunGuard(name, ctx);
+    if (denied) return { error: denied };
     return { ok: true, dry_run: "โหมดข้อสอบ ไม่ได้บันทึกจริง", tool: name, input };
   }
   switch (name) {
