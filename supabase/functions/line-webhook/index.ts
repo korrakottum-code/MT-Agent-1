@@ -1287,6 +1287,8 @@ const TOOLS = [
       "ผลลัพธ์บอก kind มาด้วย ถ้าเป็น google_meet คือลิงก์ Google Meet จริงจากปฏิทินของบัญชีที่เชื่อมไว้ เรียกว่า Google Meet ได้ " +
       "ถ้าเป็น jitsi คือห้องสำรอง ห้ามเรียกว่า Google Meet หรือ Zoom ให้เรียกว่าห้องประชุมออนไลน์ และบอกเหตุผลจาก google_not_used_because " +
       "ถ้าเหตุผลคือยังไม่ได้เชื่อมบัญชี ให้บอกว่า ADMIN สั่ง 'เชื่อม Google' ได้เพื่อให้ได้ลิงก์ Google Meet จริง " +
+      "บัญชี Google ที่เชื่อมไว้เป็นบัญชีฟรี ไม่ใช่ Google Workspace ถ้าผลลัพธ์มี free_account_call_limit มาด้วย " +
+      "ต้องเตือนในคำตอบเสมอว่าสายจะถูกตัดที่ 60 นาทีถ้ามีคนร่วมตั้งแต่ 3 คนขึ้นไป ห้ามพูดว่าประชุมได้ยาวเท่าที่ตั้งไว้โดยไม่เตือน " +
       "ถ้าเป็นการนัดในกลุ่ม ทุกคนที่ระบุจะได้เตือนก่อนถึงเวลา 10 นาที และงานจะไปโผล่ในปฏิทินของแต่ละคนด้วย",
     input_schema: {
       type: "object",
@@ -2808,6 +2810,11 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
         priority: "NORMAL",
       });
 
+      // บัญชีที่เชื่อมไว้เป็น Gmail ฟรี ไม่ใช่ Google Workspace
+      // Google Meet ของบัญชีฟรีจำกัดสายที่มีคนตั้งแต่ 3 คนขึ้นไปไว้ที่ 60 นาที ไม่ว่าจะตั้ง duration_minutes ในปฏิทินไว้ยาวแค่ไหน
+      // ข้อจำกัดนี้ผูกกับบัญชีเจ้าของห้อง ไม่ใช่ตัวนัดหมาย คุยกันแค่ 2 คนไม่ติดข้อจำกัดนี้
+      const meetCapRisk = kind === "google_meet" && (minutes > 60 || inviteIds.length >= 3);
+
       return {
         meeting: {
           title: input.title,
@@ -2819,8 +2826,16 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
           duration_minutes: minutes,
           invited: inviteIds.map((p) => p.name),
           reminded_10_min_before: reminded,
+          ...(meetCapRisk
+            ? {
+              free_account_call_limit:
+                "บัญชี Google ที่เชื่อมไว้เป็นบัญชีฟรี ถ้ามีคนเข้าห้องตั้งแต่ 3 คนขึ้นไป สายจะถูกตัดที่ 60 นาที " +
+                "ไม่ว่านัดหมายจะตั้งไว้ยาวแค่ไหน มีเสียงเตือนที่นาทีที่ 50 กดลิงก์เดิมเข้าใหม่ได้อีกรอบ 60 นาที",
+            }
+            : {}),
         },
-        note: "ลิงก์นี้เข้าได้เลยไม่ต้องล็อกอิน บอกลิงก์กับเวลาให้ครบในคำตอบ",
+        note: "ลิงก์นี้เข้าได้เลยไม่ต้องล็อกอิน บอกลิงก์กับเวลาให้ครบในคำตอบ " +
+          "ถ้ามี free_account_call_limit มาด้วย ต้องบอกข้อจำกัดนี้ในคำตอบด้วยเสมอ ห้ามบอกว่านัดได้ยาวตามที่สั่งโดยไม่เตือน",
       };
     }
 
@@ -4168,7 +4183,10 @@ function isBareName(text: string): boolean {
 
 // โหมดซ้อม: เดินโค้ดเส้นเดียวกับของจริงทุกบรรทัด แต่ไม่เรียกโมเดลและไม่แตะ LINE
 // มีไว้ตอบคำถามเดียวว่า ส่งมา N บอลลูน แงวจะตอบกี่ครั้ง ซึ่งเป็นสิ่งที่นั่งอ่านโค้ดแล้วเถียงกันเองไม่จบ
-type Sim = { answered: string[]; seenAtAnswer: number[] };
+type Sim = {
+  answered: string[]; seenAtAnswer: number[];
+  capture_answer?: boolean; captured_question?: string; captured_answer?: string;
+};
 
 async function handleEvent(event: any, sim?: Sim) {
   if (event.type !== "message") return;
@@ -4382,7 +4400,16 @@ async function handleEvent(event: any, sim?: Sim) {
       : "ผู้ใช้ส่งรูปภาพนี้มา ช่วยดูรูปและตอบตามบริบทของบทสนทนา")
     : msgType === "file"
     ? `ผู้ใช้ส่งไฟล์ "${fileName}" มา อ่านเนื้อหาแล้วสรุปสั้น ๆ ว่าไฟล์นี้เกี่ยวกับอะไร มีงานหรือกำหนดส่งอะไรที่ควรบันทึกเข้าระบบบ้าง แล้วถามว่าให้สร้างงานให้เลยไหม (อย่าเพิ่งสร้างเองจนกว่าจะยืนยัน)`
-    : text.replace(/@\s?(ai|mt\s?agent\s?1?)/i, "").trim() || "สวัสดี";
+    : (() => {
+      const stripped = text.replace(/@\s?(ai|mt\s?agent\s?1?)/i, "").trim();
+      if (stripped) return stripped;
+      // แท็กเฉย ๆ ไม่มีข้อความอื่นเลย เดิมส่งคำว่า "สวัสดี" ตรง ๆ ให้โมเดล
+      // ซึ่งทำให้ทักทายเฉย ๆ แม้ว่าจริง ๆ คนแท็กเพราะข้อความก่อนหน้าเงียบไปไม่มีใครตอบ (เคสจริง 21 ก.ย.
+      // ทองฝากเตือนงาน ไม่มีใครตอบ ต่อมาแท็กเฉย ๆ แล้วแงวทักทายกลับ ไม่ได้พูดถึงเรื่องที่ฝากไว้เลย)
+      // ให้โมเดลเช็คประวัติแชทก่อนว่ามีเรื่องค้างไหม ถ้าไม่มีค่อยทักทายตามปกติ
+      return "(แท็กชื่อแงวเฉย ๆ ไม่มีข้อความอื่น) เช็คประวัติแชทด้านบนก่อนว่ามีคำถามหรือคำขอที่เพิ่งพูดไปแล้วยังไม่มีใครตอบไหม " +
+        "ถ้ามี ให้ตอบเรื่องนั้นเลย ไม่ใช่แค่ทักทาย ถ้าไม่มีอะไรค้างจริง ๆ ค่อยทักทายตามปกติ";
+    })();
   const replyTo = lineGroupId ?? lineUserId;
   const judgeAddressed: "named" | "follow_up" | null =
     !lineGroupId || tagged ? null : named ? "named" : followUp ? "follow_up" : null;
@@ -4399,6 +4426,20 @@ async function handleEvent(event: any, sim?: Sim) {
       .eq("line_group_id", chatId)
       .eq("line_user_id", lineUserId);
     sim.seenAtAnswer.push(count ?? 0);
+    // ปกติซ้อมจบแค่ตัดสินใจว่าจะตอบไหม ไม่เรียกโมเดล เพราะการซ้อมส่วนใหญ่วัดแค่การตัดสินใจตอบ/เงียบ
+    // แต่บาง bug อยู่ในขั้นตอนสร้างคำถามที่จะส่งให้โมเดล (เช่น แท็กเปล่า ๆ ถูกแปลงเป็นคำไหน) ต้องเห็นคำตอบจริงถึงจะยืนยันได้
+    // ธงนี้ให้ทำต่อจนเรียกโมเดลจริง (ctx.dryRun กันการเขียนข้อมูลอยู่แล้ว) แต่ข้ามการส่งเข้า LINE จริงและการบันทึกคำตอบ
+    if (sim.capture_answer) {
+      const asked = quoted && msgType === "text"
+        ? `(ตอบกลับข้อความของ ${quoted.who}: "${quoted.text}")\n${question}`
+        : question;
+      try {
+        sim.captured_question = asked;
+        sim.captured_answer = await runAgent(asked, ctx, chatId, { images, file, judgeAddressed });
+      } catch (e) {
+        sim.captured_answer = `[ERROR] ${String(e)}`;
+      }
+    }
     return;
   }
 
@@ -4444,15 +4485,17 @@ async function runBurstSim(sim: any): Promise<Response> {
   }
 
   // จำลองว่าแงวเพิ่งตอบไปในแชทนี้ ใช้ทดสอบว่าคนส่งรูปแล้วพิมพ์ตามโดยไม่เรียกชื่อ แงวยังรู้ว่ากำลังคุยต่อ
+  // ให้ id จริงไว้ด้วย ไม่ใช่ null เพราะการทดสอบ "ตอบกลับข้อความของแงว" ต้องมี line_message_id ให้ชี้ถึง
+  const priorBotId = `SIMBOT-${tag}`;
   if (sim.prior_bot) {
     await supabase.from("messages").insert({
-      line_message_id: null, line_user_id: "bot", line_group_id: chatId,
+      line_message_id: priorBotId, line_user_id: "bot", line_group_id: chatId,
       message_text: "ข้อความก่อนหน้าของแงวในการซ้อม", message_type: "bot",
     });
     await new Promise((r) => setTimeout(r, 300));
   }
 
-  const collected: Sim = { answered: [], seenAtAnswer: [] };
+  const collected: Sim = { answered: [], seenAtAnswer: [], capture_answer: Boolean(sim.capture_answer) };
   const ids: string[] = [];
   const runs: Promise<void>[] = [];
   for (let i = 0; i < bubbles.length; i++) {
@@ -4461,9 +4504,14 @@ async function runBurstSim(sim: any): Promise<Response> {
     ids.push(id);
     // บอลลูนที่ใส่ from: "other" มาจากอีกคนในกลุ่ม ใช้ทดสอบว่ามีคนพูดแทรกแล้วแงวไม่ตอบผิดคน
     const who = b.from === "other" ? `SIMOTHER-${tag}` : lineUserId;
+    // ให้บอลลูนอ้างอิงข้อความก่อนหน้าของแงวได้ ใช้ทดสอบว่าตอบกลับข้อความแงวนับเป็นการเรียกแงว ไม่ต้องแท็กซ้ำ
+    const quotedMessageId: string | undefined = b.quote_prior_bot ? priorBotId : undefined;
     const event = {
       type: "message",
-      message: { id, type: String(b.type ?? "text"), text: String(b.text ?? "") },
+      message: {
+        id, type: String(b.type ?? "text"), text: String(b.text ?? ""),
+        ...(quotedMessageId ? { quotedMessageId } : {}),
+      },
       source: inGroup ? { userId: who, groupId: chatId } : { userId: who },
     };
     // ยิงพร้อมกันแบบไม่รอ เหมือนที่ LINE ส่งเข้ามาทีละเหตุการณ์จริง ๆ
@@ -4486,6 +4534,9 @@ async function runBurstSim(sim: any): Promise<Response> {
     answered_last: collected.answered.length === 1 && collected.answered[0] === ids[ids.length - 1],
     seen_at_answer: collected.seenAtAnswer,
     chat: inGroup ? "group" : "dm",
+    ...(collected.captured_answer !== undefined
+      ? { captured_question: collected.captured_question, captured_answer: collected.captured_answer }
+      : {}),
   });
 }
 

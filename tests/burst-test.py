@@ -87,6 +87,24 @@ CASES = [
     ], 0),
 ]
 
+# เคสจริง 21 ก.ย. ทองฝากเตือนงาน แงวถามเวลา ตั้มตอบรายละเอียดโดยไม่แท็ก แล้วแท็กเปล่า ๆ ตามมา
+# แงวทักทายเฉย ๆ ไม่พูดถึงเรื่องค้างเลย ต้นเหตุคือแท็กเปล่าถูกแปลงเป็นคำว่า "สวัสดี" ตรง ๆ ก่อนส่งให้โมเดล
+# นี่คือชุดเดียวที่เรียกโมเดลจริงผ่านโค้ดจริง (capture_answer) ไม่ใช่แค่ดูว่าตอบหรือเงียบ
+CONTENT_CASES = [
+    ("กลุ่ม แท็กเปล่า ๆ ต้องหยิบเรื่องค้างจากประวัติ ไม่ใช่แค่ทักทาย", {
+        "in_group": True,
+        "capture_answer": True,
+        "bubbles": [
+            {"text": "แงว ฝากเตือนงานพรุ่งนี้ให้หน่อย\n\nมีตาม aw มุกดาหาร กับ ยโสธร", "gap_ms": 1500},
+            {"text": "6.00-18.00 ทุก1ชั่วโมง จนกว่าจะเสร็จ", "gap_ms": 4000},
+            {"text": "@MT agent 1", "gap_ms": 0},
+        ],
+    }, {
+        "forbid": r"^(สวัสดี|หวัดดี|แงวอยู่นี่แล้ว|แงวมาแล้ว)ค่ะ?ะ?พี่?ตั้ม[^\n]{0,30}(มีอะไรให้แงวช่วย|พร้อมเสมอ|พร้อมลุย|พร้อมรับใช้)",
+        "expect": r"มุกดาหาร|ยโสธร|เตือนซ้ำ|ทุก\s?1\s?ชั่วโมง|ทุกชั่วโมง",
+    }),
+]
+
 
 def run(in_group, bubbles, extra=None):
     body = json.dumps({"simulate": {"in_group": in_group, "bubbles": bubbles, **(extra or {})}}).encode()
@@ -129,7 +147,26 @@ def main():
         ))
         if not ok:
             failed += 1
-    print("\n%s / %s ผ่าน" % (len(CASES) - failed, len(CASES)))
+    import re as _re
+    for name, extra, checks in CONTENT_CASES:
+        try:
+            res = run(extra.get("in_group", True), extra["bubbles"],
+                      {k: v for k, v in extra.items() if k not in ("in_group", "bubbles")})
+        except Exception as e:
+            print("[ERROR] %s -> %s" % (name, str(e)[:150]))
+            failed += 1
+            continue
+        ans = res.get("captured_answer") or ""
+        bad = checks.get("forbid") and _re.search(checks["forbid"], ans)
+        good = (not checks.get("expect")) or _re.search(checks["expect"], ans)
+        ok = (not bad) and good
+        print("%s %s" % ("[PASS]" if ok else "[FAIL]", name))
+        print("   คำตอบจริง:", ans[:200].replace("\n", " / "))
+        if not ok:
+            failed += 1
+
+    total = len(CASES) + len(CONTENT_CASES)
+    print("\n%s / %s ผ่าน" % (total - failed, total))
     return 1 if failed else 0
 
 
