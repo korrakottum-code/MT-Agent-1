@@ -13,7 +13,7 @@
 
 | ชุด | ผล | รันยังไง |
 |---|---|---|
-| ข้อสอบยาก `tests/cases-hard.json` | 39/39 | GitHub Actions → Agent eval → เลือก cases-hard, model gemini-flash |
+| ข้อสอบยาก `tests/cases-hard.json` | 41/42 | GitHub Actions → Agent eval → เลือก cases-hard, model gemini-flash — ข้อที่ตก `hard-recurring-needs-a-time` เป็นของงาน "เลือกเวลาเช้าให้เอง" ที่อีก session กำลังทำอยู่ 21 ก.ย. ไม่เกี่ยวกับเช็กชื่อ |
 | ข้อสอบปกติ `tests/cases.json` | 16/16 | รันเองทุกครั้งที่ push ขึ้น main |
 | ชุดบอลลูน `tests/burst-test.py` | 11/11 | `python3 tests/burst-test.py <CRON_SECRET>` |
 | ส่วนนับเช็กชื่อ `checkins.test.ts` | 2/2 | `npx deno@2 test --allow-env supabase/functions/_shared/checkins.test.ts` |
