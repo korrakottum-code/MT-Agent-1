@@ -9,6 +9,7 @@ import {
   type ModelSpec,
   resolveModel,
 } from "../_shared/models.ts";
+import { type Campaign, dayStatus, formatDaySummary, matchUnit, thaiToday, unitKey } from "../_shared/checkins.ts";
 
 const CHANNEL_SECRET = Deno.env.get("LINE_CHANNEL_SECRET") ?? "";
 const CHANNEL_ACCESS_TOKEN = Deno.env.get("LINE_CHANNEL_ACCESS_TOKEN") ?? "";
@@ -56,12 +57,34 @@ async function lineApi(path: string, payload: unknown) {
 // ตอบด้วย replyToken ก่อน (หมดอายุเร็ว) ถ้าไม่ทันค่อย push เข้าห้อง
 // quoteToken ทำให้คำตอบโผล่เป็น reply ที่อ้างข้อความต้นทาง ใช้เฉพาะในกลุ่มที่คนคุยกันหลายเรื่องพร้อมกัน
 // ในแชทส่วนตัวไม่ต้องอ้าง เพราะมีบทสนทนาเดียวอยู่แล้ว การอ้างจะรกเปล่า ๆ
-async function sendReply(replyToken: string, to: string, text: string, quoteToken?: string | null) {
+// คืน id ของข้อความที่ LINE ส่งออกไปจริง เพื่อเก็บคู่กับคำตอบของแงว
+// พอมีคน "ตอบกลับ" ข้อความของแงวทีหลัง เราจะรู้ว่าเขาอ้างถึงข้อความไหน
+// บอทคู่แข่งอ่านข้อความที่ถูกอ้างไม่ได้ พอเจ้าของถามว่า "อันนี้คือไรอะ" มันตอบว่ายังไม่เห็นข้อความที่ว่า
+async function lineSend(path: string, payload: unknown): Promise<string | null> {
+  const res = await fetch(`https://api.line.me${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${CHANNEL_ACCESS_TOKEN}` },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    console.error(`LINE ${path} failed:`, res.status, await res.text());
+    return null;
+  }
+  try {
+    const body = await res.json();
+    return String(body?.sentMessages?.[0]?.id ?? "") || "sent";
+  } catch {
+    return "sent";
+  }
+}
+
+async function sendReply(replyToken: string, to: string, text: string, quoteToken?: string | null): Promise<string | null> {
   const message: any = { type: "text", text: text.slice(0, 4900) };
   if (quoteToken) message.quoteToken = quoteToken;
   const messages = [message];
-  const ok = await lineApi("/v2/bot/message/reply", { replyToken, messages });
-  if (!ok) await lineApi("/v2/bot/message/push", { to, messages });
+  const id = await lineSend("/v2/bot/message/reply", { replyToken, messages });
+  if (id) return id;
+  return await lineSend("/v2/bot/message/push", { to, messages });
 }
 
 // ดึงชื่อจริงจาก LINE เพื่อลงทะเบียนพนักงานใหม่อัตโนมัติ
@@ -1529,6 +1552,111 @@ const TOOLS = [
       required: ["event_id"],
     },
   },
+  {
+    name: "checkin_campaign",
+    description:
+      "ตั้งหรือดูเรื่องที่ต้องเช็กชื่อทุกวันในแชทนี้ เช่น 'ลงสตอรี่ PDRN' 'ส่งข้อมูลเข้าไดรฟ์' " +
+      "ใส่รายชื่อสาขาหรือคนที่ต้องเช็กใน units จะได้รู้ว่าใครยังขาด ใส่ target_count ถ้ามีเป้ารายวัน " +
+      "แงวจะส่งสรุปปิดวันเข้าแชทนี้เองตาม summary_time (เวลาไทย) " +
+      "create/update/close ได้เฉพาะ MANAGER ขึ้นไป list ดูได้ทุกคน " +
+      "update ใช้เพิ่มหรือลดรายชื่อ เปลี่ยนเป้า เปลี่ยนเวลา หรือเปลี่ยนชื่อ",
+    input_schema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["create", "list", "update", "close"] },
+        name: { type: "string", description: "ชื่อเรื่องที่เช็ก เช่น ลงสตอรี่ PDRN (ใช้ระบุเรื่องตอน update/close ด้วย)" },
+        units: { type: "array", items: { type: "string" }, description: "รายชื่อสาขาหรือคนที่ต้องเช็ก ตอน update = แทนที่รายชื่อเดิมทั้งชุด" },
+        add_units: { type: "array", items: { type: "string" }, description: "update: เพิ่มรายชื่อ" },
+        remove_units: { type: "array", items: { type: "string" }, description: "update: ตัดรายชื่อ" },
+        target_count: { type: "integer", description: "เป้าต่อวัน ไม่ใส่ = ครบทุกหน่วยในรายชื่อ" },
+        summary_time: { type: "string", description: "เวลาส่งสรุปปิดวัน HH:MM เวลาไทย ค่าเริ่มต้น 18:00" },
+        new_name: { type: "string", description: "update: ชื่อใหม่" },
+      },
+      required: ["action"],
+    },
+  },
+  {
+    name: "checkin_record",
+    description:
+      "จดว่าหน่วยไหน (สาขา/คน) ทำเรื่องที่เช็กแล้วสำหรับวันนี้ ใช้ทันทีเมื่อมีคนแจ้งว่า 'สาขา X ลงสตอรี่แล้ว' 'บ่อวินเรียบร้อยค่ะ' " +
+      "ใส่ได้หลายหน่วยในครั้งเดียวถ้าแจ้งมาพร้อมกัน ระบบกันจดซ้ำให้เอง และคืนยอดวันนี้กับรายชื่อที่ยังขาดมาให้ตอบ " +
+      "ถ้าชื่อไม่ตรงกับรายชื่อจะคืน candidates มาให้ถามคน ห้ามเดาเอง " +
+      "ระบุ campaign เฉพาะเมื่อแชทนี้มีหลายเรื่องที่เช็กอยู่ ใส่ date เฉพาะเมื่อเขาบอกว่าเป็นของวันอื่น",
+    input_schema: {
+      type: "object",
+      properties: {
+        units: { type: "array", items: { type: "string" }, description: "ชื่อสาขาหรือคนที่แจ้ง ตามที่พิมพ์มา" },
+        campaign: { type: "string", description: "ชื่อเรื่องที่เช็ก ไม่ใส่ = เรื่องเดียวที่มีในแชทนี้" },
+        date: { type: "string", description: "YYYY-MM-DD ไม่ใส่ = วันนี้" },
+        note: { type: "string", description: "รายละเอียดเพิ่ม เช่น 'ครบ 15 สตอรี่'" },
+      },
+      required: ["units"],
+    },
+  },
+  {
+    name: "checkin_status",
+    description:
+      "ดูสถานะการเช็กชื่อ: วันนี้แจ้งแล้วกี่หน่วย ใครแล้ว ใครยัง ใครขาดมานานสุด ใครทำต่อเนื่องกี่วัน " +
+      "ใช้ตอบ 'วันนี้ครบยัง' 'สาขาไหนยังไม่ลง' 'สาขาไหนขาดบ่อยสุด' 'สัปดาห์นี้เป็นยังไง' (ใส่ days เพื่อดูย้อนหลังรายวัน)",
+    input_schema: {
+      type: "object",
+      properties: {
+        campaign: { type: "string", description: "ไม่ใส่ = ทุกเรื่องในแชทนี้" },
+        date: { type: "string", description: "YYYY-MM-DD ไม่ใส่ = วันนี้" },
+        days: { type: "integer", description: "ดูย้อนหลังกี่วัน (ยอดต่อวัน) สูงสุด 31" },
+      },
+    },
+  },
+  {
+    name: "checkin_undo",
+    description:
+      "ลบรายการเช็กชื่อที่จดผิด เช่น จดผิดสาขา หรือคนแจ้งบอกว่ายังไม่ได้ทำ ลบได้โดยคนที่แจ้งเอง หรือ MANAGER ขึ้นไป",
+    input_schema: {
+      type: "object",
+      properties: {
+        units: { type: "array", items: { type: "string" } },
+        campaign: { type: "string" },
+        date: { type: "string", description: "YYYY-MM-DD ไม่ใส่ = วันนี้" },
+      },
+      required: ["units"],
+    },
+  },
+  {
+    name: "shift_schedule",
+    description:
+      "จัดตารางเวรของแชทนี้ ใครดูแลเรื่องอะไรช่วงเวลาไหน เช่น 'ฝนเฝ้าแชท จันทร์ถึงศุกร์ 9:00-18:00' 'เสาร์นี้ให้บาสคุมแชท 10:00-20:00' " +
+      "set/remove ได้เฉพาะ MANAGER ขึ้นไป list ดูได้ทุกคน ถ้าถามว่าตอนนี้ใครคุมอยู่ ใช้ who_is_on_duty แทน",
+    input_schema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["set", "remove", "list"] },
+        person_name: { type: "string", description: "ชื่อเล่นคนเข้าเวร" },
+        duty: { type: "string", description: "หน้าที่ เช่น เฝ้าแชท ตอบลูกค้า ค่าเริ่มต้น เฝ้าแชท" },
+        days: {
+          type: "array",
+          items: { type: "string", enum: ["อาทิตย์", "จันทร์", "อังคาร", "พุธ", "พฤหัส", "ศุกร์", "เสาร์", "ทุกวัน", "จันทร์-ศุกร์", "เสาร์-อาทิตย์"] },
+          description: "เวรประจำสัปดาห์ ใส่วันได้หลายวัน",
+        },
+        on_date: { type: "string", description: "เวรเฉพาะวัน YYYY-MM-DD ใช้แทน days" },
+        start_time: { type: "string", description: "HH:MM เวลาไทย" },
+        end_time: { type: "string", description: "HH:MM เวลาไทย" },
+      },
+      required: ["action"],
+    },
+  },
+  {
+    name: "who_is_on_duty",
+    description:
+      "ตอบว่าตอนนี้ (หรือเวลาที่ระบุ) ใครเข้าเวรอยู่ในแชทนี้ ใช้เมื่อถูกถามว่า 'ตอนนี้ใครคุมแชท' 'พรุ่งนี้บ่ายใครดูแล' 'เมื่อวานสามทุ่มใครเฝ้า' " +
+      "ถ้าไม่มีใครอยู่เวรจะบอกว่าว่าง พร้อมเวรถัดไปของวันนั้น",
+    input_schema: {
+      type: "object",
+      properties: {
+        at: { type: "string", description: "เวลาที่ถาม ISO 8601 +07:00 ไม่ใส่ = ตอนนี้" },
+        duty: { type: "string", description: "กรองเฉพาะหน้าที่นี้" },
+      },
+    },
+  },
 ];
 
 type Ctx = {
@@ -1594,6 +1722,10 @@ const WRITE_TOOLS = new Set([
   "monday_set_status",
   "monday_add_update",
   "monday_create_item",
+  "checkin_campaign",
+  "checkin_record",
+  "checkin_undo",
+  "shift_schedule",
 ]);
 
 // ด่านตรวจสิทธิ์ที่ต้องทำงานแม้ในโหมดข้อสอบ
@@ -1611,6 +1743,68 @@ function dryRunGuard(name: string, ctx: Ctx): string | null {
     return "ทำรายการนี้ได้เฉพาะ ADMIN";
   }
   return null;
+}
+
+// ---------------------------------------------------------------- เช็กชื่อรายวัน + ตารางเวร
+
+// หาเรื่องที่เช็กในแชทนี้ ถ้าไม่ระบุชื่อและมีเรื่องเดียวก็ใช้เรื่องนั้น มีหลายเรื่องให้ถามคน ไม่เดา
+async function resolveCampaign(ctx: Ctx, name?: string): Promise<{ campaign?: Campaign; error?: string }> {
+  const chatId = ctx.lineGroupId ?? ctx.caller.line_user_id;
+  const { data } = await supabase.from("checkin_campaigns")
+    .select("id, chat_id, name, units, target_count, summary_time, active, last_summary_on")
+    .eq("chat_id", chatId).eq("active", true).order("created_at", { ascending: true });
+  const all: Campaign[] = data ?? [];
+  if (all.length === 0) {
+    return { error: "แชทนี้ยังไม่มีเรื่องที่เช็กชื่ออยู่ ให้ MANAGER ขึ้นไปตั้งด้วย checkin_campaign action=create ก่อน" };
+  }
+  if (name) {
+    const k = String(name).toLowerCase().replace(/\s+/g, "");
+    const hit = all.filter((c) => c.name.toLowerCase().replace(/\s+/g, "").includes(k) || k.includes(c.name.toLowerCase().replace(/\s+/g, "")));
+    if (hit.length === 1) return { campaign: hit[0] };
+    if (hit.length > 1) return { error: `ชื่อ "${name}" ตรงหลายเรื่อง: ${hit.map((c) => c.name).join(" · ")}` };
+    return { error: `ไม่พบเรื่อง "${name}" ในแชทนี้ ที่มีอยู่: ${all.map((c) => c.name).join(" · ")}` };
+  }
+  if (all.length === 1) return { campaign: all[0] };
+  return { error: `แชทนี้เช็กอยู่หลายเรื่อง ต้องระบุ campaign: ${all.map((c) => c.name).join(" · ")}` };
+}
+
+const THAI_WEEKDAYS = ["อาทิตย์", "จันทร์", "อังคาร", "พุธ", "พฤหัส", "ศุกร์", "เสาร์"];
+
+function weekdaysFrom(days: string[] | undefined): number[] {
+  const out = new Set<number>();
+  for (const d of days ?? []) {
+    if (d === "ทุกวัน") [0, 1, 2, 3, 4, 5, 6].forEach((x) => out.add(x));
+    else if (d === "จันทร์-ศุกร์") [1, 2, 3, 4, 5].forEach((x) => out.add(x));
+    else if (d === "เสาร์-อาทิตย์") [0, 6].forEach((x) => out.add(x));
+    else {
+      const i = THAI_WEEKDAYS.findIndex((w) => d.startsWith(w) || w.startsWith(d));
+      if (i >= 0) out.add(i);
+    }
+  }
+  return [...out].sort();
+}
+
+function validHHMM(s: unknown): string | null {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(s ?? "").trim());
+  if (!m) return null;
+  const h = Number(m[1]), mi = Number(m[2]);
+  if (h > 23 || mi > 59) return null;
+  return `${String(h).padStart(2, "0")}:${m[2]}`;
+}
+
+// เวรครอบเวลานี้ไหม เวรข้ามเที่ยงคืน (22:00-06:00) นับจากวันที่เริ่มเวร
+function shiftCovers(s: any, weekday: number, ymd: string, hhmm: string): boolean {
+  const start = String(s.start_time).slice(0, 5);
+  const end = String(s.end_time).slice(0, 5);
+  const onDay = s.on_date ? String(s.on_date) === ymd : s.weekday === weekday;
+  if (start < end) return onDay && hhmm >= start && hhmm < end;
+  // ข้ามเที่ยงคืน: อยู่ในวันเริ่มหลังเวลาเริ่ม หรืออยู่ในวันถัดไปก่อนเวลาจบ
+  const prevDay = new Date(`${ymd}T00:00:00Z`);
+  prevDay.setUTCDate(prevDay.getUTCDate() - 1);
+  const prevYmd = prevDay.toISOString().slice(0, 10);
+  const prevWeekday = (weekday + 6) % 7;
+  const startedYesterday = s.on_date ? String(s.on_date) === prevYmd : s.weekday === prevWeekday;
+  return (onDay && hhmm >= start) || (startedYesterday && hhmm < end);
 }
 
 async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
@@ -3159,6 +3353,274 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       return { dismissed: data };
     }
 
+    case "checkin_campaign": {
+      const chatId = ctx.lineGroupId ?? ctx.caller.line_user_id;
+      const action = String(input.action ?? "list");
+      if (action === "list") {
+        const { data } = await supabase.from("checkin_campaigns")
+          .select("name, units, target_count, summary_time, active, created_at")
+          .eq("chat_id", chatId).eq("active", true).order("created_at", { ascending: true });
+        return { campaigns: data ?? [], note: (data ?? []).length === 0 ? "ยังไม่มีเรื่องที่เช็กชื่อในแชทนี้" : undefined };
+      }
+      if (!canViewOthers(ctx.caller.role)) return { error: "ตั้งหรือแก้เรื่องที่เช็กชื่อได้เฉพาะ MANAGER ขึ้นไป" };
+      if (action === "create") {
+        const name = String(input.name ?? "").trim();
+        if (!name) return { error: "ต้องระบุ name ว่าเช็กเรื่องอะไร" };
+        const { data: dup } = await supabase.from("checkin_campaigns")
+          .select("id").eq("chat_id", chatId).eq("active", true).ilike("name", name).maybeSingle();
+        if (dup) return { error: `มีเรื่อง "${name}" อยู่แล้วในแชทนี้ ใช้ update ถ้าจะแก้` };
+        const time = input.summary_time ? validHHMM(input.summary_time) : "18:00";
+        if (!time) return { error: "summary_time ต้องเป็น HH:MM" };
+        const units = [...new Set((input.units ?? []).map((u: string) => String(u).trim().replace(/^สาขา\s*/, "")).filter(Boolean))];
+        const { data, error } = await supabase.from("checkin_campaigns").insert({
+          chat_id: chatId, group_id: ctx.group?.id ?? null, name,
+          units, target_count: input.target_count ?? null, summary_time: time,
+          created_by_user_id: ctx.caller.id,
+        }).select("name, units, target_count, summary_time").single();
+        if (error) return { error: error.message };
+        return {
+          created: data,
+          note: `แงวจะส่งสรุปปิดวันเข้าแชทนี้เองทุกวันเวลา ${time}` +
+            (units.length === 0 ? " ยังไม่มีรายชื่อหน่วย จึงบอกได้แค่ว่าใครแจ้งแล้ว บอกไม่ได้ว่าใครขาด ถ้ามีรายชื่อให้ใส่ด้วย update" : ""),
+        };
+      }
+      const r = await resolveCampaign(ctx, input.name);
+      if (r.error) return { error: r.error };
+      const c = r.campaign!;
+      if (action === "close") {
+        const { error } = await supabase.from("checkin_campaigns").update({ active: false }).eq("id", c.id);
+        if (error) return { error: error.message };
+        return { closed: c.name };
+      }
+      if (action === "update") {
+        const patch: Record<string, unknown> = {};
+        let units = [...c.units];
+        const clean = (xs: any) => (xs ?? []).map((u: string) => String(u).trim().replace(/^สาขา\s*/, "")).filter(Boolean);
+        if (Array.isArray(input.units)) units = clean(input.units);
+        if (Array.isArray(input.add_units)) units = [...units, ...clean(input.add_units)];
+        if (Array.isArray(input.remove_units)) {
+          const drop = new Set(clean(input.remove_units).map(unitKey));
+          units = units.filter((u) => !drop.has(unitKey(u)));
+        }
+        patch.units = [...new Set(units)];
+        if (input.target_count !== undefined) patch.target_count = input.target_count;
+        if (input.summary_time) {
+          const t = validHHMM(input.summary_time);
+          if (!t) return { error: "summary_time ต้องเป็น HH:MM" };
+          patch.summary_time = t;
+        }
+        if (input.new_name) patch.name = String(input.new_name).trim();
+        const { data, error } = await supabase.from("checkin_campaigns").update(patch).eq("id", c.id)
+          .select("name, units, target_count, summary_time").single();
+        if (error) return { error: error.message };
+        return { updated: data };
+      }
+      return { error: `action "${action}" ไม่รู้จัก` };
+    }
+
+    case "checkin_record": {
+      const r = await resolveCampaign(ctx, input.campaign);
+      if (r.error) return { error: r.error };
+      const c = r.campaign!;
+      const date = input.date ? String(input.date) : thaiToday();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { error: "date ต้องเป็น YYYY-MM-DD" };
+      const given: string[] = (input.units ?? []).map((u: string) => String(u)).filter((u: string) => u.trim());
+      if (given.length === 0) return { error: "ต้องระบุ units อย่างน้อยหนึ่งชื่อ" };
+
+      const recorded: string[] = [];
+      const already: string[] = [];
+      const unknown: { given: string; candidates: string[] }[] = [];
+      for (const g of given) {
+        const m = matchUnit(g, c.units);
+        if (!m.unit) {
+          unknown.push({ given: g, candidates: m.candidates ?? [] });
+          continue;
+        }
+        const { error } = await supabase.from("checkins").insert({
+          campaign_id: c.id, unit: m.unit, checked_on: date,
+          reported_by_user_id: ctx.caller.id, note: input.note ?? null,
+        });
+        if (error) {
+          if (String(error.code) === "23505") already.push(m.unit);
+          else return { error: error.message };
+        } else recorded.push(m.unit);
+      }
+      const s = await dayStatus(supabase, c, date);
+      return {
+        campaign: c.name,
+        date,
+        recorded,
+        already_recorded_today: already,
+        unknown_units: unknown,
+        count_today: s.count,
+        target: s.target,
+        remaining: s.remaining.map((x) => x.unit),
+        streaks: Object.fromEntries(recorded.map((u) => [u, s.streaks[u] ?? 1])),
+        note:
+          (unknown.length > 0
+            ? "มีชื่อที่ไม่ตรงกับรายชื่อ ห้ามเดา ให้ถามว่าหมายถึงสาขาไหน (ดู candidates) "
+            : "") +
+          (already.length > 0 ? "บางหน่วยจดไว้แล้ววันนี้ บอกสั้น ๆ ว่ามีแล้ว ไม่ต้องดุ " : "") +
+          "ตอบสั้น: ใครจดแล้ว ยอดวันนี้เทียบเป้า และรายชื่อที่ยังขาดถ้าเหลือไม่เกิน 8 ห้ามพิมพ์รายชื่อที่แจ้งแล้วทั้งหมดซ้ำทุกครั้ง",
+      };
+    }
+
+    case "checkin_status": {
+      const chatId = ctx.lineGroupId ?? ctx.caller.line_user_id;
+      const date = input.date ? String(input.date) : thaiToday();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { error: "date ต้องเป็น YYYY-MM-DD" };
+      let list: Campaign[] = [];
+      if (input.campaign) {
+        const r = await resolveCampaign(ctx, input.campaign);
+        if (r.error) return { error: r.error };
+        list = [r.campaign!];
+      } else {
+        const { data } = await supabase.from("checkin_campaigns")
+          .select("id, chat_id, name, units, target_count, summary_time, active, last_summary_on")
+          .eq("chat_id", chatId).eq("active", true);
+        list = data ?? [];
+        if (list.length === 0) return { error: "แชทนี้ยังไม่มีเรื่องที่เช็กชื่ออยู่" };
+      }
+      const days = Math.min(Math.max(Number(input.days ?? 1), 1), 31);
+      const out: any[] = [];
+      for (const c of list) {
+        const s = await dayStatus(supabase, c, date);
+        const item: any = {
+          campaign: c.name, date, count: s.count, target: s.target,
+          done: s.done, remaining: s.remaining, streaks: s.streaks,
+          summary_text: formatDaySummary(c, s),
+        };
+        if (days > 1) {
+          const from = new Date(`${date}T00:00:00Z`);
+          from.setUTCDate(from.getUTCDate() - (days - 1));
+          const { data: rows } = await supabase.from("checkins")
+            .select("unit, checked_on").eq("campaign_id", c.id)
+            .gte("checked_on", from.toISOString().slice(0, 10)).lte("checked_on", date);
+          const perDay = new Map<string, Set<string>>();
+          const perUnit = new Map<string, number>();
+          for (const x of rows ?? []) {
+            if (!perDay.has(x.checked_on)) perDay.set(x.checked_on, new Set());
+            perDay.get(x.checked_on)!.add(x.unit);
+            perUnit.set(x.unit, (perUnit.get(x.unit) ?? 0) + 1);
+          }
+          item.history = [...perDay.entries()].sort().map(([d, u]) => ({ date: d, count: u.size }));
+          const roster = c.units.length > 0 ? c.units : [...perUnit.keys()];
+          item.days_per_unit = roster.map((u) => ({ unit: u, days_done: perUnit.get(u) ?? 0, days_total: days }))
+            .sort((a, b) => a.days_done - b.days_done);
+        }
+        out.push(item);
+      }
+      return { statuses: out, note: "ตัวเลขทั้งหมดมาจากตารางเช็กชื่อจริง ตอบตามนี้ ห้ามเติมสาขาที่ไม่อยู่ในรายการ" };
+    }
+
+    case "checkin_undo": {
+      const r = await resolveCampaign(ctx, input.campaign);
+      if (r.error) return { error: r.error };
+      const c = r.campaign!;
+      const date = input.date ? String(input.date) : thaiToday();
+      const removed: string[] = [];
+      const missing: string[] = [];
+      for (const g of input.units ?? []) {
+        const m = matchUnit(String(g), c.units);
+        if (!m.unit) { missing.push(String(g)); continue; }
+        let q = supabase.from("checkins").delete().eq("campaign_id", c.id).eq("unit", m.unit).eq("checked_on", date);
+        if (!canViewOthers(ctx.caller.role)) q = q.eq("reported_by_user_id", ctx.caller.id);
+        const { data, error } = await q.select("id");
+        if (error) return { error: error.message };
+        if ((data ?? []).length > 0) removed.push(m.unit);
+        else missing.push(m.unit);
+      }
+      const s = await dayStatus(supabase, c, date);
+      return {
+        removed, not_found_or_not_yours: missing, count_today: s.count, target: s.target,
+        note: missing.length > 0 && !canViewOthers(ctx.caller.role)
+          ? "EMPLOYEE ลบได้เฉพาะรายการที่ตัวเองแจ้ง"
+          : undefined,
+      };
+    }
+
+    case "shift_schedule": {
+      const chatId = ctx.lineGroupId ?? ctx.caller.line_user_id;
+      const action = String(input.action ?? "list");
+      if (action === "list") {
+        const { data } = await supabase.from("shifts")
+          .select("id, duty, weekday, on_date, start_time, end_time, person:users!shifts_user_id_fkey(display_name)")
+          .eq("chat_id", chatId).order("weekday").order("start_time");
+        const rows = (data ?? []).map((s: any) => ({
+          id: s.id, who: s.person?.display_name, duty: s.duty,
+          when: s.on_date ? String(s.on_date) : THAI_WEEKDAYS[s.weekday],
+          time: `${String(s.start_time).slice(0, 5)}-${String(s.end_time).slice(0, 5)}`,
+        }));
+        return { shifts: rows, note: rows.length === 0 ? "ยังไม่มีตารางเวรในแชทนี้" : undefined };
+      }
+      if (!canViewOthers(ctx.caller.role)) return { error: "จัดตารางเวรได้เฉพาะ MANAGER ขึ้นไป" };
+      if (!input.person_name) return { error: "ต้องระบุ person_name" };
+      const u = await resolveOneUser(String(input.person_name));
+      if (u.error) return { error: u.error };
+      const duty = String(input.duty ?? "เฝ้าแชท").trim() || "เฝ้าแชท";
+      const weekdays = weekdaysFrom(input.days);
+      const onDate = input.on_date ? String(input.on_date) : null;
+      if (onDate && !/^\d{4}-\d{2}-\d{2}$/.test(onDate)) return { error: "on_date ต้องเป็น YYYY-MM-DD" };
+
+      if (action === "remove") {
+        let q = supabase.from("shifts").delete().eq("chat_id", chatId).eq("user_id", u.user.id);
+        if (input.duty) q = q.eq("duty", duty);
+        if (onDate) q = q.eq("on_date", onDate);
+        else if (weekdays.length > 0) q = q.in("weekday", weekdays);
+        const { data, error } = await q.select("id");
+        if (error) return { error: error.message };
+        return { removed: (data ?? []).length, who: u.user.display_name };
+      }
+      if (action === "set") {
+        const start = validHHMM(input.start_time), end = validHHMM(input.end_time);
+        if (!start || !end) return { error: "ต้องระบุ start_time และ end_time เป็น HH:MM" };
+        if (!onDate && weekdays.length === 0) return { error: "ต้องระบุ days (วันในสัปดาห์) หรือ on_date" };
+        // เวรเดิมของคนเดียวกัน หน้าที่เดียวกัน วันเดียวกัน ให้แทนที่ ไม่ซ้อนกัน
+        const rows = (onDate ? [{ weekday: null, on_date: onDate }] : weekdays.map((w) => ({ weekday: w, on_date: null })))
+          .map((d) => ({
+            chat_id: chatId, group_id: ctx.group?.id ?? null, user_id: u.user.id, duty,
+            ...d, start_time: start, end_time: end, created_by_user_id: ctx.caller.id,
+          }));
+        let del = supabase.from("shifts").delete().eq("chat_id", chatId).eq("user_id", u.user.id).eq("duty", duty);
+        del = onDate ? del.eq("on_date", onDate) : del.in("weekday", weekdays);
+        await del;
+        const { error } = await supabase.from("shifts").insert(rows);
+        if (error) return { error: error.message };
+        return {
+          set: { who: u.user.display_name, duty, when: onDate ?? weekdays.map((w) => THAI_WEEKDAYS[w]), time: `${start}-${end}` },
+        };
+      }
+      return { error: `action "${action}" ไม่รู้จัก` };
+    }
+
+    case "who_is_on_duty": {
+      const chatId = ctx.lineGroupId ?? ctx.caller.line_user_id;
+      const at = input.at ? new Date(String(input.at)) : new Date();
+      if (isNaN(at.getTime())) return { error: "at ต้องเป็น ISO 8601" };
+      const bkk = new Date(at.getTime() + 7 * 3600_000);
+      const ymd = bkk.toISOString().slice(0, 10);
+      const hhmm = bkk.toISOString().slice(11, 16);
+      const weekday = bkk.getUTCDay();
+      let q = supabase.from("shifts")
+        .select("duty, weekday, on_date, start_time, end_time, person:users!shifts_user_id_fkey(display_name)")
+        .eq("chat_id", chatId);
+      if (input.duty) q = q.ilike("duty", `%${String(input.duty)}%`);
+      const { data } = await q;
+      const all = data ?? [];
+      if (all.length === 0) return { on_duty: [], note: "แชทนี้ยังไม่มีตารางเวร ให้ MANAGER ตั้งด้วย shift_schedule" };
+      const now = all.filter((s: any) => shiftCovers(s, weekday, ymd, hhmm));
+      const sameDay = all
+        .filter((s: any) => (s.on_date ? String(s.on_date) === ymd : s.weekday === weekday))
+        .sort((a: any, b: any) => String(a.start_time).localeCompare(String(b.start_time)))
+        .map((s: any) => ({ who: s.person?.display_name, duty: s.duty, time: `${String(s.start_time).slice(0, 5)}-${String(s.end_time).slice(0, 5)}` }));
+      return {
+        asked_at: `${ymd} ${hhmm} (${THAI_WEEKDAYS[weekday]})`,
+        on_duty: now.map((s: any) => ({ who: s.person?.display_name, duty: s.duty, time: `${String(s.start_time).slice(0, 5)}-${String(s.end_time).slice(0, 5)}` })),
+        day_schedule: sameDay,
+        note: now.length === 0 ? "ตอนนี้ไม่มีใครอยู่เวร บอกตรง ๆ แล้วบอกเวรถัดไปจาก day_schedule" : undefined,
+      };
+    }
+
     default:
       return { error: `unknown tool: ${name}` };
   }
@@ -3281,7 +3743,18 @@ const SYSTEM_RULES = `คุณคือ "แงว" (MT Agent) — AI น้อ
      ตกลงกันจริงหรือแค่คุยค้างไว้ / งานนี้ใครรับ / กำหนดส่งวันไหน / ตัวเลขหรือราคาที่ได้ยินไม่ชัด / ชื่อคนหรือสาขาที่ไม่แน่ใจ
 21.4 ถามรวมทีเดียวเป็นข้อ ๆ ไม่เกินห้าข้อ แล้วบอกว่าตอบแล้วจะสรุปให้ทันที
 21.5 ถ้าทุกอย่างชัดอยู่แล้ว สรุปได้เลยไม่ต้องถาม
-21.6 สรุปเสร็จแล้วถามว่าจะให้เปิดเป็นงานในระบบไหม ห้ามเปิดงานเองโดยไม่ถาม`;
+21.6 สรุปเสร็จแล้วถามว่าจะให้เปิดเป็นงานในระบบไหม ห้ามเปิดงานเองโดยไม่ถาม
+22. เช็กชื่อรายวัน (สาขาลงสตอรี่ ส่งข้อมูล ฯลฯ) ใช้ตารางจริง ห้ามนับในหัว
+22.1 มีคนแจ้งว่า "สาขา X ลง... เรียบร้อย" "บ่อวินเรียบร้อยค่ะ" ในแชทที่มีเรื่องเช็กชื่ออยู่ ให้เรียก checkin_record ทันที แล้วตอบตามผลที่เครื่องมือคืนมาเท่านั้น
+22.2 คำว่า "จดแล้ว" พูดได้เฉพาะหน่วยที่อยู่ใน recorded ถ้าอยู่ใน already_recorded_today ให้บอกว่ามีอยู่แล้ว ถ้าอยู่ใน unknown_units ให้ถามว่าหมายถึงสาขาไหน ห้ามเลือกให้
+22.3 ตอบสั้น: ใครจดแล้ว ยอดวันนี้เทียบเป้า และรายชื่อที่ยังขาดเฉพาะเมื่อเหลือไม่เกิน 8 ห้ามพิมพ์รายชื่อที่แจ้งแล้วทั้งหมดซ้ำทุกครั้ง แชทจะรก
+22.4 ถูกถามว่าใครยังไม่ลง ใครขาดบ่อย สัปดาห์นี้เป็นยังไง ให้ใช้ checkin_status ตัวเลขทุกตัวต้องมาจากผลเครื่องมือ ห้ามเติมสาขาที่ไม่อยู่ในผล
+22.5 ข้อความที่ไม่ได้พูดกับคุณ (เช่น ตอบหัวหน้าเรื่องอื่นว่า "เรียบร้อยค่ะ") ห้ามเอามาจดเป็นเช็กชื่อ จดเฉพาะที่ระบุสาขาและเป็นเรื่องที่เช็กอยู่
+22.6 สรุปปิดวันระบบส่งเองตามเวลาที่ตั้ง อย่ารับปากว่า "เดี๋ยวสรุปให้ตอนเย็น" ถ้าไม่ได้ตั้งเรื่องเช็กชื่อไว้ ถ้ายังไม่มีให้เสนอ MANAGER ตั้งด้วย checkin_campaign
+
+23. ตารางเวร ใครดูแลเรื่องอะไรช่วงไหน ใช้ shift_schedule ตั้งและดู ใช้ who_is_on_duty ตอบว่าตอนนี้ใครคุมอยู่ ห้ามตอบชื่อคนจากความจำหรือจากบทสนทนา
+
+24. ข้อความที่ขึ้นต้นด้วย (ตอบกลับข้อความของ ...) คือคนกำลังอ้างถึงข้อความก่อนหน้านั้น ให้ตีความคำสั่งจากข้อความที่ถูกอ้าง เช่น อ้างข้อความของแงวแล้วพิมพ์ "อันนี้คืออะไร" = ถามถึงข้อความของแงวอันนั้น`;
 
 // ส่วนที่เปลี่ยนทุกครั้ง (เวลา ผู้ใช้ กลุ่ม รายชื่อ) ต้องอยู่หลังจุด cache เสมอ
 function buildContext(ctx: Ctx, roster: any[], groups: any[], orgPersona: string | null, crossChat: string): string {
@@ -3726,6 +4199,26 @@ async function handleEvent(event: any, sim?: Sim) {
   });
   if (error) console.error("insert message failed:", error.message);
 
+  // คนกด "ตอบกลับ" ข้อความเก่าแล้วพิมพ์สั้น ๆ เช่น "อันนี้คืออะไร" "ใช่อันนี้" — ต้องรู้ว่าเขาอ้างถึงอะไร
+  // LINE ส่งมาแค่ id ของข้อความที่ถูกอ้าง เราเก็บทุกข้อความไว้อยู่แล้วจึงหาได้ รวมถึงคำตอบของแงวเอง
+  // การอ้างข้อความของแงวนับเป็นการคุยกับแงวโดยตรง ไม่ต้องแท็กซ้ำ
+  const quotedId: string | null = event.message?.quotedMessageId ?? null;
+  let quoted: { who: string; text: string; fromBot: boolean } | null = null;
+  if (quotedId) {
+    const { data: qm } = await supabase.from("messages")
+      .select("line_user_id, message_text").eq("line_message_id", quotedId).maybeSingle();
+    if (qm) {
+      const fromBot = qm.line_user_id === "bot";
+      let who = fromBot ? "แงว" : "";
+      if (!who) {
+        const { data: qu } = await supabase.from("users")
+          .select("display_name").eq("line_user_id", qm.line_user_id).maybeSingle();
+        who = qu?.display_name ?? "ใครบางคน";
+      }
+      quoted = { who, text: String(qm.message_text ?? "").slice(0, 600), fromBot };
+    }
+  }
+
   // เงื่อนไขการตอบ:
   // - แชทส่วนตัว: ตอบทุกข้อความและทุกรูป
   // - ในกลุ่ม: ตอบเมื่อแท็ก เรียกชื่อล้วน ๆ เอ่ยชื่อ หรือกำลังคุยต่อจากที่บอทเพิ่งพูด
@@ -3733,7 +4226,7 @@ async function handleEvent(event: any, sim?: Sim) {
   // เสียงที่ถอดได้แล้วนับเป็นข้อความ พูดว่า "แงว เปิดงาน..." ใส่ไมค์จึงได้ผลเหมือนพิมพ์
   const said = msgType === "audio" && spoken ? spoken : text;
   const speakable = msgType === "text" || (msgType === "audio" && Boolean(spoken));
-  const tagged = speakable && (isCallingAI(said) || isBareName(said));
+  const tagged = speakable && (isCallingAI(said) || isBareName(said) || Boolean(quoted?.fromBot));
   const named = speakable && isNameMention(said);
   // รูปและไฟล์ในกลุ่มแค่เก็บไว้ก่อน รอให้คนแท็กถามถึง จะได้ไม่รบกวนทุกครั้งที่มีคนแชร์ไฟล์
   // เสียงก็เหมือนกัน ถอดเก็บไว้เงียบ ๆ แล้วตอบเฉพาะตอนที่คนพูดเรียกชื่อบอทจริง ๆ
@@ -3905,11 +4398,16 @@ async function handleEvent(event: any, sim?: Sim) {
   }
 
   try {
-    const answer = await runAgent(question, ctx, chatId, { images, file, judgeAddressed });
+    const asked = quoted && msgType === "text"
+      ? `(ตอบกลับข้อความของ ${quoted.who}: "${quoted.text}")\n${question}`
+      : question;
+    const answer = await runAgent(asked, ctx, chatId, { images, file, judgeAddressed });
     if (judgeAddressed && answer.trim().toUpperCase().startsWith("SILENT")) return;
-    await sendReply(event.replyToken, replyTo, answer, quoteToken);
+    const sentId = await sendReply(event.replyToken, replyTo, answer, quoteToken);
     // เก็บคำตอบของบอทด้วย เพื่อให้ summary/ความจำบทสนทนาเห็นครบทั้งสองฝั่ง
+    // พร้อม id ที่ LINE ให้มา จะได้รู้ตอนมีคนตอบกลับข้อความนี้ทีหลัง
     await supabase.from("messages").insert({
+      line_message_id: sentId && /^\d+$/.test(sentId) ? sentId : null,
       line_user_id: "bot",
       line_group_id: chatId,
       message_text: answer,

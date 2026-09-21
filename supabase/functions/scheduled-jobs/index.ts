@@ -3,6 +3,7 @@
 // due_reminders (ทุกนาที), extract_events (ทุก 3 ชม.) และ daily_context (ตี 2)
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { createMessage, DEFAULT_MODEL, type ModelSpec, resolveModel } from "../_shared/models.ts";
+import { type Campaign, dayStatus, formatDaySummary, thaiTimeHHMM, thaiToday } from "../_shared/checkins.ts";
 
 const CRON_SECRET = Deno.env.get("CRON_SECRET") ?? "";
 const CHANNEL_ACCESS_TOKEN = Deno.env.get("LINE_CHANNEL_ACCESS_TOKEN") ?? "";
@@ -673,6 +674,45 @@ async function dueReminders() {
   });
 }
 
+// ---------------------------------------------------------------- checkin summary (ทุก 5 นาที)
+
+// สรุปปิดวันของการเช็กชื่อ ส่งตามเวลาที่แต่ละเรื่องตั้งไว้ วันละครั้ง
+// บอทคู่แข่งรับปากในทุกข้อความว่า "เดี๋ยวสรุปยอดปิดวันให้ตอนเย็น" แล้วไม่เคยส่ง เพราะไม่มีนาฬิกา
+// ของเราส่งด้วย cron ไม่ต้องพึ่งโมเดล และตัวเลขมาจากตารางเช็กชื่อตรง ๆ
+async function checkinSummary() {
+  const today = thaiToday();
+  const nowHHMM = thaiTimeHHMM();
+  const { data } = await supabase.from("checkin_campaigns")
+    .select("id, chat_id, name, units, target_count, summary_time, active, last_summary_on")
+    .eq("active", true);
+  let sent = 0;
+  for (const c of (data ?? []) as Campaign[]) {
+    if (c.last_summary_on === today) continue;
+    if (nowHHMM < String(c.summary_time ?? "18:00").slice(0, 5)) continue;
+    // จองวันไว้ก่อนส่ง กัน cron สองรอบซ้อนกันแล้วส่งซ้ำ
+    const { data: claimed } = await supabase.from("checkin_campaigns")
+      .update({ last_summary_on: today }).eq("id", c.id)
+      .neq("last_summary_on", today).select("id");
+    if (!claimed || claimed.length === 0) {
+      // แถวที่ last_summary_on เป็น NULL ไม่ผ่าน neq — จองด้วยเงื่อนไข is null แทน
+      const { data: claimedNull } = await supabase.from("checkin_campaigns")
+        .update({ last_summary_on: today }).eq("id", c.id).is("last_summary_on", null).select("id");
+      if (!claimedNull || claimedNull.length === 0) continue;
+    }
+    const s = await dayStatus(supabase, c, today);
+    const text = formatDaySummary(c, s, { closing: true });
+    await pushToGroup(c.chat_id, text);
+    await supabase.from("messages").insert({
+      line_user_id: "bot", line_group_id: c.chat_id, message_text: text, message_type: "bot",
+    });
+    sent++;
+  }
+  await supabase.from("audit_logs").insert({
+    action: "scheduled_job", tool_name: "checkin_summary",
+    input: { at: nowHHMM }, result: { sent }, status: "OK",
+  });
+}
+
 // ---------------------------------------------------------------- entry
 
 Deno.serve(async (req: Request) => {
@@ -689,6 +729,7 @@ Deno.serve(async (req: Request) => {
     else if (job === "due_reminders") await dueReminders();
     else if (job === "extract_events") await extractEvents();
     else if (job === "daily_context") await dailyContext();
+    else if (job === "checkin_summary") await checkinSummary();
     else return new Response("unknown job", { status: 400 });
     return new Response("OK");
   } catch (e) {
