@@ -3614,9 +3614,14 @@ async function handleEvent(event: any, sim?: Sim) {
   if (msgType === "text" || msgType === "audio") {
     const willAnswer = (m: { text: string; type: string }) => {
       if (m.type !== "text" && m.type !== "audio") return false;
-      // ในแชทส่วนตัวทุกข้อความได้ตอบอยู่แล้ว ในกลุ่มต้องเรียกชื่อแงวเท่านั้น
+      // ในแชทส่วนตัวทุกข้อความได้ตอบอยู่แล้ว
       if (!lineGroupId) return true;
-      return isCallingAI(m.text) || isBareName(m.text) || isNameMention(m.text);
+      // ในกลุ่ม ข้อความที่เรียกชื่อแงวได้ตอบแน่
+      if (isCallingAI(m.text) || isBareName(m.text) || isNameMention(m.text)) return true;
+      // และถ้าข้อความนี้กำลังคุยต่อกับแงวอยู่ บอลลูนถัดไปของคนเดียวกันก็จะได้ตอบเหมือนกัน
+      // จึงถอยให้ได้ เคสจริง 21 ก.ย. กลุ่มงานทอง ตั้มพิมพ์สามบอลลูนไม่ได้เรียกชื่อ แงวตอบสามครั้ง
+      // เพราะเงื่อนไขเดิมมองว่าบอลลูนใหม่กว่าจะไม่ได้ตอบ เลยไม่ยอมถอยให้
+      return followUp;
     };
     if (!lineGroupId && !sim) await showTyping(lineUserId);
     const mine = await waitForSenderToFinish(
