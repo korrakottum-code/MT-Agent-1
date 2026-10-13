@@ -21,7 +21,9 @@ import {
   queueAdminAlert,
   takeAdminAlerts,
 } from "../_shared/line_delivery.ts";
-import { EXTRACT_SYSTEM, LEAK_FALLBACK, looksLikeLeakedReasoning } from "../_shared/leak_guard.ts";
+import {
+  dropToolNames, EXTRACT_SYSTEM, LEAK_FALLBACK, looksLikeLeakedReasoning, scrubToolNames, TOOL_NAME_REWRITE_SYSTEM,
+} from "../_shared/leak_guard.ts";
 
 const CHANNEL_SECRET = Deno.env.get("LINE_CHANNEL_SECRET") ?? "";
 const CHANNEL_ACCESS_TOKEN = Deno.env.get("LINE_CHANNEL_ACCESS_TOKEN") ?? "";
@@ -1749,6 +1751,9 @@ const TOOLS = [
     },
   },
 ];
+
+// ชื่อพวกนี้เป็นของภายใน คำตอบถึงคนต้องไม่มี ด่านสุดท้ายใน runAgent ใช้ตรวจ
+const TOOL_NAMES = TOOLS.map((t) => t.name);
 
 type Ctx = {
   // โหมดข้อสอบ: เรียก tool จริงได้ แต่ห้ามยิงข้อความออกไปหาคนจริง
@@ -3945,6 +3950,7 @@ const SYSTEM_RULES = `คุณคือ "แงว" (MT Agent) — AI น้อ
     ใช้แทน: ขึ้นบรรทัดใหม่, เลขข้อแบบ "1." "2.", emoji เล็กน้อย
     กฎนี้ใช้กับทุกคำตอบ รวมถึงตอนสรุปความสามารถตัวเองหรือสรุปเป็นรายการยาว ๆ ซึ่งเป็นจังหวะที่มักเผลอใส่หัวข้อตัวหนาที่สุด
     จังหวะที่พลาดบ่อยที่สุดคือรายการย่อยใต้หัวข้อ ให้ขึ้นบรรทัดใหม่เฉย ๆ หรือใช้ "1.1" "1.2" ห้ามขึ้นต้นบรรทัดด้วยขีดหรือดาวเด็ดขาด แม้จะดูเป็นระเบียบกว่าก็ตาม
+1.2 ห้ามพิมพ์ชื่อ tool ภาษาอังกฤษ (เช่น create_reminder, list_reminders) ให้คนเห็น ทั้งในวงเล็บและกลางประโยค คนในกลุ่มไม่รู้จักชื่อพวกนี้ ให้บอกเป็นภาษาคนว่าทำอะไร เช่น "ตั้งเตือนให้แล้ว" "ลงทะเบียนชื่อ"
 2. ข้อมูลจริงทั้งหมด (งาน, ข้อความ, สถิติ) ต้องมาจาก tools เท่านั้น ห้ามเดาหรือแต่งข้อมูลเอง
 2.1 ห้ามอ้างว่าทำอะไรสำเร็จถ้าไม่ได้เรียก tool จริงและ tool ไม่ได้ตอบว่าสำเร็จ — คุณเปลี่ยนกฎ/ความสามารถ/โค้ดของตัวเองไม่ได้ ทำได้แค่บันทึกด้วย remember_preference เท่านั้น ถ้าผู้ใช้ขอสิ่งที่ต้องแก้ระบบ ให้บอกตรง ๆ ว่าทำเองไม่ได้ ต้องรอทีมพัฒนา
     และถ้าจะบอกว่า "บันทึกเป็นฟีดแบ็คให้แล้ว" ต้องบันทึกจริงก่อนพูดเสมอ ด้วย create_task ตั้งชื่อขึ้นต้นว่า "ฟีดแบ็ค:" ตามด้วยสรุปสั้น ๆ ของสิ่งที่เขาขอ เจ้าของงานคือคนที่เสนอ
@@ -4328,7 +4334,48 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
   // ตัวตรวจแค่ "สงสัย" แล้วให้โมเดลอีกรอบคัดเฉพาะส่วนที่ตั้งใจพูดกับคน ไม่ตัดสินเองว่าทิ้งอะไร
   // เพราะมีกรณีถูกต้องที่หน้าตาคล้ายกัน 4 ต.ค. ตั้มขอดูกฎที่ตั้งไว้ แงวไล่ให้ดูตรง ๆ
   // ตัวคัดจะเห็นว่าทั้งหมดพูดกับตั้ม แล้วคืนมาครบตามเดิม
-  const finish = async (text: string): Promise<string> => {
+  const finish = async (text: string): Promise<string> => hideToolNames(await dropReasoning(text));
+
+  // ชื่อฟังก์ชันในวงเล็บลบทิ้งได้เลย ส่วนที่อยู่กลางประโยคให้โมเดลเขียนเฉพาะตรงนั้นใหม่
+  const hideToolNames = async (text: string): Promise<string> => {
+    const scrubbed = scrubToolNames(text, TOOL_NAMES);
+    let out = scrubbed.text;
+    let how = "paren";
+    if (scrubbed.bare.length) {
+      how = "rewrite";
+      try {
+        const r = await createMessage(spec, {
+          max_tokens: 2048,
+          system: TOOL_NAME_REWRITE_SYSTEM,
+          messages: [{ role: "user", content: `ชื่อฟังก์ชันที่ต้องเปลี่ยน: ${scrubbed.bare.join(", ")}\n\n${out}` }],
+        });
+        const ru = r.usage ?? {};
+        usage.iterations++;
+        usage.input += ru.input_tokens ?? 0;
+        usage.output += ru.output_tokens ?? 0;
+        const rewritten = (r.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n").trim();
+        out = rewritten || out;
+      } catch (e) {
+        console.error("เขียนชื่อฟังก์ชันใหม่ไม่สำเร็จ:", e);
+      }
+      // รอบเขียนใหม่พลาดหรือยังทิ้งชื่อไว้ ลบทิ้งดีกว่าส่งออกไป
+      const left = scrubToolNames(out, TOOL_NAMES);
+      if (left.bare.length) {
+        how = "dropped";
+        out = dropToolNames(left.text, left.bare);
+      } else out = left.text;
+    }
+    if (out === text) return text;
+    await supabase.from("audit_logs").insert({
+      user_id: ctx.caller?.id ?? null, action: "tool_name_scrubbed", tool_name: "leak_guard",
+      input: { chat_id: chatId, draft: text.slice(0, 1500) },
+      result: { how, bare: scrubbed.bare, sent: out.slice(0, 1500) },
+      status: "OK",
+    });
+    return out;
+  };
+
+  const dropReasoning = async (text: string): Promise<string> => {
     if (!looksLikeLeakedReasoning(text)) return text;
     try {
       const r = await createMessage(spec, {

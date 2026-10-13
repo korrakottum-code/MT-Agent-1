@@ -1,5 +1,5 @@
 import { assertEquals } from "jsr:@std/assert@1";
-import { looksLikeLeakedReasoning } from "./leak_guard.ts";
+import { dropToolNames, looksLikeLeakedReasoning, scrubToolNames } from "./leak_guard.ts";
 
 // ข้อความที่หลุดไปถึงลูกค้าจริง ตัดมาเฉพาะส่วนที่ทำให้รู้ว่าเป็นบันทึกความคิด
 const LEAK_21_SEP = `ผู้ใช้ต้องการให้ "จดจำอัพเดทงานหน่อย" พร้อมลิสต์รายการ 7 ข้อ
@@ -38,4 +38,27 @@ Deno.test("หัวข้อวิเคราะห์ในรายงาน
   // รายงานผลแอดมีหัวข้อ "วิเคราะห์:" ได้ตามปกติ ต้องเจอเครื่องหมายอื่นด้วยถึงจะนับ
   const report = "ยอดแอดสัปดาห์นี้\n1. คลิก 1,240\n2. ทัก 86\n\nวิเคราะห์:\nต้นทุนต่อทักลดลง 12% จากสัปดาห์ก่อน";
   assertEquals(looksLikeLeakedReasoning(report), false);
+});
+
+const NAMES = ["create_reminder", "list_reminders", "remember_preference", "register_user", "rename_group", "create_task"];
+
+Deno.test("ลบชื่อเครื่องมือในวงเล็บทิ้ง ความหมายไม่เสีย", () => {
+  const r = scrubToolNames("แงวเช็กระบบเตือน (list_reminders) ให้แล้วค่ะ\nตั้งเตือนล่วงหน้า (create_reminder) ได้เลย", NAMES);
+  assertEquals(r.text, "แงวเช็กระบบเตือน ให้แล้วค่ะ\nตั้งเตือนล่วงหน้า ได้เลย");
+  assertEquals(r.bare, []);
+  const r2 = scrubToolNames("จำไว้แล้วค่า (`remember_preference`, create_task) ✨", NAMES);
+  assertEquals(r2.text, "จำไว้แล้วค่า ✨");
+});
+
+Deno.test("ชื่อกลางประโยคส่งต่อให้รอบเขียนใหม่", () => {
+  const r = scrubToolNames("ลงทะเบียนชื่อด้วยคำสั่ง register_user ได้เลยค่ะ", NAMES);
+  assertEquals(r.bare, ["register_user"]);
+  assertEquals(dropToolNames(r.text, r.bare), "ลงทะเบียนชื่อ ได้เลยค่ะ");
+});
+
+Deno.test("คำที่บังเอิญมีชื่อเครื่องมือเป็นส่วนหนึ่งไม่โดน", () => {
+  const t = "ลิงก์ https://x.com/?create_task=1 กับ my_create_task_v2 กับ create_tasks";
+  const r = scrubToolNames(t, NAMES);
+  assertEquals(r.text, t);
+  assertEquals(r.bare, []);
 });
