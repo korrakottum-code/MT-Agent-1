@@ -432,6 +432,22 @@ Deno.test("การเรียก tool ของ Gemini แปลงเป็�
   assertEquals(r.usage.cache_read_input_tokens, 500);
 });
 
+Deno.test("part ที่ Gemini ติดป้ายว่าเป็นความคิด ไม่กลายเป็นคำตอบ", () => {
+  const r = fromGeminiResponse({
+    candidates: [{
+      finishReason: "STOP",
+      content: {
+        parts: [
+          { text: "ผู้ใช้ต้องการให้ตั้งเตือน ตามกฎข้อ 20 ต้องมีเวลาก่อน", thought: true },
+          { text: "พี่ตั้มอยากให้แงวเตือนกี่โมงคะ" },
+        ],
+      },
+    }],
+  });
+  assertEquals(r.content.length, 1);
+  assertEquals(r.content[0].text, "พี่ตั้มอยากให้แงวเตือนกี่โมงคะ");
+});
+
 Deno.test("โดน filter บล็อก ต้องกลายเป็น refusal ไม่ใช่คำตอบว่าง", () => {
   const r = fromGeminiResponse({ candidates: [{ finishReason: "PROHIBITED_CONTENT", content: {} }] });
   assertEquals(r.stop_reason, "refusal");

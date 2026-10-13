@@ -4,6 +4,15 @@
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { createMessage, DEFAULT_MODEL, type ModelSpec, resolveModel } from "../_shared/models.ts";
 import { type Campaign, dayStatus, formatDaySummary, thaiTimeHHMM, thaiToday } from "../_shared/checkins.ts";
+import {
+  clearPushBlocked,
+  describePushBlocked,
+  getPushBlocked,
+  isQuotaError,
+  markPushBlocked,
+  notifyAdmins,
+  watchLineQuota,
+} from "../_shared/line_delivery.ts";
 
 const CRON_SECRET = Deno.env.get("CRON_SECRET") ?? "";
 const CHANNEL_ACCESS_TOKEN = Deno.env.get("LINE_CHANNEL_ACCESS_TOKEN") ?? "";
@@ -47,7 +56,11 @@ function pickGroups<T extends { group_name?: string | null }>(groups: T[]): T[] 
   return picked;
 }
 
-async function pushToGroup(to: string, text: string) {
+type PushResult = { ok: true } | { ok: false; status: number; detail: string; quota: boolean };
+
+// คืนผลจริงเสมอ เดิมพังแล้วแค่พิมพ์ลง log ผู้เรียกทุกคนเลยนับว่าส่งสำเร็จ
+// ตัวเตือนจึงถูกเลื่อนไปรอบถัดไปเงียบ ๆ ทั้งที่ไม่มีใครเห็นข้อความเลย
+async function pushToGroup(to: string, text: string): Promise<PushResult> {
   const res = await fetch("https://api.line.me/v2/bot/message/push", {
     method: "POST",
     headers: {
@@ -56,7 +69,22 @@ async function pushToGroup(to: string, text: string) {
     },
     body: JSON.stringify({ to, messages: [{ type: "text", text: text.slice(0, 4900) }] }),
   });
-  if (!res.ok) console.error("LINE push failed:", res.status, await res.text());
+  if (res.ok) {
+    await clearPushBlocked(supabase);
+    return { ok: true };
+  }
+  const detail = await res.text();
+  const quota = isQuotaError(res.status, detail);
+  console.error("LINE push failed:", res.status, detail);
+  if (quota) await markPushBlocked(supabase, detail);
+  // ลง audit ด้วย ไม่งั้นความล้มเหลวอยู่แค่ใน log ที่เก็บไม่กี่วันและไม่มีใครเปิดดู
+  await supabase.from("audit_logs").insert({
+    action: "scheduled_job", tool_name: "line_push",
+    input: { to, preview: text.slice(0, 120) },
+    result: { status: res.status, detail: detail.slice(0, 300), quota },
+    status: "ERROR",
+  });
+  return { ok: false, status: res.status, detail, quota };
 }
 
 function thaiDate(d: Date): string {
@@ -623,17 +651,64 @@ function nextOccurrence(from: Date, rule: string): Date | null {
   return next;
 }
 
+// ส่งไม่ออกแล้วลองใหม่ทุกชั่วโมง ไม่ใช่ทุกนาที โควตาหมดทีเป็นวัน ๆ ยิงทุกนาทีก็ได้ 429 กลับมาเปล่า ๆ
+const RETRY_AFTER_MS = 60 * 60_000;
+// ตัวเตือนครั้งเดียวที่ส่งไม่ออกนานเกินนี้ ถึงส่งได้ก็ไม่มีประโยชน์แล้ว
+const GIVE_UP_AFTER_MS = 7 * 24 * 3600_000;
+// จองค้างนานเกินนี้ถือว่ารอบนั้นตายกลางทาง ให้รอบอื่นหยิบต่อได้
+const CLAIM_STALE_MS = 5 * 60_000;
+// ช้ากว่าเวลาที่ตั้งไว้เกินนี้ ต้องบอกคนอ่านว่าข้อความมาช้า ไม่ใช่ทำเหมือนตรงเวลา
+const LATE_NOTE_MS = 10 * 60_000;
+
+function thaiShort(iso: string): string {
+  return new Date(iso).toLocaleString("th-TH", { timeZone: "Asia/Bangkok", dateStyle: "medium", timeStyle: "short" });
+}
+
+// จองตัวเตือนก่อนส่ง cron ยิงทุกนาที แต่ตัวเตือนแบบ AGENT คิดนานหลายสิบวินาที
+// ถ้าไม่จอง รอบถัดไปจะหยิบอันเดิมแล้วส่งซ้ำ
+async function claimReminder(id: string): Promise<boolean> {
+  const stale = new Date(Date.now() - CLAIM_STALE_MS).toISOString();
+  const now = new Date().toISOString();
+  const { data } = await supabase.from("reminders")
+    .update({ claimed_at: now }).eq("id", id).eq("status", "PENDING")
+    .or(`claimed_at.is.null,claimed_at.lt.${stale}`)
+    .select("id");
+  return (data ?? []).length > 0;
+}
+
+// ให้ตัวรับแชทคิดเนื้อหาให้ ตัวเตือนแบบนี้เก็บ "คำสั่ง" ไม่ใช่ข้อความสำเร็จรูป
+// เช่น "สรุปสถานะเช็กลิสต์ 5 ข้อของสาขาที่จะเปิดใน 14 วัน" ต้องคิดใหม่ทุกเช้าจากข้อมูลวันนั้น
+async function composeAgentReminder(reminderId: string): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
+  try {
+    const res = await fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/line-webhook`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-cron-key": CRON_SECRET },
+      body: JSON.stringify({ compose_reminder: { reminder_id: reminderId } }),
+      signal: AbortSignal.timeout(120_000),
+    });
+    const out = await res.json().catch(() => ({}));
+    if (!res.ok || !out.answer) return { ok: false, error: String(out.error ?? `คิดเนื้อหาไม่สำเร็จ (${res.status})`) };
+    return { ok: true, text: String(out.answer) };
+  } catch (e) {
+    return { ok: false, error: `คิดเนื้อหาไม่สำเร็จ: ${String(e).slice(0, 160)}` };
+  }
+}
+
 async function dueReminders() {
+  const now = Date.now();
   const { data: due } = await supabase.from("reminders")
-    .select("id, chat_id, message, repeat_rule, repeat_count, repeat_until, remind_at, task_id")
+    .select("id, chat_id, message, kind, repeat_rule, repeat_count, repeat_until, remind_at, task_id, fail_count, last_failed_at")
     .eq("status", "PENDING")
-    .lte("remind_at", new Date().toISOString())
+    .lte("remind_at", new Date(now).toISOString())
     .order("remind_at", { ascending: true })
     .limit(50);
   if (!due || due.length === 0) return;
 
-  let sent = 0, repeated = 0, stopped = 0;
+  let sent = 0, repeated = 0, stopped = 0, failed = 0, gaveUp = 0;
   for (const r of due) {
+    if (r.last_failed_at && now - new Date(r.last_failed_at).getTime() < RETRY_AFTER_MS) continue;
+    if (!(await claimReminder(r.id))) continue;
+
     // งานที่ผูกไว้ปิดแล้ว ไม่ต้องเตือนอีก นี่คือความหมายของ "จนกว่าจะบอกว่าเสร็จ"
     let taskDone = false;
     if (r.task_id) {
@@ -644,33 +719,94 @@ async function dueReminders() {
       // ตารางนี้อนุญาตสถานะแค่ PENDING SENT CANCELLED เคยเขียน DONE ลงไปแล้วมันเงียบ ๆ ไม่ผ่าน
       // เพราะไม่ได้เช็ค error ตอนนี้เช็คแล้วและเขียนค่าที่ตารางรับจริง
       const { error } = await supabase.from("reminders")
-        .update({ status: "CANCELLED" }).eq("id", r.id);
+        .update({ status: "CANCELLED", claimed_at: null }).eq("id", r.id);
       if (error) console.error("หยุดเตือนซ้ำไม่สำเร็จ", r.id, error.message);
       else stopped++;
       continue;
     }
 
-    await pushToGroup(r.chat_id, `⏰ ${r.message}`);
-    sent++;
-
     const next = r.repeat_rule ? nextOccurrence(new Date(r.remind_at), String(r.repeat_rule)) : null;
-    const pastEnd = r.repeat_until && next && next.getTime() > new Date(r.repeat_until).getTime();
-    if (next && !pastEnd) {
+    const pastEnd = Boolean(r.repeat_until && next && next.getTime() > new Date(r.repeat_until).getTime());
+    const hasNext = Boolean(next && !pastEnd);
+
+    // ส่งไม่ออก: เตือนซ้ำให้ข้ามไปรอบถัดไป ไม่ให้กองสะสมแล้วระเบิดออกมาทีเดียวตอนโควตากลับ
+    // เตือนครั้งเดียวเก็บไว้ลองใหม่ ส่งช้าแต่บอกว่าช้า ดีกว่าหายเงียบ
+    const recordFailure = async (reason: string, quota = false) => {
+      failed++;
+      // แจ้งตั้มในแชทส่วนตัว โควตาหมดแจ้งวันละครั้งพอ (ส่งไม่ออกอยู่แล้ว จะไปรอแนบตอนเขาทักมา)
+      // ส่วนตัวเตือนที่พังด้วยเหตุอื่นแจ้งรายตัว ไม่เกินหกชั่วโมงครั้ง
+      try {
+        if (quota) {
+          const b = await getPushBlocked(supabase);
+          await notifyAdmins(supabase, pushToGroup, "quota_exhausted",
+            b ? describePushBlocked(b) : "โควตาข้อความ LINE ของเดือนนี้หมด", 24 * 3600_000);
+        } else {
+          const { data: g } = await supabase.from("groups").select("group_name")
+            .eq("line_group_id", r.chat_id).maybeSingle();
+          await notifyAdmins(supabase, pushToGroup, `reminder_${r.id}`,
+            `ตัวเตือน "${String(r.message).slice(0, 80)}" ใน${g?.group_name ? `กลุ่ม ${g.group_name}` : "แชทส่วนตัว"} ` +
+              `ส่งไม่ออก: ${reason}`,
+            6 * 3600_000);
+        }
+      } catch (e) {
+        console.error("แจ้ง ADMIN ไม่สำเร็จ:", e);
+      }
+      const tooOld = !r.repeat_rule && now - new Date(r.remind_at).getTime() > GIVE_UP_AFTER_MS;
+      const patch: Record<string, unknown> = {
+        last_error: reason,
+        last_failed_at: new Date().toISOString(),
+        fail_count: (r.fail_count ?? 0) + 1,
+        claimed_at: null,
+      };
+      if (hasNext) patch.remind_at = next!.toISOString();
+      else if (r.repeat_rule || tooOld) {
+        patch.status = "CANCELLED";
+        gaveUp++;
+      }
+      const { error } = await supabase.from("reminders").update(patch).eq("id", r.id);
+      if (error) console.error("บันทึกว่าส่งไม่ออกไม่สำเร็จ", r.id, error.message);
+    };
+
+    let body: string;
+    if (r.kind === "AGENT") {
+      const composed = await composeAgentReminder(r.id);
+      if (!composed.ok) {
+        await recordFailure(composed.error);
+        continue;
+      }
+      body = composed.text;
+    } else {
+      body = String(r.message);
+    }
+    const late = now - new Date(r.remind_at).getTime() > LATE_NOTE_MS;
+    const text = (late ? `(ตัวเตือนนี้ควรส่งตั้งแต่ ${thaiShort(r.remind_at)} แต่ตอนนั้นส่งไม่ออก)\n` : "") + `⏰ ${body}`;
+
+    const res = await pushToGroup(r.chat_id, text);
+    if (!res.ok) {
+      await recordFailure(res.quota ? "โควตาข้อความ LINE ของเดือนนี้หมด" : `LINE ตอบ ${res.status}`, res.quota);
+      continue;
+    }
+    sent++;
+    // เก็บลงประวัติแชทด้วย แงวจะได้รู้ว่าตัวเองเพิ่งเตือนอะไรไป ตอนมีคนถามต่อ
+    await supabase.from("messages").insert({
+      line_user_id: "bot", line_group_id: r.chat_id, message_text: text, message_type: "bot",
+    });
+
+    const clear = { last_error: null, last_failed_at: null, claimed_at: null, sent_at: new Date().toISOString() };
+    if (hasNext) {
       await supabase.from("reminders").update({
-        remind_at: next.toISOString(),
-        sent_at: new Date().toISOString(),
-        repeat_count: (r.repeat_count ?? 0) + 1,
+        ...clear, remind_at: next!.toISOString(), repeat_count: (r.repeat_count ?? 0) + 1,
       }).eq("id", r.id);
       repeated++;
     } else {
-      await supabase.from("reminders")
-        .update({ status: "SENT", sent_at: new Date().toISOString() })
-        .eq("id", r.id);
+      await supabase.from("reminders").update({ ...clear, status: "SENT" }).eq("id", r.id);
     }
   }
   await supabase.from("audit_logs").insert({
     action: "scheduled_job", tool_name: "due_reminders",
-    input: {}, result: { sent, repeated, stopped_because_task_done: stopped }, status: "OK",
+    input: {},
+    result: { sent, repeated, failed, gave_up: gaveUp, stopped_because_task_done: stopped },
+    status: failed > 0 ? "ERROR" : "OK",
   });
 }
 
@@ -701,7 +837,15 @@ async function checkinSummary() {
     }
     const s = await dayStatus(supabase, c, today);
     const text = formatDaySummary(c, s, { closing: true });
-    await pushToGroup(c.chat_id, text);
+    const res = await pushToGroup(c.chat_id, text);
+    if (!res.ok) {
+      // โควตาหมดลองซ้ำทุก 5 นาทีก็ได้ 429 กลับมาทั้งวัน ปล่อยให้เป็นวันที่ส่งไม่ออก
+      // (ลง audit แล้วและแงวรู้สถานะโควตา ตอบความจริงได้) ส่วนพังชั่วคราวแบบอื่นคืนการจองให้ลองรอบหน้า
+      if (!res.quota) {
+        await supabase.from("checkin_campaigns").update({ last_summary_on: null }).eq("id", c.id);
+      }
+      continue;
+    }
     await supabase.from("messages").insert({
       line_user_id: "bot", line_group_id: c.chat_id, message_text: text, message_type: "bot",
     });
@@ -726,7 +870,16 @@ Deno.serve(async (req: Request) => {
     if (job === "daily_summary") await dailySummary();
     else if (job === "morning_reminder") await morningReminder();
     else if (job === "weekly_summary") await weeklySummary();
-    else if (job === "due_reminders") await dueReminders();
+    else if (job === "due_reminders") {
+      await dueReminders();
+      // เฝ้าโควตาไปด้วย ข้างในจำกัดเองให้ดูชั่วโมงละครั้ง ไม่ต้องเพิ่ม cron
+      // พังก็ห้ามลากตัวเตือนพังตาม จึงแยกไว้นอกสุด
+      try {
+        await watchLineQuota(supabase, CHANNEL_ACCESS_TOKEN, pushToGroup);
+      } catch (e) {
+        console.error("เฝ้าโควตา LINE ไม่สำเร็จ:", e);
+      }
+    }
     else if (job === "extract_events") await extractEvents();
     else if (job === "daily_context") await dailyContext();
     else if (job === "checkin_summary") await checkinSummary();

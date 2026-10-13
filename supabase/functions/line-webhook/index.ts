@@ -10,6 +10,18 @@ import {
   resolveModel,
 } from "../_shared/models.ts";
 import { type Campaign, dayStatus, formatDaySummary, matchUnit, thaiToday, unitKey } from "../_shared/checkins.ts";
+import {
+  clearPushBlocked,
+  describePushBlocked,
+  getPushBlocked,
+  isQuotaError,
+  markPushBlocked,
+  notifyAdmins,
+  type PushFn,
+  queueAdminAlert,
+  takeAdminAlerts,
+} from "../_shared/line_delivery.ts";
+import { EXTRACT_SYSTEM, LEAK_FALLBACK, looksLikeLeakedReasoning } from "../_shared/leak_guard.ts";
 
 const CHANNEL_SECRET = Deno.env.get("LINE_CHANNEL_SECRET") ?? "";
 const CHANNEL_ACCESS_TOKEN = Deno.env.get("LINE_CHANNEL_ACCESS_TOKEN") ?? "";
@@ -66,10 +78,15 @@ async function lineSend(path: string, payload: unknown): Promise<string | null> 
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${CHANNEL_ACCESS_TOKEN}` },
     body: JSON.stringify(payload),
   });
+  const isPush = path.endsWith("/message/push");
   if (!res.ok) {
-    console.error(`LINE ${path} failed:`, res.status, await res.text());
+    const detail = await res.text();
+    console.error(`LINE ${path} failed:`, res.status, detail);
+    // reply ไม่นับโควตา มีแต่ push ที่โดนเพดานรายเดือน จดไว้ให้งานตามเวลากับแงวเห็นสถานะเดียวกัน
+    if (isPush && isQuotaError(res.status, detail)) await markPushBlocked(supabase, detail);
     return null;
   }
+  if (isPush) await clearPushBlocked(supabase);
   try {
     const body = await res.json();
     return String(body?.sentMessages?.[0]?.id ?? "") || "sent";
@@ -78,14 +95,22 @@ async function lineSend(path: string, payload: unknown): Promise<string | null> 
   }
 }
 
-async function sendReply(replyToken: string, to: string, text: string, quoteToken?: string | null): Promise<string | null> {
+// extra = ข้อความแยกบอลลูนต่อท้ายคำตอบ ใช้แนบเรื่องที่ต้องแจ้ง ADMIN โดยไม่ปนเนื้อคำตอบ
+async function sendReply(
+  replyToken: string, to: string, text: string, quoteToken?: string | null, extra: string[] = [],
+): Promise<string | null> {
   const message: any = { type: "text", text: text.slice(0, 4900) };
   if (quoteToken) message.quoteToken = quoteToken;
-  const messages = [message];
+  const messages = [message, ...extra.slice(0, 4).map((t) => ({ type: "text", text: t.slice(0, 4900) }))];
   const id = await lineSend("/v2/bot/message/reply", { replyToken, messages });
   if (id) return id;
   return await lineSend("/v2/bot/message/push", { to, messages });
 }
+
+const pushAsBot: PushFn = async (to, text) => {
+  const id = await lineSend("/v2/bot/message/push", { to, messages: [{ type: "text", text: text.slice(0, 4900) }] });
+  return { ok: Boolean(id) };
+};
 
 // ดึงชื่อจริงจาก LINE เพื่อลงทะเบียนพนักงานใหม่อัตโนมัติ
 async function fetchLineProfile(userId: string, groupId: string | null): Promise<string | null> {
@@ -160,11 +185,16 @@ const TEXT_BURST_WINDOW_MS = 5 * 60_000;
 //
 // ต้องตัดที่คำตอบล่าสุด ไม่งั้นช่องว่างจากรอบก่อนจะถูกเอามาคิดด้วย
 // คนที่ถามใหม่หลังเงียบไปหนึ่งนาทีจะกลายเป็นต้องรอยี่สิบวินาทีทั้งที่พิมพ์มาข้อความเดียว
-async function senderMessages(chatId: string, lineUserId: string) {
-  const { data: botRow } = await supabase.from("messages")
+//
+// ต้องเป็นคำตอบที่มาก่อนข้อความของตัวเอง ไม่ใช่คำตอบล่าสุด 23 ก.ย. คำตอบเรื่องก่อนหน้าลงมา
+// ระหว่างที่บอลลูนถัดไปสองอันกำลังรอ ทั้งสองหลุดออกนอกหน้าต่างพร้อมกัน มองไม่เห็นกันเลยตอบทั้งคู่
+async function senderMessages(chatId: string, lineUserId: string, myAt?: string | null) {
+  let botQuery = supabase.from("messages")
     .select("created_at")
     .eq("line_group_id", chatId)
-    .eq("line_user_id", "bot")
+    .eq("line_user_id", "bot");
+  if (myAt) botQuery = botQuery.lt("created_at", myAt);
+  const { data: botRow } = await botQuery
     .order("created_at", { ascending: false }).limit(1).maybeSingle();
   const windowStart = Date.now() - TEXT_BURST_WINDOW_MS;
   const botAt = botRow?.created_at ? new Date(botRow.created_at).getTime() : 0;
@@ -199,10 +229,13 @@ async function waitForSenderToFinish(
   let lastTyping = Date.now();
   let seen = -1;
   let quietSince = Date.now();
+  const { data: me } = await supabase.from("messages")
+    .select("created_at").eq("line_message_id", myMessageId).maybeSingle();
+  const myAt: string | null = me?.created_at ?? null;
 
   while (true) {
     await new Promise((r) => setTimeout(r, TEXT_BURST_POLL_MS));
-    const rows = await senderMessages(chatId, lineUserId);
+    const rows = await senderMessages(chatId, lineUserId, myAt);
     const meAt = rows.findIndex((r) => r.id === myMessageId);
     if (meAt >= 0) {
       const newerThatAnswers = rows.slice(meAt + 1).some(willAnswer);
@@ -1041,7 +1074,11 @@ const TOOLS = [
     input_schema: {
       type: "object",
       properties: {
-        hours_back: { type: "integer", description: "ย้อนหลังกี่ชั่วโมง เช่น 24 = วันนี้" },
+        hours_back: {
+          type: "integer",
+          description: "ย้อนหลังกี่ชั่วโมง ถามเรื่องวันนี้ให้ใส่จำนวนชั่วโมงตั้งแต่เที่ยงคืนไทยถึงตอนนี้ ไม่ใช่ 24 " +
+            "ผลจะบอก covered_from และ truncated ว่าเห็นข้อความครบช่วงไหม",
+        },
         group_name: {
           type: "string",
           description: "ชื่อกลุ่มอื่น · ในกลุ่มไม่ระบุ = กลุ่มปัจจุบัน · ในแชทส่วนตัวต้องระบุเสมอ",
@@ -1084,7 +1121,11 @@ const TOOLS = [
         overdue_only: { type: "boolean", description: "true = เฉพาะงานที่เลยกำหนดแล้วและยังไม่เสร็จ" },
         due_from: { type: "string", description: "กำหนดส่งตั้งแต่ ISO 8601 +07:00" },
         due_to: { type: "string", description: "กำหนดส่งถึง ISO 8601 +07:00" },
-        group_name: { type: "string", description: "ชื่อกลุ่มที่งานสังกัด ไม่ระบุ = ทุกกลุ่มรวมงานในแชทส่วนตัว" },
+        group_name: {
+          type: "string",
+          description: "ชื่อกลุ่มที่งานสังกัด ไม่ระบุ = ทุกกลุ่มรวมงานในแชทส่วนตัว " +
+            "ห้ามใส่คำว่า 'แชทส่วนตัว' เพราะไม่ใช่ชื่อกลุ่ม อยากได้งานในแชทส่วนตัวด้วยให้เว้นช่องนี้ว่าง",
+        },
         query: { type: "string", description: "คำค้นในชื่องาน" },
         limit: { type: "integer", description: "ค่าเริ่มต้น 30 สูงสุด 100" },
       },
@@ -1342,11 +1383,22 @@ const TOOLS = [
       "ตั้งเตือนตามเวลา เช่น 'เตือนอีก 2 นาที' หรือ 'พรุ่งนี้เตือนแพรวส่งภาพก่อนเที่ยง' " +
       "การเตือนจะถูกส่งเข้าแชทที่สั่ง ระบุ to_name ถ้าเตือนคนอื่น (จะแท็กชื่อในข้อความ) " +
       "เตือนซ้ำได้ด้วย repeat และผูกกับงานด้วย until_task_done เพื่อให้หยุดเองเมื่อปิดงาน " +
-      "เวลามีคนบอกว่า 'ถามทุกวันจนกว่าจะเสร็จ' ให้เปิดงานก่อนด้วย create_task แล้วตั้งเตือนซ้ำผูกกับงานนั้น",
+      "เวลามีคนบอกว่า 'ถามทุกวันจนกว่าจะเสร็จ' ให้เปิดงานก่อนด้วย create_task แล้วตั้งเตือนซ้ำผูกกับงานนั้น " +
+      "ถ้าสิ่งที่ต้องส่งตอนถึงเวลาต้องดูข้อมูล ณ ตอนนั้น (สรุปสถานะเช็กลิสต์ นับถอยหลังวันเปิดสาขา งานค้างของวันนี้ " +
+      "ยอดเช็กชื่อ) ให้ใส่ live=true แล้วเขียน message เป็นคำสั่งว่าจะให้ทำอะไร ระบบจะให้คุณคิดเนื้อหาใหม่ทุกรอบตอนถึงเวลา " +
+      "ห้ามตั้งแบบข้อความธรรมดาแล้วเขียนว่า 'จะจี้เช็กลิสต์' เพราะสิ่งที่ส่งออกไปจะเป็นแค่ประโยคนั้นประโยคเดียว",
     input_schema: {
       type: "object",
       properties: {
-        message: { type: "string", description: "ข้อความที่จะเตือน" },
+        message: {
+          type: "string",
+          description: "ข้อความที่จะเตือน ถ้า live=true คือคำสั่งที่คุณจะทำตอนถึงเวลา เช่น " +
+            "'สรุปเช็กลิสต์ 5 ข้อของสาขาที่จะเปิดภายใน 14 วัน ข้อไหนยังไม่เสร็จให้แท็กคนดูแล'",
+        },
+        live: {
+          type: "boolean",
+          description: "true = ตอนถึงเวลาให้คุณคิดเนื้อหาใหม่จากข้อมูลวันนั้นแล้วส่ง / ไม่ใส่ = ส่งข้อความเดิมตามที่เขียน",
+        },
         remind_at: { type: "string", description: "เวลาเตือนครั้งแรก ISO 8601 +07:00 เช่น 2026-09-02T12:00:00+07:00" },
         to_name: { type: "string", description: "ชื่อเล่นคนที่ถูกเตือน ไม่ระบุ = ตัวเอง" },
         repeat: {
@@ -1665,6 +1717,9 @@ type Ctx = {
   // โหมดข้อสอบ: เรียก tool จริงได้ แต่ห้ามยิงข้อความออกไปหาคนจริง
   // ข้อสอบใช้ตัวตนของคนจริงในการทดสอบ ถ้าไม่กันไว้ ทุกครั้งที่รันข้อสอบทีมจะได้ข้อความจากบอทโดยไม่มีใครสั่ง
   dryRun?: boolean;
+  // ตัวเตือนแบบ live ที่ระบบปลุกให้คิดเนื้อหาเองตามเวลา ไม่มีคนสั่งอยู่ตรงนั้น
+  // อ่านข้อมูลแล้วรายงานได้ แต่ห้ามแก้ข้อมูลหรือส่งอะไรออกไปเอง ปฏิเสธจริง ไม่ใช่แกล้งทำว่าสำเร็จแบบโหมดข้อสอบ
+  readOnly?: boolean;
   // ของที่แนบมากับข้อความนี้ ให้ tool หยิบไปใช้ได้โดยไม่ต้องส่งผ่านพารามิเตอร์
   attachment?: { messageId: string; name: string } | null; caller: any; group: any; lineGroupId: string | null };
 
@@ -1809,7 +1864,18 @@ function shiftCovers(s: any, weekday: number, ymd: string, hhmm: string): boolea
   return (onDay && hhmm >= start) || (startedYesterday && hhmm < end);
 }
 
+// นอกจากเครื่องมือที่เขียนข้อมูล ยังมีพวกที่ส่งข้อความหรือสร้างของข้างนอก ตัวเตือนอัตโนมัติห้ามทำเหมือนกัน
+const SENDS_OUTWARD = new Set([
+  "send_dm", "monday_send_images", "create_admin_link", "google_connect_link", "create_meeting",
+]);
+
 async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
+  if (ctx.readOnly && (WRITE_TOOLS.has(name) || SENDS_OUTWARD.has(name))) {
+    return {
+      error: "ข้อความเตือนอัตโนมัติอ่านข้อมูลแล้วรายงานได้อย่างเดียว ห้ามแก้ข้อมูลหรือส่งข้อความออกไปเอง " +
+        "ถ้าเห็นว่าควรทำอะไรต่อ ให้เขียนแนะนำไว้ในข้อความ แล้วให้คนในกลุ่มสั่งเอง",
+    };
+  }
   if (ctx.dryRun && WRITE_TOOLS.has(name)) {
     const denied = dryRunGuard(name, ctx);
     if (denied) return { error: denied };
@@ -2031,12 +2097,21 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       }
       if (!targetLineGroupId) return { error: "ใช้ได้เฉพาะในกลุ่ม หรือระบุ group_name" };
       const since = new Date(Date.now() - input.hours_back * 3600_000).toISOString();
-      const { data: msgs } = await supabase.from("messages")
+      // ต้องตัดก็ตัดของเก่าทิ้ง ไม่ใช่ของใหม่ เดิมเรียงเก่าไปใหม่แล้วตัดที่ 200 แถว
+      // 28 ก.ย. ขอย้อน 96 ชั่วโมงในกลุ่มที่คุยวันละหลายร้อยข้อความ ได้แต่ 200 ข้อความแรกของสี่วันก่อน
+      // ของวันนี้หายหมด แงวเลยตอบว่าแบมส่งคลิป 0 คลิป แล้วกลายเป็น 1 กับ 5 ตอนโดนทัก
+      const LIMIT = 400;
+      const { count: totalInPeriod } = await supabase.from("messages")
+        .select("id", { count: "exact", head: true })
+        .eq("line_group_id", targetLineGroupId)
+        .gte("created_at", since);
+      const { data: newestFirst } = await supabase.from("messages")
         .select("line_user_id, message_text, created_at")
         .eq("line_group_id", targetLineGroupId)
         .gte("created_at", since)
-        .order("created_at", { ascending: true })
-        .limit(200);
+        .order("created_at", { ascending: false })
+        .limit(LIMIT);
+      const msgs = (newestFirst ?? []).slice().reverse();
       const { data: users } = await supabase.from("users").select("line_user_id, display_name");
       const nameOf = new Map((users ?? []).map((u: any) => [u.line_user_id, u.display_name]));
       nameOf.set("bot", "MT Agent");
@@ -2044,11 +2119,24 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
         .select("title, status, due_at")
         .eq("group_id", targetGroup?.id ?? "00000000-0000-0000-0000-000000000000")
         .gte("created_at", since);
+      const thai = (iso: string) =>
+        new Date(iso).toLocaleString("th-TH", { timeZone: "Asia/Bangkok", dateStyle: "short", timeStyle: "short" });
+      const truncated = (totalInPeriod ?? 0) > msgs.length;
       return {
-        messages: (msgs ?? []).map((m: any) => ({
+        // ช่วงที่เห็นจริง ตัวเลขที่นับได้จริงอยู่ในช่วงนี้เท่านั้น
+        covered_from: msgs.length ? thai(msgs[0].created_at) : null,
+        covered_to: msgs.length ? thai(msgs[msgs.length - 1].created_at) : null,
+        total_in_period: totalInPeriod ?? msgs.length,
+        truncated,
+        note: truncated
+          ? `ช่วงที่ขอมีข้อความ ${totalInPeriod} อัน ส่งมาให้เฉพาะ ${msgs.length} อันล่าสุด ` +
+            `ถ้าต้องนับย้อนไปก่อน ${thai(msgs[0].created_at)} ให้บอกตรง ๆ ว่ายังนับไม่ครบ`
+          : undefined,
+        // at เป็นเวลาไทยแล้ว ใช้ตัดสินว่าเป็น "วันนี้" หรือไม่ได้ตรง ๆ
+        messages: msgs.map((m: any) => ({
           who: nameOf.get(m.line_user_id) ?? "ไม่ทราบชื่อ",
           text: m.message_text,
-          at: m.created_at,
+          at: thai(m.created_at),
         })),
         tasks_in_period: tasks ?? [],
       };
@@ -3005,7 +3093,7 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       const fullMessage = prefix + input.message;
       const { data: dups } = await supabase.from("reminders")
         .select("id, message, remind_at")
-        .eq("chat_id", reminderChatId).eq("message", fullMessage)
+        .eq("chat_id", reminderChatId).eq("message", input.live === true ? String(input.message) : fullMessage)
         .eq("status", "PENDING").limit(1);
       if ((dups ?? []).length > 0) {
         return {
@@ -3027,19 +3115,26 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       // กันเตือนวนไม่รู้จบถ้าไม่มีใครปิดงาน หยุดเองใน 60 วัน
       const until = rule ? new Date(when.getTime() + 60 * 24 * 3600_000).toISOString() : null;
 
+      const live = input.live === true;
       const { data, error } = await supabase.from("reminders").insert({
         target_user_id: targetId,
         chat_id: reminderChatId,
-        message: fullMessage,
+        // แบบ live เก็บคำสั่งล้วน ๆ ไม่เติมชื่อคนไว้ข้างหน้า เพราะไม่ได้เอาไปส่งตรง ๆ
+        message: live ? String(input.message) : fullMessage,
         remind_at: when.toISOString(),
         created_by_user_id: ctx.caller.id,
         repeat_rule: rule,
         task_id: linkedTask?.id ?? null,
         repeat_until: until,
+        kind: live ? "AGENT" : "TEXT",
       }).select("id, message, remind_at").single();
       if (error) return { error: error.message };
+      const blocked = await getPushBlocked(supabase);
       return {
         reminder_set: data,
+        live,
+        // ตั้งได้แต่ส่งไม่ออก ต้องบอกคนตั้งตั้งแต่ตอนนี้ ไม่ใช่ให้เขาไปรอแล้วผิดหวังทีหลัง
+        delivery_warning: blocked ? describePushBlocked(blocked) : undefined,
         repeat: rule,
         stops_when_done: linkedTask?.title ?? null,
         note: rule
@@ -3053,12 +3148,19 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
 
     case "list_reminders": {
       const { data, error } = await supabase.from("reminders")
-        .select("id, message, remind_at, repeat_rule, repeat_count")
+        .select("id, message, kind, remind_at, repeat_rule, repeat_count, sent_at, last_error, last_failed_at, fail_count")
         .eq("chat_id", ctx.lineGroupId ?? ctx.caller.line_user_id)
         .eq("status", "PENDING")
         .order("remind_at", { ascending: true }).limit(20);
       if (error) return { error: error.message };
-      return { pending: data };
+      const blocked = await getPushBlocked(supabase);
+      return {
+        pending: data,
+        // ผลการส่งจริงอยู่ที่ last_error และ last_failed_at ถ้ามีคนถามว่าทำไมไม่เห็นตัวเตือน ให้ตอบจากตรงนี้
+        delivery: blocked
+          ? describePushBlocked(blocked)
+          : "การส่งข้อความอัตโนมัติปกติ ตัวเตือนที่ส่งไม่ออกจะมี last_error บอกเหตุผล",
+      };
     }
 
     case "cancel_reminder": {
@@ -3679,7 +3781,9 @@ const SYSTEM_RULES = `คุณคือ "แงว" (MT Agent) — AI น้อ
     ห้ามพูดว่าบันทึกไว้ให้แล้วโดยไม่ได้เรียก tool เด็ดขาด — ไอเดียจะหายไปเฉย ๆ และเจ้าตัวจะเข้าใจว่ามีคนรับเรื่องไว้แล้ว
 2.3 ห้ามรับปากอนาคตที่คุณทำไม่ได้ กฎ 2.1 ห้ามอ้างว่า "ทำแล้ว" ข้อนี้ห้ามอ้างว่า "จะทำ" ด้วย
     ถ้าไม่มี tool ทำสิ่งนั้น ห้ามพูดว่า "จะเตือนทุกสัปดาห์" "ตั้งระบบไว้ให้แล้ว" "รับรู้แล้วว่าเสร็จ" "บันทึกถาวรแล้ว" หรือ "ไม่มีหลุดแน่นอน"
-    ให้บอกตรง ๆ ว่าทำไม่ได้ แล้วเสนอสิ่งที่ทำได้จริงแทน เช่น เตือนซ้ำทุกสัปดาห์ทำไม่ได้ แต่ตั้งเตือนครั้งเดียวสำหรับรอบถัดไปให้ได้
+    ให้บอกตรง ๆ ว่าทำไม่ได้ แล้วเสนอสิ่งที่ทำได้จริงแทน เช่น ปิดแอดใน Facebook ให้ไม่ได้ แต่ตั้งเตือนคนที่ดูแลแอดให้ได้
+    ก่อนจะบอกว่าทำไม่ได้ ให้ดูเครื่องมือที่มีก่อนเสมอ เตือนตามเวลา เตือนซ้ำทุกวัน/ทุกวันทำงาน/ทุกสัปดาห์
+    และเตือนที่คิดเนื้อหาใหม่ทุกรอบ (create_reminder live) ทำได้จริงทั้งหมด
     สิ่งที่ remember_preference ทำได้คือจำวิธีพูดและวิธีตอบเท่านั้น มันไม่ได้สร้างการแจ้งเตือน ไม่ได้ปิดงาน และไม่ได้เปลี่ยนความสามารถของระบบ
     ห้ามเรียกมันว่า "บันทึกเข้าระบบถาวร" ให้บอกว่าจำวิธีตอบไว้ให้แล้ว
 2.4 เรื่องที่ไม่ได้มาจาก tool (ข้อกฎหมาย ระเบียบราชการ ความรู้ทั่วไป การคำนวณในหัว) ตอบได้ แต่ต้องบอกให้รู้ว่ามาจากความรู้ของคุณเอง ไม่ได้ไปตรวจสอบมา
@@ -3755,6 +3859,12 @@ const SYSTEM_RULES = `คุณคือ "แงว" (MT Agent) — AI น้อ
 20.3 หลายเรื่องในข้อความเดียว ให้เปิดงานแยกใบและตั้งเตือนแยกอันต่อเรื่อง จะได้ปิดทีละเรื่องได้
 20.4 ไม่ได้ระบุว่าใครรับผิดชอบ ให้เปิดงานไว้โดยไม่ระบุเจ้าของ แล้วบอกว่ายังไม่ได้ระบุเจ้าของ ห้ามเดาชื่อคนจากบริบท
 20.5 พอมีคนบอกว่าเรื่องไหนเสร็จแล้ว ให้ปิดงานนั้นด้วย update_task การเตือนซ้ำจะหยุดเอง แล้วบอกว่าหยุดให้แล้ว
+20.6 ถ้าสิ่งที่ต้องส่งตอนถึงเวลาต้องดูข้อมูลของวันนั้น เช่น สถานะเช็กลิสต์เปิดสาขา นับถอยหลัง งานค้างของวันนี้ ยอดเช็กชื่อ
+     ให้ตั้ง create_reminder ด้วย live=true แล้วเขียน message เป็นคำสั่งว่าจะให้ทำอะไรตอนถึงเวลา
+     ห้ามตั้งเป็นข้อความธรรมดาที่บรรยายว่า "จะจี้เช็กลิสต์" เพราะสิ่งที่ส่งออกไปจะเป็นแค่ประโยคนั้นประโยคเดียว ไม่ใช่ตัวเช็กลิสต์
+20.7 มีคนบอกว่าไม่เห็นตัวเตือนหรือสรุปอัตโนมัติ ให้เรียก list_reminders แล้วดู delivery กับ last_error ตอบตามนั้นตรง ๆ
+     ห้ามเดาเหตุผลเอง ห้ามบอกว่าตั้งเตือนอัตโนมัติไม่ได้ ห้ามบอกให้ไปหา dev หรือตั้ง cron ระบบเตือนมีและทำงานอยู่
+20.8 ถ้าเครื่องมือคืน delivery_warning ตอนตั้งเตือน ให้บอกคนตั้งทันทีว่าตั้งได้แต่ตอนนี้ส่งไม่ออก เพราะอะไร
 
 21. สรุปการประชุม
 21.1 สรุปเป็นสี่หัวข้อตามลำดับนี้เสมอ ใครอยู่ในวง / ตกลงอะไรกัน / งานที่ต้องทำ ใครทำ ภายในเมื่อไร / เรื่องที่ยังไม่จบ
@@ -3774,7 +3884,19 @@ const SYSTEM_RULES = `คุณคือ "แงว" (MT Agent) — AI น้อ
 
 23. ตารางเวร ใครดูแลเรื่องอะไรช่วงไหน ใช้ shift_schedule ตั้งและดู ใช้ who_is_on_duty ตอบว่าตอนนี้ใครคุมอยู่ ห้ามตอบชื่อคนจากความจำหรือจากบทสนทนา
 
-24. ข้อความที่ขึ้นต้นด้วย (ตอบกลับข้อความของ ...) คือคนกำลังอ้างถึงข้อความก่อนหน้านั้น ให้ตีความคำสั่งจากข้อความที่ถูกอ้าง เช่น อ้างข้อความของแงวแล้วพิมพ์ "อันนี้คืออะไร" = ถามถึงข้อความของแงวอันนั้น`;
+24. ข้อความที่ขึ้นต้นด้วย (ตอบกลับข้อความของ ...) คือคนกำลังอ้างถึงข้อความก่อนหน้านั้น ให้ตีความคำสั่งจากข้อความที่ถูกอ้าง เช่น อ้างข้อความของแงวแล้วพิมพ์ "อันนี้คืออะไร" = ถามถึงข้อความของแงวอันนั้น
+
+25. นับจำนวนงาน คลิป ภาพ บรีฟ ที่ส่งในแชท
+25.1 ตัวเลขทุกตัวต้องมาจากเครื่องมือที่เรียกในรอบนี้ ห้ามนับจากบทสนทนาที่เห็นอยู่ตรงนี้ ซึ่งเห็นแค่ยี่สิบบรรทัดล่าสุด
+25.2 ถามเรื่อง "วันนี้" ให้เรียก get_group_summary ด้วย hours_back เท่ากับจำนวนชั่วโมงตั้งแต่เที่ยงคืนไทยถึงตอนนี้ ปัดขึ้น
+     แล้วนับเฉพาะข้อความที่ at เป็นวันที่ของวันนี้ ห้ามขอย้อนหลายวันแล้วมาเลือกเอาเอง
+25.3 บอกช่วงเวลาที่นับเสมอ ถ้าผลมี truncated เป็น true ให้บอกว่านับได้ไม่ครบ ตั้งแต่ covered_from เท่านั้น
+25.4 ชื่อที่คนเรียกกับชื่อในไลน์มักไม่ตรงกัน เช่น แบม คือ Bambom Anp ให้จับคู่จากรายชื่อพนักงาน แล้วบอกในคำตอบว่าจับคู่กับใคร
+     ไม่แน่ใจว่าใครเป็นใครให้ถาม ห้ามบอกว่า 0 เพราะหาชื่อเล่นไม่เจอ
+25.5 โดนทักว่านับผิด ห้ามปรับตัวเลขตามที่โดนทัก (บวกหนึ่ง ลบหนึ่ง) ให้เรียกเครื่องมือดึงใหม่แล้วนับใหม่ทั้งหมด
+     แล้วบอกสั้น ๆ ว่ารอบก่อนพลาดเพราะอะไร ตัวเลขที่เปลี่ยนไปเรื่อย ๆ ทำให้ทีมเชื่อตัวเลขไหนของแงวไม่ได้อีกเลย
+25.6 ดูรายการงานของคนอื่นไม่ได้เพราะสิทธิ์ ยังนับสิ่งที่ส่งในกลุ่มนี้ให้ได้ เพราะคนในกลุ่มเห็นข้อความเหล่านั้นอยู่แล้ว
+     แต่ต้องบอกว่านับจากข้อความที่ส่งในกลุ่ม ช่วงเวลาไหน ไม่ใช่จากระบบงาน`;
 
 // ส่วนที่เปลี่ยนทุกครั้ง (เวลา ผู้ใช้ กลุ่ม รายชื่อ) ต้องอยู่หลังจุด cache เสมอ
 function buildContext(ctx: Ctx, roster: any[], groups: any[], orgPersona: string | null, crossChat: string): string {
@@ -3812,6 +3934,10 @@ type AgentOpts = {
   // แต่โหมดข้อสอบไม่ได้บันทึกอะไร ถ้าตัดจะไปตัดคำตอบล่าสุดของบอททิ้ง
   // ทำให้ประวัติจบลงที่คำขอของผู้ใช้แบบไม่มีคำตอบ แล้วโมเดลนึกว่าเป็นงานค้างที่ต้องทำให้
   skipLatestMessage?: boolean;
+  // id ของข้อความที่กำลังตอบ ใช้ตัดมันออกจากประวัติให้ตรงตัว แทนการตัดแถวล่าสุดทิ้งแบบเดา
+  // 23 ก.ย. แถวล่าสุดตอนเริ่มคิดคือคำตอบของแงวเองที่เพิ่งส่งไปเรื่องก่อนหน้า มันถูกตัดทิ้งแทน
+  // โมเดลเลยไม่เห็นว่าตอบเรื่อง สต็อบ/ออย ไปแล้ว เอาคำว่า "เขียนสรุปสั้นๆ" ไปใช้กับเรื่อง วิว/แบม
+  currentMessageId?: string | null;
   purpose?: string; // ใช้แยกยอด token ว่าหมดไปกับอะไร: chat / eval / gate
   spec?: ModelSpec; // ใช้ตอนรันข้อสอบด้วยโมเดลอื่น ปกติไม่ต้องส่ง ใช้ของ production
   // ถังให้ยอด token ไหลออกไปถึงผู้เรียก ใช้ตอนเทียบโมเดลว่ารอบหนึ่งเสียเงินเท่าไร
@@ -3880,11 +4006,17 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
   // บทสนทนาล่าสุดในแชทนี้ เพื่อให้คำสั่งต่อเนื่องสั้น ๆ ("1", "งานเดียว") ตีความได้
   // ดึงเกินมา 1 เพราะข้อความที่กำลังตอบถูกบันทึกไปแล้ว ต้องตัดทิ้ง — ได้ประวัติจริง 20 ข้อความ
   // ประวัติเป็นส่วนที่ cache ไม่ได้ (เปลี่ยนทุกครั้ง) จึงเป็นก้อนที่โดนคิดเงินเต็มราคาหนักที่สุด
-  const { data: recent } = await supabase.from("messages")
-    .select("line_user_id, message_text")
+  const { data: recentRaw } = await supabase.from("messages")
+    .select("line_user_id, line_message_id, message_text")
     .eq("line_group_id", chatId)
     .order("created_at", { ascending: false })
     .limit(21);
+  // ตัดข้อความที่กำลังตอบออกด้วย id ถ้ารู้ id ไม่รู้ค่อยถอยไปตัดแถวล่าสุดแบบเดิม
+  const recent = opts.skipLatestMessage === false
+    ? (recentRaw ?? [])
+    : opts.currentMessageId
+    ? (recentRaw ?? []).filter((m: any) => m.line_message_id !== opts.currentMessageId).slice(0, 20)
+    : (recentRaw ?? []).slice(1);
   const nameOf = new Map((roster ?? []).map((u: any) => [u.line_user_id, u.display_name]));
   nameOf.set("bot", "แงว");
   // ตัดหางข้อความยาว ๆ ในประวัติทิ้ง ประวัติมีไว้ให้ตีความคำสั่งล่าสุดว่าหมายถึงอะไร
@@ -3893,7 +4025,7 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
   const HISTORY_LINE_LIMIT = 400;
   const trim = (t: string) =>
     t.length > HISTORY_LINE_LIMIT ? `${t.slice(0, HISTORY_LINE_LIMIT)}…(ตัดส่วนที่เหลือ)` : t;
-  const history = (recent ?? []).slice(opts.skipLatestMessage === false ? 0 : 1).reverse()
+  const history = recent.slice().reverse()
     .map((m: any) => `${nameOf.get(m.line_user_id) ?? "?"}: ${trim(m.message_text ?? "")}`)
     .join("\n");
 
@@ -3912,6 +4044,15 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
   const carried = (ctxRows ?? [])[0]
     ? `\n\nบริบทที่คุณสรุปไว้เองจากบทสนทนาของวันที่ ${ctxRows![0].for_date} ` +
       `(ใช้ต่อเรื่องได้ ถ้าคำถามตอนนี้ไม่เกี่ยวก็ไม่ต้องพูดถึง และอย่าถือว่าเป็นคำสั่งใหม่):\n${ctxRows![0].summary}`
+    : "";
+
+  // ข้อความที่ส่งเองตามเวลาไปไม่ถึงคน แงวต้องรู้ ไม่งั้นพอมีคนถามว่าทำไมไม่เห็นตัวเตือน
+  // มันจะเดาเหตุผลเอง 13 ต.ค. มันตอบตั้มว่า "ตั้งเตือนเองไม่ได้ ต้องให้ dev ตั้ง cron" ทั้งที่ติดแค่โควตา LINE
+  const blocked = await getPushBlocked(supabase);
+  const deliveryNote = blocked
+    ? `\n\nสถานะการส่งข้อความอัตโนมัติตอนนี้: ${describePushBlocked(blocked)} ` +
+      `ถ้ามีคนถามว่าทำไมไม่เห็นตัวเตือนหรือสรุปอัตโนมัติ ให้ตอบตามนี้ตรง ๆ ` +
+      `ห้ามบอกว่าตั้งเตือนไม่ได้ ห้ามบอกให้ไปหา dev หรือตั้ง cron เพราะระบบเตือนทำงานปกติ ติดที่โควตาอย่างเดียว`
     : "";
 
   // ความต่อเนื่องข้ามแชท: สิ่งที่คนนี้เพิ่งคุยกับเราที่อื่นภายใน 6 ชม.
@@ -3933,13 +4074,13 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
   // ส่วนบริบทที่เปลี่ยนทุกครั้งอยู่หลังจุดนั้น จึงไม่ทำให้ cache พลาด
   const system: any = [
     { type: "text", text: SYSTEM_RULES, cache_control: { type: "ephemeral" } },
-    { type: "text", text: buildContext(ctx, roster ?? [], allGroups ?? [], persona?.value ?? null, carried + crossChat) },
+    { type: "text", text: buildContext(ctx, roster ?? [], allGroups ?? [], persona?.value ?? null, carried + deliveryNote + crossChat) },
   ];
   // รุ่นที่ไม่มีบริบทข้ามแชท ไว้ใช้ตอนโมเดลบล็อกทั้ง prompt ทิ้ง
   const systemNoCross: any = crossChat
     ? [
       { type: "text", text: SYSTEM_RULES, cache_control: { type: "ephemeral" } },
-      { type: "text", text: buildContext(ctx, roster ?? [], allGroups ?? [], persona?.value ?? null, carried) },
+      { type: "text", text: buildContext(ctx, roster ?? [], allGroups ?? [], persona?.value ?? null, carried + deliveryNote) },
     ]
     : system;
   // เก็บรุ่นที่ไม่มีประวัติไว้ด้วย เผื่อโมเดลบล็อกทั้ง prompt ทิ้งแล้วต้องลองใหม่แบบสั้นลง
@@ -4002,6 +4143,38 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
 
   // นับ token รวมทุกรอบของคำตอบเดียว แล้วบันทึกครั้งเดียวตอนจบ ไม่ว่าจะจบด้วยทางไหน
   const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, iterations: 0 };
+
+  // ด่านสุดท้ายก่อนคำตอบออกไปหาคน ทุกทางที่จบด้วยข้อความต้องผ่านตรงนี้
+  // ตัวตรวจแค่ "สงสัย" แล้วให้โมเดลอีกรอบคัดเฉพาะส่วนที่ตั้งใจพูดกับคน ไม่ตัดสินเองว่าทิ้งอะไร
+  // เพราะมีกรณีถูกต้องที่หน้าตาคล้ายกัน 4 ต.ค. ตั้มขอดูกฎที่ตั้งไว้ แงวไล่ให้ดูตรง ๆ
+  // ตัวคัดจะเห็นว่าทั้งหมดพูดกับตั้ม แล้วคืนมาครบตามเดิม
+  const finish = async (text: string): Promise<string> => {
+    if (!looksLikeLeakedReasoning(text)) return text;
+    try {
+      const r = await createMessage(spec, {
+        max_tokens: 2048,
+        system: EXTRACT_SYSTEM,
+        messages: [{ role: "user", content: text }],
+      });
+      const ru = r.usage ?? {};
+      usage.iterations++;
+      usage.input += ru.input_tokens ?? 0;
+      usage.output += ru.output_tokens ?? 0;
+      const kept = (r.content ?? []).filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n").trim();
+      const out = !kept || /^NONE\b/.test(kept) ? LEAK_FALLBACK : kept;
+      await supabase.from("audit_logs").insert({
+        user_id: ctx.caller?.id ?? null, action: "leak_caught", tool_name: "leak_guard",
+        input: { chat_id: chatId, draft: text.slice(0, 1500) },
+        result: { kept_chars: out.length, draft_chars: text.length, fell_back: out === LEAK_FALLBACK },
+        status: "OK",
+      });
+      return out;
+    } catch (e) {
+      // ตัวคัดล่ม ส่งร่างที่มีบันทึกความคิดออกไปไม่ได้ ขอโทษแล้วให้ถามใหม่ดีกว่า
+      console.error("คัดบันทึกความคิดออกไม่สำเร็จ:", e);
+      return LEAK_FALLBACK;
+    }
+  };
 
   // โมเดลบางค่ายมี filter ที่บล็อกทั้ง prompt ทิ้งก่อนจะได้เริ่มตอบ และตั้งค่าปิดไม่ได้
   //
@@ -4079,7 +4252,7 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
         .filter((b: any) => b.type === "text")
         .map((b: any) => b.text)
         .join("\n");
-      return text || "…";
+      return text ? await finish(text) : "…";
     }
 
     messages.push({ role: "assistant", content: response.content });
@@ -4110,7 +4283,7 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
         .map((b: any) => b.text)
         .join("\n");
       console.error("model said tool_use but sent no tool call; answering with the text it had");
-      return text || "ขอโทษค่ะ แงวสะดุดกลางทาง ลองพิมพ์ใหม่อีกครั้งนะคะ 🙏";
+      return text ? await finish(text) : "ขอโทษค่ะ แงวสะดุดกลางทาง ลองพิมพ์ใหม่อีกครั้งนะคะ 🙏";
     }
     messages.push({ role: "user", content: toolResults });
   }
@@ -4137,7 +4310,7 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
       .map((b: any) => b.text)
       .join("\n")
       .trim();
-    if (text) return text;
+    if (text) return await finish(text);
   } catch (e) {
     console.error("สรุปรอบสุดท้ายไม่สำเร็จ", e);
   }
@@ -4186,6 +4359,10 @@ function isBareName(text: string): boolean {
 type Sim = {
   answered: string[]; seenAtAnswer: number[];
   capture_answer?: boolean; captured_question?: string; captured_answer?: string;
+  // จำลองว่าคำตอบใช้เวลาคิด แล้วค่อยลงแชท ของจริงคิดสิบกว่าวินาที ระหว่างนั้นคนพิมพ์ต่อได้
+  // เดิมการซ้อมไม่ใส่คำตอบลงแชทเลย จึงไม่เคยเจอกรณีคำตอบเรื่องก่อนหน้าลงมากลางทาง
+  // ซึ่งเป็นต้นเหตุของการตอบสลับเรื่อง 23 ก.ย. ทั้งที่ชุดซ้อมผ่านครบทุกข้อ
+  answer_delay_ms?: number; answer_text?: string;
 };
 
 async function handleEvent(event: any, sim?: Sim) {
@@ -4259,7 +4436,12 @@ async function handleEvent(event: any, sim?: Sim) {
   // และเพิ่งพูดไปไม่นาน ให้โมเดลอ่านบริบทแล้วตัดสินใจ ไม่ใช่เงียบใส่ไปเลย
   // ผูกกับ "บอทพูดล่าสุด" ไม่ใช่แค่ช่วงเวลา เพราะพอมีคนอื่นพูดแทรก บทสนทนาก็เปลี่ยนมือไปแล้ว
   let followUp = false;
-  if (lineGroupId && speakable && !tagged && !named) {
+  // "กำลังคุยต่อกับแงว" คิดแยกจากว่าข้อความนี้เรียกชื่อหรือเปล่า เพราะตัวรวมบอลลูนข้างล่าง
+  // ต้องใช้ทายว่าบอลลูนถัดไปของคนเดียวกันจะได้ตอบไหม 23 ก.ย. บอลลูนที่สองเรียกชื่อแงว
+  // เลยไม่ได้คิดเรื่องคุยต่อ แล้วทายว่าบอลลูนที่สาม (ไม่เรียกชื่อ) จะไม่ได้ตอบ จึงไม่ยอมถอยให้
+  // แต่บอลลูนที่สามได้ตอบจริงในฐานะคุยต่อ ผลคือตอบทั้งสองอัน
+  let continuing = false;
+  if (lineGroupId && speakable) {
     // ดึงมา 2 แถวแล้วข้ามข้อความปัจจุบันเอง (มันเพิ่งถูกบันทึกไปด้านบน)
     // ห้ามกรองด้วย .neq("line_message_id", ...) เพราะคำตอบของบอทเก็บ line_message_id เป็น NULL
     // และ NULL <> x ใน SQL ได้ NULL ไม่ใช่ true — แถวของบอทจะถูกกรองทิ้งไปด้วย
@@ -4277,9 +4459,10 @@ async function handleEvent(event: any, sim?: Sim) {
     if (botAt >= 0) {
       const bot = earlier[botAt];
       const between = earlier.slice(0, botAt);
-      followUp = Date.now() - new Date(bot.created_at).getTime() < FOLLOW_UP_WINDOW_MS &&
+      continuing = Date.now() - new Date(bot.created_at).getTime() < FOLLOW_UP_WINDOW_MS &&
         between.every((r: any) => r.line_user_id === lineUserId);
     }
+    if (!tagged && !named) followUp = continuing;
   }
 
   if (lineGroupId && !tagged && !named && !followUp) return;
@@ -4296,7 +4479,7 @@ async function handleEvent(event: any, sim?: Sim) {
       // และถ้าข้อความนี้กำลังคุยต่อกับแงวอยู่ บอลลูนถัดไปของคนเดียวกันก็จะได้ตอบเหมือนกัน
       // จึงถอยให้ได้ เคสจริง 21 ก.ย. กลุ่มงานทอง ตั้มพิมพ์สามบอลลูนไม่ได้เรียกชื่อ แงวตอบสามครั้ง
       // เพราะเงื่อนไขเดิมมองว่าบอลลูนใหม่กว่าจะไม่ได้ตอบ เลยไม่ยอมถอยให้
-      return followUp;
+      return continuing;
     };
     if (!lineGroupId && !sim) await showTyping(lineUserId);
     const mine = await waitForSenderToFinish(
@@ -4435,10 +4618,18 @@ async function handleEvent(event: any, sim?: Sim) {
         : question;
       try {
         sim.captured_question = asked;
-        sim.captured_answer = await runAgent(asked, ctx, chatId, { images, file, judgeAddressed });
+        sim.captured_answer = await runAgent(asked, ctx, chatId, {
+          images, file, judgeAddressed, currentMessageId: event.message.id,
+        });
       } catch (e) {
         sim.captured_answer = `[ERROR] ${String(e)}`;
       }
+    }
+    if (sim.answer_text !== undefined) {
+      await new Promise((r) => setTimeout(r, Number(sim.answer_delay_ms ?? 0)));
+      await supabase.from("messages").insert({
+        line_user_id: "bot", line_group_id: chatId, message_text: sim.answer_text, message_type: "bot",
+      });
     }
     return;
   }
@@ -4447,9 +4638,27 @@ async function handleEvent(event: any, sim?: Sim) {
     const asked = quoted && msgType === "text"
       ? `(ตอบกลับข้อความของ ${quoted.who}: "${quoted.text}")\n${question}`
       : question;
-    const answer = await runAgent(asked, ctx, chatId, { images, file, judgeAddressed });
+    const answer = await runAgent(asked, ctx, chatId, {
+      images, file, judgeAddressed, currentMessageId: event.message.id,
+    });
     if (judgeAddressed && answer.trim().toUpperCase().startsWith("SILENT")) return;
-    const sentId = await sendReply(event.replyToken, replyTo, answer, quoteToken);
+    // ADMIN ทักในแชทส่วนตัว = ช่องทางเดียวที่แน่ใจว่าถึงตัวเขาโดยไม่กินโควตา แนบปัญหาที่ค้างส่งไว้ไปด้วย
+    const adminNote = !lineGroupId && ctx.caller?.role === "ADMIN" ? await takeAdminAlerts(supabase) : null;
+    const sentId = await sendReply(event.replyToken, replyTo, answer, quoteToken, adminNote ? [adminNote] : []);
+    if (!sentId && adminNote) await queueAdminAlert(supabase, adminNote);
+    // ส่งไม่ถึงก็ห้ามจดว่าพูดไปแล้ว ไม่งั้นแงวจะเชื่อว่าคนเห็นคำตอบนี้ ทั้งที่ไม่มีใครเห็นเลย
+    // (reply หมดอายุตอนคิดนานแล้วตกไปใช้ push ระหว่างที่โควตาเดือนนั้นหมด)
+    if (!sentId) {
+      await supabase.from("audit_logs").insert({
+        user_id: ctx.caller?.id ?? null, action: "reply_undelivered", tool_name: "line_reply",
+        input: { chat_id: chatId, preview: answer.slice(0, 160) }, result: { delivered: false }, status: "ERROR",
+      });
+      await notifyAdmins(supabase, pushAsBot, "reply_undelivered",
+        `แงวตอบ ${ctx.caller?.display_name ?? "ผู้ใช้"} ใน${ctx.group?.group_name ? `กลุ่ม ${ctx.group.group_name}` : "แชทส่วนตัว"} ` +
+          `แต่ส่งไม่ถึง (คิดนานจนหมดเวลาตอบ แล้วส่งแบบ push ก็ไม่ผ่าน) เขาไม่ได้เห็นคำตอบนี้`,
+        6 * 3600_000);
+      return;
+    }
     // เก็บคำตอบของบอทด้วย เพื่อให้ summary/ความจำบทสนทนาเห็นครบทั้งสองฝั่ง
     // พร้อม id ที่ LINE ให้มา จะได้รู้ตอนมีคนตอบกลับข้อความนี้ทีหลัง
     await supabase.from("messages").insert({
@@ -4462,6 +4671,42 @@ async function handleEvent(event: any, sim?: Sim) {
   } catch (e) {
     console.error("agent error:", e);
     await sendReply(event.replyToken, replyTo, "ขอโทษค่า ระบบขัดข้องชั่วคราว ลองใหม่อีกครั้งนะคะ 🙏", quoteToken);
+  }
+}
+
+// ตัวเตือนแบบ live ถึงเวลาแล้ว งานตามเวลาเรียกมาที่นี่ให้คิดเนื้อหา แล้วไปส่งเองต่อ
+// แยกการคิดกับการส่ง ให้ฝั่งงานตามเวลาเป็นคนเดียวที่ส่งและนับว่าส่งถึงหรือเปล่า
+// คิดในนามคนที่ตั้งตัวเตือน สิทธิ์จึงเท่ากับเขา แต่อ่านอย่างเดียว เพราะตอนนั้นไม่มีใครอยู่คุม
+async function composeScheduledReminder(body: string): Promise<Response> {
+  const id = JSON.parse(body)?.compose_reminder?.reminder_id;
+  const { data: r } = await supabase.from("reminders")
+    .select("id, chat_id, message, kind, status, created_by_user_id").eq("id", id).maybeSingle();
+  if (!r || r.kind !== "AGENT" || r.status !== "PENDING") {
+    return Response.json({ error: "ไม่พบตัวเตือนแบบ live ที่รอส่ง" }, { status: 404 });
+  }
+  const { data: caller } = await supabase.from("users").select("*").eq("id", r.created_by_user_id).maybeSingle();
+  if (!caller || !caller.is_active) {
+    return Response.json({ error: "คนที่ตั้งตัวเตือนนี้ไม่อยู่ในระบบแล้ว" }, { status: 409 });
+  }
+  // แชทส่วนตัวใช้ userId ของ LINE ซึ่งขึ้นต้นด้วย U ส่วนกลุ่มขึ้นต้นด้วย C
+  const inGroup = !String(r.chat_id).startsWith("U");
+  let group: any = null;
+  if (inGroup) {
+    const { data: g } = await supabase.from("groups").select("*").eq("line_group_id", r.chat_id).maybeSingle();
+    group = g;
+  }
+  const ctx: Ctx = { caller, group, lineGroupId: inGroup ? r.chat_id : null, readOnly: true };
+  const instruction =
+    `[ตัวเตือนอัตโนมัติที่ ${caller.display_name ?? "ทีม"} ตั้งไว้ ถึงเวลาส่งแล้ว ตอนนี้ไม่มีใครพิมพ์มา]\n` +
+    `ทำตามคำสั่งข้างล่าง แล้วเขียนเฉพาะข้อความที่จะส่งเข้าแชทนี้ ข้อมูลทุกตัวต้องมาจากเครื่องมือที่เรียกในรอบนี้ ` +
+    `ไม่ต้องทักทาย ไม่ต้องบอกว่าเป็นตัวเตือน ไม่ต้องถามกลับ เพราะไม่มีใครรอตอบอยู่:\n${r.message}`;
+  try {
+    const answer = await runAgent(instruction, ctx, r.chat_id, { skipLatestMessage: false, purpose: "scheduled" });
+    if (!answer.trim()) return Response.json({ error: "คิดเนื้อหาออกมาว่างเปล่า" }, { status: 500 });
+    return Response.json({ answer });
+  } catch (e) {
+    console.error("compose scheduled reminder failed:", e);
+    return Response.json({ error: String(e).slice(0, 200) }, { status: 500 });
   }
 }
 
@@ -4490,12 +4735,17 @@ async function runBurstSim(sim: any): Promise<Response> {
   if (sim.prior_bot) {
     await supabase.from("messages").insert({
       line_message_id: priorBotId, line_user_id: "bot", line_group_id: chatId,
-      message_text: "ข้อความก่อนหน้าของแงวในการซ้อม", message_type: "bot",
+      message_text: String(sim.prior_bot_text ?? "ข้อความก่อนหน้าของแงวในการซ้อม"), message_type: "bot",
     });
     await new Promise((r) => setTimeout(r, 300));
   }
 
-  const collected: Sim = { answered: [], seenAtAnswer: [], capture_answer: Boolean(sim.capture_answer) };
+  const collected: Sim = {
+    answered: [], seenAtAnswer: [], capture_answer: Boolean(sim.capture_answer),
+    ...(sim.answer_text !== undefined
+      ? { answer_text: String(sim.answer_text), answer_delay_ms: Number(sim.answer_delay_ms ?? 0) }
+      : {}),
+  };
   const ids: string[] = [];
   const runs: Promise<void>[] = [];
   for (let i = 0; i < bubbles.length; i++) {
@@ -4882,6 +5132,7 @@ Deno.serve(async (req: Request) => {
 
   const body = await req.text();
   const testKey = Deno.env.get("CRON_SECRET") ?? "";
+  if (testKey && req.headers.get("x-cron-key") === testKey) return composeScheduledReminder(body);
   if (testKey && req.headers.get("x-test-key") === testKey) return runEval(body);
   const signature = req.headers.get("x-line-signature") ?? "";
   if (!(await verifySignature(body, signature))) {

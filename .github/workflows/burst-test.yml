@@ -1,0 +1,24 @@
+name: Burst test
+
+# ซ้อมส่งหลายบอลลูนเข้าแงวแล้วนับว่าตอบกี่ครั้ง (tests/burst-test.py)
+# เรื่องตอบหลายบอลลูนเคยรายงานว่าแก้แล้วสี่รอบจากการอ่านโค้ด และผิดทุกรอบ ต้องยืนยันด้วยการซ้อมเท่านั้น
+# รันที่นี่เพื่อใช้ CRON_SECRET จาก repository secret ไม่ต้องมีรหัสอยู่ในเครื่องใคร
+# สั่งเองเท่านั้น ข้อที่เรียกโมเดลจริงมีค่าใช้จ่าย อย่าให้รันทุก push
+on:
+  workflow_dispatch:
+
+jobs:
+  burst:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run burst test
+        env:
+          TEST_KEY: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$TEST_KEY" ]; then
+            echo "::error::CRON_SECRET repository secret is not set"
+            exit 1
+          fi
+          python3 tests/burst-test.py "$TEST_KEY"

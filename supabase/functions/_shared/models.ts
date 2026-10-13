@@ -408,6 +408,10 @@ export function fromGeminiResponse(data: any): any {
   const content: any[] = [];
   let calls = 0;
   for (const part of cand.content?.parts ?? []) {
+    // part ที่ Gemini ติดป้ายว่าเป็นความคิด ห้ามกลายเป็นคำตอบ ถ้าวันไหนเปิด includeThoughts
+    // หรือ Google เปลี่ยนค่าเริ่มต้น มันจะไหลไปถึงลูกค้าตรง ๆ (บันทึกความคิดที่หลุดมาแล้วสองครั้ง
+    // เป็นแบบปนอยู่ในข้อความธรรมดา ตัวกรองนี้ไม่พอสำหรับแบบนั้น ดู _shared/leak_guard.ts)
+    if (part.thought === true) continue;
     if (part.text) content.push({ type: "text", text: part.text });
     if (part.functionCall) {
       content.push({
