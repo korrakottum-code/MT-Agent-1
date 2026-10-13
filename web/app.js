@@ -374,7 +374,7 @@ function renderUsage() {
     <div class="tiles">${tile(answers, "ครั้งที่แงวตอบคนจริง")}${tile(money(chatUsd), "ค่าตอบแชท")}
       ${tile(money(jobsUsd), "ค่างานอัตโนมัติ")}${tile(money(evalUsd), "ค่าข้อสอบ")}</div>
     ${evalUsd > chatUsd ? `<div class="banner warn">ค่าข้อสอบสูงกว่าค่าใช้งานจริง ${(evalUsd / Math.max(chatUsd, 0.01)).toFixed(1)} เท่า ·
-      push ใช้ข้อสอบรุ่นถูกอยู่แล้ว ระวังการสั่งรันเต็มชุดซ้ำ ๆ ระหว่างไล่แก้</div>` : ""}
+      ข้อสอบรันเองทุกครั้งที่ push โค้ด และทุกครั้งที่สั่งรันเอง ระหว่างไล่แก้ให้ยิงเฉพาะข้อที่เกี่ยว (-Only) อย่ารันเต็มชุดซ้ำ ๆ</div>` : ""}
     <div class="card scroll"><h3>รายกลุ่ม</h3><table>
       <tr><th>แชท</th><th class="num">แงวตอบ</th><th class="num">คนใช้</th><th class="num">ใช้กี่วัน</th><th>ล่าสุด</th>
         <th class="num">ข้อความคน</th><th class="num">ค่าใช้จ่าย</th></tr>${chats}</table></div>
@@ -415,7 +415,8 @@ function renderHealth() {
     : !q.limited ? "แพ็กเกจไม่จำกัดจำนวนข้อความ"
     : `<b style="font-size:22px">${q.used.toLocaleString()}</b> <span class="muted">จาก ${q.limit.toLocaleString()} ข้อความ (${q.pct}%)</span>
        <div class="bar"><i style="width:${Math.min(100, q.pct)}%;background:${pctClass}"></i></div>
-       <span class="muted">เฉลี่ยวันละ ${q.per_day}${q.runs_out ? ` · ถ้าใช้เท่านี้น่าจะหมดราว ${thaiDay(q.runs_out)}` : ""}
+       <span class="muted">เฉลี่ยวันละ ${q.per_day} · ${q.runs_out
+         ? `<b class="warn">ถ้าใช้เท่านี้น่าจะหมดราว ${thaiDay(q.runs_out)}</b>` : "ใช้เท่านี้ไม่หมดก่อนสิ้นเดือน"}
        · แจ้งตั้มในแชทส่วนตัวเองที่ 80% และ 95%</span>`;
   const jobs = (h.jobs || []).map((j) => `<tr>
       <td>${esc(JOB_TH[j.jobname] || j.jobname)}<br><span class="muted">${esc(j.jobname)} · ${esc(j.schedule)}</span></td>

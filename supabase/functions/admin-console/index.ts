@@ -187,12 +187,14 @@ async function loadHealth() {
     const day = bkk.getUTCDate();
     const perDay = used / Math.max(1, day);
     const daysLeft = limit && perDay > 0 ? Math.floor((limit - used) / perDay) : null;
+    // โควตารีเซ็ตต้นเดือน คาดเกินสิ้นเดือนไม่มีความหมาย เคยโชว์ว่าจะหมดปี 2573
+    const monthEnd = new Date(Date.UTC(bkk.getUTCFullYear(), bkk.getUTCMonth() + 1, 0)).getUTCDate();
+    const runsOutThisMonth = daysLeft !== null && daysLeft >= 0 && day + daysLeft <= monthEnd;
     quota = {
       limited: limit !== null, limit, used,
       pct: limit ? Math.round((used / limit) * 1000) / 10 : null,
       per_day: Math.round(perDay * 10) / 10,
-      runs_out: daysLeft !== null && daysLeft >= 0
-        ? new Date(bkk.getTime() + daysLeft * 24 * 3600_000).toISOString().slice(0, 10) : null,
+      runs_out: runsOutThisMonth ? new Date(bkk.getTime() + daysLeft! * 24 * 3600_000).toISOString().slice(0, 10) : null,
     };
   }
   let alerts: any[] = [];

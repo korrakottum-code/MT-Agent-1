@@ -179,7 +179,9 @@ export async function watchLineQuota(sb: any, channelToken: string, push: PushFn
   const day = bkk.getUTCDate();
   const perDay = used / Math.max(1, day);
   const daysLeft = perDay > 0 ? Math.floor((limit - used) / perDay) : null;
-  const runsOut = daysLeft !== null && daysLeft >= 0
+  // โควตารีเซ็ตต้นเดือน ถ้าคาดว่าหมดเลยสิ้นเดือนก็คือไม่หมดในเดือนนี้
+  const monthEnd = new Date(Date.UTC(bkk.getUTCFullYear(), bkk.getUTCMonth() + 1, 0)).getUTCDate();
+  const runsOut = daysLeft !== null && daysLeft >= 0 && day + daysLeft <= monthEnd
     ? new Date(bkk.getTime() + daysLeft * 24 * 3600_000).toISOString().slice(0, 10)
     : null;
 
