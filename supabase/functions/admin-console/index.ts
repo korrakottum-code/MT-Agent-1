@@ -72,9 +72,15 @@ async function audit(userId: string, action: string, input: unknown, result: unk
 
 async function loadData() {
   const [events, users, groups, taskRows, spendRows] = await Promise.all([
+    // คิวยืนยันเอาเฉพาะเรื่องที่ต้องตัดสินใจ และยังสดอยู่
+    // ถึง 13 ต.ค. คิวกองอยู่ 269 รายการ มีคนกดแค่ครั้งเดียวในหกสัปดาห์ 249 อันเป็นโน้ต
+    // ซึ่งเป็นความจำให้แงวค้นทีหลัง ใช้งานได้โดยไม่ต้องมีใครยืนยัน จึงไม่เอามาแสดง
+    // ส่วนรายการที่ค้างเกินสามวันไม่มีใครสนใจแล้ว ซ่อนจากคิวแต่ไม่ลบ แงวยังค้นเจอเหมือนเดิม
     supabase.from("events")
       .select("id, type, title, detail, due_at, confidence, source_excerpt, chat_id, owner_user_id, created_at")
-      .eq("status", "NEW").order("created_at", { ascending: false }).limit(100),
+      .eq("status", "NEW").neq("type", "NOTE")
+      .gte("created_at", new Date(Date.now() - 3 * 24 * 3600_000).toISOString())
+      .order("created_at", { ascending: false }).limit(100),
     supabase.from("users")
       .select("id, display_name, role, job_title, department, is_active, line_user_id").order("created_at"),
     supabase.from("groups").select("id, line_group_id, group_name, is_active").order("created_at"),

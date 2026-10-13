@@ -8,7 +8,8 @@ const STATE = {
   reminders: null, checklist: null, chats: null, groups: null, usage: null, health: null,
   chat: null, chatId: null, usageDays: 30, showOpened: false, editBranch: null,
 };
-let current = "events";
+// เปิดมาเจอเช็กลิสต์สาขา ของที่ใช้จริงทุกวัน (เดิมเปิดมาเจอคิวยืนยันที่ไม่มีใครกด)
+let current = "checklist";
 
 // token มาทาง fragment ซึ่งไม่ถูกส่งไปเซิร์ฟเวอร์ใด ๆ — ย้ายเข้า sessionStorage แล้วล้าง URL ทันที
 (function grabToken() {
@@ -137,11 +138,12 @@ async function loadData() {
 function renderEvents() {
   const list = DATA.events;
   if (!list.length) {
-    return "<div class='empty'>ไม่มีรายการรอยืนยัน 🎉<br><span style='font-size:13px'>ระบบอ่านบทสนทนาในกลุ่มทุก 3 ชั่วโมง " +
-      "กลุ่มที่คนคุยกันน้อยกว่า 3 ข้อความจะถูกข้าม</span></div>";
+    return "<div class='empty'>ไม่มีรายการรอยืนยัน<br><span style='font-size:13px'>แสดงเฉพาะงาน กำหนดส่ง และข้อตกลง " +
+      "ที่แงวจับได้จากแชทใน 3 วันล่าสุด · โน้ตทั่วไปแงวเก็บเป็นความจำให้ค้นทีหลังเอง ไม่ต้องยืนยัน</span></div>";
   }
   const people = DATA.users.filter((u) => u.is_active);
-  return list.map((e) => {
+  return "<p class='muted' style='margin-top:0'>งาน กำหนดส่ง และข้อตกลงที่แงวจับได้จากแชทใน 3 วันล่าสุด · " +
+    "เก่ากว่านั้นซ่อนเอง และโน้ตทั่วไปแงวเก็บเป็นความจำให้ค้นทีหลัง ไม่ต้องยืนยัน</p>" + list.map((e) => {
     const owner = people.map((u) => `<option value="${u.id}"${u.id === e.owner_user_id ? " selected" : ""}>${esc(u.display_name)}</option>`).join("");
     return `<div class="card" data-ev="${esc(e.id)}">
       <div class="row"><span class="tag ${esc(e.type)}">${esc(e.type)}</span><b class="grow">${esc(e.title)}</b>
