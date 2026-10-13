@@ -790,6 +790,12 @@ async function findUserByName(name: string) {
 // เชื่อมกับ Monday ของทีม จำกัดให้ใช้ได้เฉพาะกลุ่มที่ระบุไว้ใน MONDAY_ALLOWED_GROUPS
 // เพราะข้อมูลในบอร์ดเป็นงานของลูกค้า ไม่ควรเปิดให้ถามได้จากทุกห้อง
 function mondayAllowedHere(ctx: Ctx): string | null {
+  // กลุ่มเปิด/ปิด Monday ที่คอลัมน์ groups.monday_enabled (ตั้งจากหลังบ้านได้) ผูกกับแถวของกลุ่ม ไม่ใช่ชื่อ
+  // เดิมใช้ secret ที่เป็นชื่อกลุ่ม แงวมีคำสั่งเปลี่ยนชื่อกลุ่มอยู่แล้ว เปลี่ยนชื่อเมื่อไร Monday พังเงียบ ๆ
+  // secret ยังเหลือไว้เป็นทางสำรองตอนแถวยังไม่มีคอลัมน์นี้ และใช้กำหนดคนที่ใช้ในแชทส่วนตัวได้
+  if (ctx.group && typeof ctx.group.monday_enabled === "boolean") {
+    return ctx.group.monday_enabled ? null : "กลุ่มนี้ยังไม่ได้เปิดให้ใช้ Monday ให้ ADMIN เปิดได้ในหลังบ้าน แท็บกลุ่ม";
+  }
   const raw = (Deno.env.get("MONDAY_ALLOWED_GROUPS") ?? "").trim();
   if (!raw) return "ยังไม่ได้เปิดใช้ Monday — ต้องตั้ง secret MONDAY_ALLOWED_GROUPS ว่าให้ใช้ได้ในกลุ่มไหนก่อน";
   const allowed = raw.split(",").map((x) => x.trim()).filter(Boolean);
@@ -1711,6 +1717,37 @@ const TOOLS = [
       },
     },
   },
+  {
+    name: "branch_checklist_status",
+    description:
+      "ดูเช็กลิสต์เตรียมเปิดสาขาใหม่จากตาราง (สร้างเพจ / Check in Facebook / ปักหมุด Google Map / โปรพร้อมขึ้นแอด / Ad account ใหม่) " +
+      "ใช้ตอนถูกถามว่าสาขาไหนพร้อมหรือยัง ขาดอะไร เหลือกี่วันเปิด และใช้ทุกครั้งที่ต้องสรุปเช็กลิสต์ ห้ามควานจากแชทแทน " +
+      "ข้อที่ยังไม่ติ๊กแปลว่ายังไม่มีใครยืนยันว่าเสร็จ",
+    input_schema: {
+      type: "object",
+      properties: {
+        days_ahead: { type: "integer", description: "เอาสาขาที่จะเปิดภายในกี่วันข้างหน้า ค่าเริ่มต้น 14 ใส่ 0 = ทุกสาขาที่ยังไม่เปิด" },
+        branch: { type: "string", description: "ชื่อสาขาหรือชื่อย่อ (เช่น ปลวกแดง, PLD) ถ้าอยากดูสาขาเดียว" },
+        include_opened: { type: "boolean", description: "รวมสาขาที่เปิดไปแล้วด้วย" },
+      },
+    },
+  },
+  {
+    name: "branch_checklist_update",
+    description:
+      "ติ๊กหรือเอาติ๊กออกในเช็กลิสต์เปิดสาขา ใช้เมื่อมีคนบอกว่าข้อไหนของสาขาไหนเสร็จแล้ว เช่น 'เพจปลวกแดงสร้างแล้ว' " +
+      "'PLD ปักหมุดแล้ว' หรือบอกว่ายังไม่เสร็จ ถ้าไม่ชัดว่าสาขาไหนหรือข้อไหน ให้ถามก่อน ห้ามเดา",
+    input_schema: {
+      type: "object",
+      properties: {
+        branch: { type: "string", description: "ชื่อสาขาหรือชื่อย่อ" },
+        item: { type: "string", description: "ข้อในเช็กลิสต์ ใช้ชื่อข้อหรือคำสำคัญ เช่น เพจ, check in, google map, แอด, ad account" },
+        done: { type: "boolean", description: "true = เสร็จแล้ว false = เอาติ๊กออก" },
+        note: { type: "string", description: "รายละเอียดสั้น ๆ เช่น ลิงก์เพจ หรือเลข ad account" },
+      },
+      required: ["branch", "item", "done"],
+    },
+  },
 ];
 
 type Ctx = {
@@ -1783,6 +1820,7 @@ const WRITE_TOOLS = new Set([
   "checkin_record",
   "checkin_undo",
   "shift_schedule",
+  "branch_checklist_update",
 ]);
 
 // ด่านตรวจสิทธิ์ที่ต้องทำงานแม้ในโหมดข้อสอบ
@@ -1862,6 +1900,81 @@ function shiftCovers(s: any, weekday: number, ymd: string, hhmm: string): boolea
   const prevWeekday = (weekday + 6) % 7;
   const startedYesterday = s.on_date ? String(s.on_date) === prevYmd : s.weekday === prevWeekday;
   return (onDay && hhmm >= start) || (startedYesterday && hhmm < end);
+}
+
+// ---------------------------------------------------------------- เช็กลิสต์เปิดสาขา
+// เดิมแงวต้องควานสถานะจากแชททุกครั้ง แม่นได้ไม่เกินที่คนพิมพ์ไว้ และนับซ้ำ/ตกหล่นได้ง่าย
+// ตอนนี้อยู่ในตาราง branch_openings แก้ได้ทั้งจากแชท (ติ๊กข้อ) และจากหลังบ้าน (วันเปิด เพิ่ม/ลบสาขา)
+
+type ChecklistConfig = { items: { key: string; label: string }[]; start_days_before: number; ready_days_before: number };
+
+async function branchChecklistConfig(): Promise<ChecklistConfig> {
+  const { data } = await supabase.from("org_settings").select("value").eq("key", "branch_checklist").maybeSingle();
+  try {
+    const c = JSON.parse(data?.value ?? "{}");
+    return {
+      items: Array.isArray(c.items) ? c.items : [],
+      start_days_before: Number(c.start_days_before ?? 14),
+      ready_days_before: Number(c.ready_days_before ?? 7),
+    };
+  } catch {
+    return { items: [], start_days_before: 14, ready_days_before: 7 };
+  }
+}
+
+function daysUntil(dateYmd: string, todayYmd: string): number {
+  return Math.round((new Date(`${dateYmd}T00:00:00Z`).getTime() - new Date(`${todayYmd}T00:00:00Z`).getTime()) / 86_400_000);
+}
+
+const normBranch = (t: string) => t.toLowerCase().replace(/^สาขา/, "").replace(/\s+/g, "").trim();
+
+// ชื่อเต็ม หรือชื่อย่อที่ทีมใช้ (ตั้มสอนแงวไว้ว่า PLD = ปลวกแดง)
+function matchBranches(rows: any[], query: string): any[] {
+  const q = normBranch(query);
+  if (!q) return [];
+  const exact = rows.filter((b) => normBranch(b.name) === q || (b.aliases ?? []).some((a: string) => normBranch(a) === q));
+  if (exact.length) return exact;
+  return rows.filter((b) => normBranch(b.name).includes(q) || q.includes(normBranch(b.name)));
+}
+
+function matchChecklistItem(items: { key: string; label: string }[], query: string) {
+  const q = query.toLowerCase().replace(/\s+/g, "");
+  if (!q) return null;
+  return items.find((i) => i.key === q) ??
+    items.find((i) => i.label.toLowerCase().replace(/\s+/g, "").includes(q)) ??
+    items.find((i) => q.includes(i.label.toLowerCase().replace(/\s+/g, ""))) ??
+    // คำที่คนพิมพ์จริงแต่ไม่ได้อยู่ในชื่อข้อตรง ๆ
+    items.find((i) =>
+      (i.key === "page" && /เพจ|page/.test(q)) ||
+      (i.key === "fb_checkin" && /check\s*in|เช็คอิน|เช็กอิน/.test(q)) ||
+      (i.key === "google_map" && /map|แมพ|แมป|หมุด/.test(q)) ||
+      (i.key === "promo_ads" && /โปร|ขึ้นแอด|ยิงแอด/.test(q)) ||
+      (i.key === "ad_account" && /account|แอคเคา|บัญชี/.test(q))
+    ) ?? null;
+}
+
+function describeBranch(b: any, cfg: ChecklistConfig, today: string, nameOf: Map<string, string>) {
+  const left = daysUntil(b.open_date, today);
+  const items = cfg.items.map((i) => {
+    const s = (b.items ?? {})[i.key] ?? {};
+    return { item: i.label, done: s.done === true, by: s.by ?? null, note: s.note ?? null };
+  });
+  const missing = items.filter((i) => !i.done).map((i) => i.item);
+  return {
+    name: b.name,
+    brand: b.brand,
+    open_date: b.open_date,
+    days_left: left,
+    phase: left < 0 ? "เปิดแล้ว" : left <= cfg.start_days_before ? "ช่วงเตรียม" : "ยังไม่ถึงช่วงเตรียม",
+    // เลยเส้นพร้อม (ก่อนเปิด N วัน) แล้วยังขาด = ต้องขึ้นก่อนในรายงาน
+    past_ready_deadline: left >= 0 && left < cfg.ready_days_before && missing.length > 0,
+    done_count: items.length - missing.length,
+    total: items.length,
+    missing,
+    items,
+    owner: b.owner_user_id ? nameOf.get(b.owner_user_id) ?? null : null,
+    note: b.note ?? null,
+  };
 }
 
 // นอกจากเครื่องมือที่เขียนข้อมูล ยังมีพวกที่ส่งข้อความหรือสร้างของข้างนอก ตัวเตือนอัตโนมัติห้ามทำเหมือนกัน
@@ -3075,6 +3188,63 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       return { sent_to: target.display_name };
     }
 
+    case "branch_checklist_status": {
+      const cfg = await branchChecklistConfig();
+      const today = thaiToday();
+      let q = supabase.from("branch_openings").select("*").eq("active", true).order("open_date", { ascending: true });
+      if (!input.include_opened) q = q.gte("open_date", today);
+      const { data, error } = await q;
+      if (error) return { error: error.message };
+      let rows = data ?? [];
+      if (input.branch) {
+        const hit = matchBranches(rows, String(input.branch));
+        if (hit.length === 0) return { error: `ไม่พบสาขา "${input.branch}" ในเช็กลิสต์ (ดูรายชื่อได้ด้วยการเรียกโดยไม่ใส่ branch)` };
+        rows = hit;
+      } else if (input.days_ahead !== 0) {
+        const ahead = Number(input.days_ahead ?? cfg.start_days_before);
+        rows = rows.filter((b: any) => daysUntil(b.open_date, today) <= ahead);
+      }
+      const { data: people } = await supabase.from("users").select("id, display_name");
+      const nameOf = new Map((people ?? []).map((u: any) => [u.id, u.display_name]));
+      return {
+        today,
+        rule: `เริ่มเตรียม ${cfg.start_days_before} วันก่อนเปิด ทุกข้อต้องพร้อมก่อนเปิด ${cfg.ready_days_before} วัน`,
+        branches: rows.map((b: any) => describeBranch(b, cfg, today, nameOf)),
+        note: rows.length === 0 ? "ไม่มีสาขาเข้าช่วงที่ขอ" : undefined,
+      };
+    }
+
+    case "branch_checklist_update": {
+      const cfg = await branchChecklistConfig();
+      const { data } = await supabase.from("branch_openings").select("*").eq("active", true);
+      const hit = matchBranches(data ?? [], String(input.branch ?? ""));
+      if (hit.length === 0) return { error: `ไม่พบสาขา "${input.branch}" ในเช็กลิสต์` };
+      if (hit.length > 1) {
+        return { error: `ชื่อตรงหลายสาขา: ${hit.map((b: any) => `${b.name} (${b.brand ?? ""} เปิด ${b.open_date})`).join(", ")} ถามว่าหมายถึงสาขาไหน` };
+      }
+      const item = matchChecklistItem(cfg.items, String(input.item ?? ""));
+      if (!item) {
+        return { error: `ไม่รู้ว่าหมายถึงข้อไหน ข้อที่มีคือ ${cfg.items.map((i) => i.label).join(" / ")}` };
+      }
+      const b = hit[0];
+      const items = { ...(b.items ?? {}) };
+      items[item.key] = {
+        done: input.done === true,
+        at: new Date().toISOString(),
+        by: ctx.caller.display_name ?? null,
+        note: input.note ? String(input.note).slice(0, 300) : (items[item.key]?.note ?? null),
+      };
+      const { data: saved, error } = await supabase.from("branch_openings")
+        .update({ items, updated_at: new Date().toISOString() }).eq("id", b.id).select("*").single();
+      if (error) return { error: error.message };
+      const { data: people } = await supabase.from("users").select("id, display_name");
+      const nameOf = new Map((people ?? []).map((u: any) => [u.id, u.display_name]));
+      return {
+        updated: { branch: b.name, item: item.label, done: input.done === true },
+        branch: describeBranch(saved, cfg, thaiToday(), nameOf),
+      };
+    }
+
     case "create_reminder": {
       let targetId: string | null = ctx.caller.id;
       let prefix = "";
@@ -3899,7 +4069,14 @@ const SYSTEM_RULES = `คุณคือ "แงว" (MT Agent) — AI น้อ
 25.5 โดนทักว่านับผิด ห้ามปรับตัวเลขตามที่โดนทัก (บวกหนึ่ง ลบหนึ่ง) ให้เรียกเครื่องมือดึงใหม่แล้วนับใหม่ทั้งหมด
      แล้วบอกสั้น ๆ ว่ารอบก่อนพลาดเพราะอะไร ตัวเลขที่เปลี่ยนไปเรื่อย ๆ ทำให้ทีมเชื่อตัวเลขไหนของแงวไม่ได้อีกเลย
 25.6 ดูรายการงานของคนอื่นไม่ได้เพราะสิทธิ์ ยังนับสิ่งที่ส่งในกลุ่มนี้ให้ได้ เพราะคนในกลุ่มเห็นข้อความเหล่านั้นอยู่แล้ว
-     แต่ต้องบอกว่านับจากข้อความที่ส่งในกลุ่ม ช่วงเวลาไหน ไม่ใช่จากระบบงาน`;
+     แต่ต้องบอกว่านับจากข้อความที่ส่งในกลุ่ม ช่วงเวลาไหน ไม่ใช่จากระบบงาน
+
+26. เช็กลิสต์เตรียมเปิดสาขาอยู่ในตาราง ดูด้วย branch_checklist_status ทุกครั้ง ห้ามควานจากแชทหรือเดา
+26.1 มีคนบอกว่าข้อไหนของสาขาไหนเสร็จ เช่น "เพจปลวกแดงสร้างแล้ว" "PLD ปักหมุดแล้ว" ให้ติ๊กด้วย branch_checklist_update
+     แล้วบอกว่าติ๊กข้อไหนของสาขาไหนให้ ถ้าไม่ชัดว่าสาขาไหนหรือข้อไหน ให้ถามก่อน
+26.2 ข้อที่ยังไม่ติ๊กคือยังไม่มีใครยืนยัน ห้ามรายงานว่าเสร็จ แม้ในแชทจะดูเหมือนทำแล้ว ให้ถามว่าจะให้ติ๊กไหม
+26.3 สาขาที่ past_ready_deadline เป็น true ให้ขึ้นก่อนเสมอและบอกว่าเลยเส้นตายพร้อมแล้ว
+26.4 แก้วันเปิด เพิ่มหรือลบสาขา ทำได้ในหลังบ้าน แท็บเช็กลิสต์สาขา ถ้ามีคนขอในแชทให้บอกตามนี้`;
 
 // ส่วนที่เปลี่ยนทุกครั้ง (เวลา ผู้ใช้ กลุ่ม รายชื่อ) ต้องอยู่หลังจุด cache เสมอ
 function buildContext(ctx: Ctx, roster: any[], groups: any[], orgPersona: string | null, crossChat: string): string {
