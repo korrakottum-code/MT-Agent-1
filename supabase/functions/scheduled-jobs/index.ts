@@ -39,6 +39,28 @@ function jobSpec(envName: string, fallbackEnv?: string): ModelSpec {
 const specCheap = () => jobSpec("JOBS_MODEL", "CHAT_MODEL");
 const specSmart = () => jobSpec("JOBS_MODEL_SMART", "JOBS_MODEL");
 
+// ตัวกรองของ Gemini บล็อกทั้ง prompt ทิ้งได้ถ้าในแชทมีคำที่มันไม่ชอบ และตั้งค่าปิดไม่ได้
+// 14 ต.ค. บล็อกตอนสรุปประจำวันกลุ่มที่สาม งานล้มทั้งงาน สองกลุ่มที่คุยกันเยอะที่สุดเลยไม่ได้สรุป
+// ตัวหลักตอบไม่ได้ด้วยเหตุใดก็ตาม ให้ลองตัวสำรองหนึ่งครั้ง ใช้ secret ตัวเดียวกับฝั่งตอบแชท และต้องเป็นคนละค่าย
+function backupSpec(primary: ModelSpec): ModelSpec | null {
+  const key = (Deno.env.get("CHAT_FALLBACK_MODEL") ?? "luna").trim().toLowerCase();
+  if (!key || key === "none") return null;
+  const { spec } = resolveModel(key);
+  if (!spec || spec.model === primary.model) return null;
+  return spec;
+}
+
+async function askModel(spec: ModelSpec, params: any): Promise<{ response: any; spec: ModelSpec }> {
+  try {
+    return { response: await createMessage(spec, params), spec };
+  } catch (e) {
+    const backup = backupSpec(spec);
+    if (!backup) throw e;
+    console.error(`${spec.model} ตอบไม่ได้ (${(e as any)?.name ?? e}) — ลอง ${backup.model} แทน`);
+    return { response: await createMessage(backup, params), spec: backup };
+  }
+}
+
 // จำกัดให้ job ทำเฉพาะบางกลุ่ม ตั้งด้วย secret JOB_ONLY_GROUPS เป็นชื่อกลุ่มคั่นด้วยจุลภาค
 // มีไว้เพื่อทดสอบ job ที่ยิงข้อความเข้ากลุ่มจริง โดยไม่ไปรบกวนห้องที่ไม่ได้ตั้งใจทดสอบ
 // ปกติไม่ต้องตั้ง ถ้าไม่ตั้งคือทำครบทุกกลุ่มเหมือนเดิม อย่าลืมลบทิ้งหลังทดสอบเสร็จ
@@ -122,14 +144,15 @@ async function dailySummary() {
   nameOf.set("bot", "MT Agent");
   const ownerOf = new Map((users ?? []).map((u: any) => [u.id, u.display_name]));
 
-  for (const g of groups ?? []) {
+  // ทำทีละกลุ่ม กลุ่มไหนพังก็แค่กลุ่มนั้น เดิมโยนข้อผิดพลาดออกไปทั้งงาน กลุ่มที่เหลือเลยเงียบหมด
+  const one = async (g: any) => {
     const { data: msgs } = await supabase.from("messages")
       .select("line_user_id, message_text, created_at")
       .eq("line_group_id", g.line_group_id)
       .gte("created_at", since)
       .order("created_at", { ascending: true })
       .limit(300);
-    if (!msgs || msgs.length === 0) continue; // กลุ่มเงียบทั้งวัน ไม่ต้องสรุป
+    if (!msgs || msgs.length === 0) return; // กลุ่มเงียบทั้งวัน ไม่ต้องสรุป
 
     const { data: newTasks } = await supabase.from("tasks")
       .select("title, status, due_at").eq("group_id", g.id).gte("created_at", since);
@@ -140,8 +163,7 @@ async function dailySummary() {
       .map((m: any) => `${nameOf.get(m.line_user_id) ?? "?"}: ${m.message_text}`)
       .join("\n");
 
-    const spec = specCheap();
-    const response: any = await createMessage(spec, {
+    const { response, spec } = await askModel(specCheap(), {
       max_tokens: 1024,
       system:
         `คุณคือ MT Agent สรุปประจำวันของ LINE Group ให้ทีม อ่านบทสนทนาแล้วสรุปเป็นภาษาไทย ` +
@@ -158,7 +180,7 @@ async function dailySummary() {
     await logTokenUsage("daily_summary", spec.model, g.line_group_id, response);
     const summary = response.content
       .filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
-    if (!summary) continue;
+    if (!summary) return;
 
     // สิ่งที่ extract_events จับได้วันนี้และยังไม่มีใครยืนยัน — ต่อท้ายแบบตรงไปตรงมา ไม่ให้โมเดลแต่งเพิ่ม
     const { data: newEvents } = await supabase.from("events")
@@ -178,12 +200,31 @@ async function dailySummary() {
         '\n\nพิมพ์ "แงว ขอดูรายการที่จับไว้" เพื่อยืนยันหรือปัดทิ้ง';
     }
 
-    await pushToGroup(g.line_group_id, `🌆 สรุปประจำวัน — ${g.group_name ?? "กลุ่ม"}\n\n${summary}${eventsBlock}`);
+    const sent = await pushToGroup(g.line_group_id, `🌆 สรุปประจำวัน — ${g.group_name ?? "กลุ่ม"}\n\n${summary}${eventsBlock}`);
+    if (!sent.ok) throw new Error(`ส่งเข้าไลน์ไม่ได้ (${sent.status}) ${sent.detail.slice(0, 120)}`);
     await supabase.from("audit_logs").insert({
       action: "scheduled_job", tool_name: "daily_summary",
       input: { group: g.line_group_id },
       result: { messages: msgs.length, pending_events: (newEvents ?? []).length }, status: "OK",
     });
+  };
+
+  const failed: string[] = [];
+  for (const g of groups ?? []) {
+    try {
+      await one(g);
+    } catch (e) {
+      console.error(`daily_summary ${g.group_name} failed:`, e);
+      failed.push(`${g.group_name ?? g.line_group_id}: ${String((e as any)?.message ?? e).slice(0, 160)}`);
+      await supabase.from("audit_logs").insert({
+        action: "scheduled_job", tool_name: "daily_summary",
+        input: { group: g.line_group_id }, result: { error: String((e as any)?.message ?? e).slice(0, 500) }, status: "ERROR",
+      });
+    }
+  }
+  if (failed.length) {
+    await notifyAdmins(supabase, pushToGroup, "daily_summary",
+      `สรุปประจำวันส่งไม่ครบ ${failed.length} กลุ่ม\n${failed.join("\n")}`, 6 * 3600_000);
   }
 }
 
@@ -295,14 +336,15 @@ async function weeklySummary() {
   nameOf.set("bot", "แงว");
   const ownerOf = new Map((users ?? []).map((u: any) => [u.id, u.display_name]));
 
-  for (const g of groups ?? []) {
+  // ทำทีละกลุ่ม กลุ่มไหนพังก็แค่กลุ่มนั้น เดิมโยนข้อผิดพลาดออกไปทั้งงาน กลุ่มที่เหลือเลยเงียบหมด
+  const one = async (g: any) => {
     const { data: msgs } = await supabase.from("messages")
       .select("line_user_id, message_text")
       .eq("line_group_id", g.line_group_id)
       .gte("created_at", since)
       .order("created_at", { ascending: true })
       .limit(600);
-    if (!msgs || msgs.length < 5) continue; // กลุ่มเงียบทั้งสัปดาห์ ข้าม
+    if (!msgs || msgs.length < 5) return; // กลุ่มเงียบทั้งสัปดาห์ ข้าม
 
     const { data: tasks } = await supabase.from("tasks")
       .select("title, status, due_at, owner_user_id, completed_at")
@@ -322,8 +364,7 @@ async function weeklySummary() {
       .map((m: any) => `${nameOf.get(m.line_user_id) ?? "?"}: ${m.message_text}`)
       .join("\n").slice(0, 60000);
 
-    const spec = specSmart();
-    const response: any = await createMessage(spec, {
+    const { response, spec } = await askModel(specSmart(), {
       max_tokens: 1500,
       system:
         `คุณคือแงว สรุปภาพรวมประจำสัปดาห์ของทีมจากบทสนทนาและข้อมูลงาน ตอบภาษาไทย ` +
@@ -342,15 +383,34 @@ async function weeklySummary() {
     await logTokenUsage("weekly_summary", spec.model, g.line_group_id, response);
     const summary = response.content
       .filter((b: any) => b.type === "text").map((b: any) => b.text).join("\n");
-    if (!summary) continue;
+    if (!summary) return;
 
-    await pushToGroup(g.line_group_id, `📊 สรุปประจำสัปดาห์ — ${g.group_name ?? "กลุ่ม"}\n\n${summary}`);
+    const sent = await pushToGroup(g.line_group_id, `📊 สรุปประจำสัปดาห์ — ${g.group_name ?? "กลุ่ม"}\n\n${summary}`);
+    if (!sent.ok) throw new Error(`ส่งเข้าไลน์ไม่ได้ (${sent.status}) ${sent.detail.slice(0, 120)}`);
     await supabase.from("audit_logs").insert({
       action: "scheduled_job", tool_name: "weekly_summary",
       input: { group: g.line_group_id },
       result: { messages: msgs.length, done: (done ?? []).length, overdue: (overdue ?? []).length },
       status: "OK",
     });
+  };
+
+  const failed: string[] = [];
+  for (const g of groups ?? []) {
+    try {
+      await one(g);
+    } catch (e) {
+      console.error(`weekly_summary ${g.group_name} failed:`, e);
+      failed.push(`${g.group_name ?? g.line_group_id}: ${String((e as any)?.message ?? e).slice(0, 160)}`);
+      await supabase.from("audit_logs").insert({
+        action: "scheduled_job", tool_name: "weekly_summary",
+        input: { group: g.line_group_id }, result: { error: String((e as any)?.message ?? e).slice(0, 500) }, status: "ERROR",
+      });
+    }
+  }
+  if (failed.length) {
+    await notifyAdmins(supabase, pushToGroup, "weekly_summary",
+      `สรุปประจำสัปดาห์ส่งไม่ครบ ${failed.length} กลุ่ม\n${failed.join("\n")}`, 6 * 3600_000);
   }
 }
 
@@ -450,8 +510,7 @@ async function dailyContext() {
         .map((m: any) => `${nameOf.get(m.line_user_id) ?? "?"}: ${String(m.message_text ?? "").slice(0, 300)}`)
         .join("\n").slice(0, 24000);
 
-      const spec = specCheap();
-      const res = await createMessage(spec, {
+      const { response: res, spec } = await askModel(specCheap(), {
         max_tokens: 700,
         system: "คุณกำลังเขียนโน้ตไว้ให้ตัวเองอ่านพรุ่งนี้ ไม่ได้เขียนรายงานให้คนอ่าน\n" +
           "สรุปจากบทสนทนาเมื่อวานให้สั้นที่สุดเท่าที่ยังใช้งานได้ ภาษาไทย ไม่เกิน " + CONTEXT_MAX_CHARS + " ตัวอักษร\n" +
@@ -532,8 +591,7 @@ async function extractEvents() {
         .join("\n").slice(0, 60000);
       const nowIso = new Date(runStart.getTime() + 7 * 3600_000).toISOString().replace("Z", "+07:00");
 
-      const spec = specCheap();
-      const response: any = await createMessage(spec, {
+      const { response, spec } = await askModel(specCheap(), {
         max_tokens: 2000,
         system:
           `คุณคือแงว อ่านบทสนทนาในกลุ่มงานแล้วบันทึกสิ่งที่ควรจำไว้ แบ่งเป็นสองแบบเท่านั้น\n\n` +
