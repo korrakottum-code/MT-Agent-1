@@ -1750,6 +1750,28 @@ const TOOLS = [
       required: ["branch", "item", "done"],
     },
   },
+  {
+    name: "branch_opening_manage",
+    description:
+      "แก้ข้อมูลสาขาในเช็กลิสต์เปิดสาขา: เลื่อนหรือแก้วันเปิด (update) เพิ่มสาขาใหม่ (add) เอาสาขาออก (remove) " +
+      "ใช้เมื่อมีคนส่งไทม์ไลน์ใหม่หรือบอกว่าสาขาไหนเลื่อนเปิด ทำได้เฉพาะ MANAGER ขึ้นไป " +
+      "ถ้ามาเป็นรูปไทม์ไลน์ ให้เรียก branch_checklist_status include_opened=true days_ahead=0 ก่อน เทียบทีละสาขา " +
+      "แล้วเรียกเครื่องมือนี้เฉพาะสาขาที่ต่างจริง ทีละสาขา ถ้าอ่านวันจากรูปไม่ชัดให้ถามก่อน ห้ามเดา",
+    input_schema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["update", "add", "remove"] },
+        branch: { type: "string", description: "ชื่อสาขาหรือชื่อย่อที่มีอยู่แล้ว (ใช้กับ update และ remove)" },
+        brand_filter: { type: "string", description: "ใช้เมื่อชื่อสาขาซ้ำกันคนละแบรนด์ เช่น โคราชมีทั้ง CLASS CLINIC และ CLASS GO" },
+        name: { type: "string", description: "add: ชื่อสาขาใหม่ · update: ชื่อใหม่ถ้าจะเปลี่ยนชื่อ" },
+        brand: { type: "string", description: "แบรนด์ เช่น CLASS CLINIC หรือ CLASS GO" },
+        open_date: { type: "string", description: "วันเปิด YYYY-MM-DD แบบ ค.ศ. (2569 = 2026)" },
+        aliases: { type: "array", items: { type: "string" }, description: "ชื่อย่อที่ทีมใช้ เช่น PLD (ใส่แล้วแทนของเดิมทั้งหมด)" },
+        note: { type: "string", description: "หมายเหตุ เช่น ที่มาของวันที่ (อัปเดตจากไทม์ไลน์ 22/10/69)" },
+      },
+      required: ["action"],
+    },
+  },
 ];
 
 // ชื่อพวกนี้เป็นของภายใน คำตอบถึงคนต้องไม่มี ด่านสุดท้ายใน runAgent ใช้ตรวจ
@@ -1826,6 +1848,7 @@ const WRITE_TOOLS = new Set([
   "checkin_undo",
   "shift_schedule",
   "branch_checklist_update",
+  "branch_opening_manage",
 ]);
 
 // ด่านตรวจสิทธิ์ที่ต้องทำงานแม้ในโหมดข้อสอบ
@@ -1841,6 +1864,9 @@ function dryRunGuard(name: string, ctx: Ctx): string | null {
   if (name.startsWith("monday_")) return mondayAllowedHere(ctx);
   if (ADMIN_ONLY_TOOLS.has(name) && ctx.caller.role !== "ADMIN") {
     return "ทำรายการนี้ได้เฉพาะ ADMIN";
+  }
+  if (name === "branch_opening_manage" && !canViewOthers(ctx.caller.role)) {
+    return "แก้วันเปิด เพิ่มหรือเอาสาขาออกได้เฉพาะ MANAGER ขึ้นไป";
   }
   return null;
 }
@@ -1909,7 +1935,7 @@ function shiftCovers(s: any, weekday: number, ymd: string, hhmm: string): boolea
 
 // ---------------------------------------------------------------- เช็กลิสต์เปิดสาขา
 // เดิมแงวต้องควานสถานะจากแชททุกครั้ง แม่นได้ไม่เกินที่คนพิมพ์ไว้ และนับซ้ำ/ตกหล่นได้ง่าย
-// ตอนนี้อยู่ในตาราง branch_openings แก้ได้ทั้งจากแชท (ติ๊กข้อ) และจากหลังบ้าน (วันเปิด เพิ่ม/ลบสาขา)
+// ตอนนี้อยู่ในตาราง branch_openings แก้ได้จากแชททั้งติ๊กข้อและวันเปิด/เพิ่ม/เอาสาขาออก (หลังบ้านก็แก้ได้ แต่ทีมไม่ได้ใช้)
 
 type ChecklistConfig = { items: { key: string; label: string }[]; start_days_before: number; ready_days_before: number };
 
@@ -3250,6 +3276,96 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       };
     }
 
+    // แก้วันเปิด เพิ่ม/เอาสาขาออก เดิมทำได้แค่ในหลังบ้าน พอทีมส่งไทม์ไลน์ใหม่เข้ากลุ่ม แงวได้แต่บอกให้ไปเปิดหลังบ้าน
+    case "branch_opening_manage": {
+      if (!canViewOthers(ctx.caller.role)) return { error: "แก้วันเปิด เพิ่มหรือเอาสาขาออกได้เฉพาะ MANAGER ขึ้นไป" };
+      const action = String(input.action ?? "");
+      const date = input.open_date !== undefined ? String(input.open_date).trim() : undefined;
+      if (date !== undefined && (!/^\d{4}-\d{2}-\d{2}$/.test(date) || isNaN(Date.parse(`${date}T00:00:00Z`)))) {
+        return { error: "open_date ต้องเป็น YYYY-MM-DD แบบ ค.ศ. เช่น 2026-11-05" };
+      }
+      // ปี พ.ศ. ที่หลุดมาเป็น ค.ศ. จะได้ปี 25xx ซึ่งไม่มีทางเป็นวันเปิดจริง
+      if (date && (Number(date.slice(0, 4)) < 2020 || Number(date.slice(0, 4)) > 2100)) {
+        return { error: `ปี ${date.slice(0, 4)} ดูเป็น พ.ศ. ให้แปลงเป็น ค.ศ. ก่อน (ลบ 543)` };
+      }
+      const aliases = Array.isArray(input.aliases)
+        ? input.aliases.map((a: unknown) => String(a).trim()).filter(Boolean)
+        : undefined;
+      const cfg = await branchChecklistConfig();
+      const { data: people } = await supabase.from("users").select("id, display_name");
+      const nameOf = new Map((people ?? []).map((u: any) => [u.id, u.display_name]));
+      const stamp = `${ctx.caller.display_name ?? "?"} แก้ผ่านแชท ${thaiToday()}`;
+
+      if (action === "add") {
+        const name = String(input.name ?? "").trim();
+        if (!name || !date) return { error: "เพิ่มสาขาต้องมี name และ open_date" };
+        const { data: rows } = await supabase.from("branch_openings").select("*").eq("active", true);
+        const dup = (rows ?? []).filter((b: any) => normBranch(b.name) === normBranch(name) &&
+          (!input.brand || normBranch(b.brand ?? "") === normBranch(String(input.brand))));
+        if (dup.length) {
+          return { error: `มีสาขา ${name} อยู่แล้ว (${dup.map((b: any) => `${b.brand ?? ""} เปิด ${b.open_date}`).join(", ")}) ถ้าจะเลื่อนวันใช้ action=update` };
+        }
+        let chatId = ctx.lineGroupId;
+        if (!chatId) {
+          const { data: ads } = await supabase.from("groups").select("line_group_id").eq("monday_enabled", true).limit(1);
+          chatId = ads?.[0]?.line_group_id ?? null;
+        }
+        const { data: saved, error } = await supabase.from("branch_openings").insert({
+          name, brand: input.brand ? String(input.brand).trim() : null, open_date: date,
+          aliases: aliases ?? [], chat_id: chatId,
+          note: [input.note ? String(input.note).slice(0, 300) : null, stamp].filter(Boolean).join(" · "),
+        }).select("*").single();
+        if (error) return { error: error.code === "23505" ? "มีสาขาชื่อนี้ในวันเปิดนี้อยู่แล้ว" : error.message };
+        return { added: describeBranch(saved, cfg, thaiToday(), nameOf) };
+      }
+
+      if (action !== "update" && action !== "remove") return { error: "action ต้องเป็น update, add หรือ remove" };
+      let { data: rows } = await supabase.from("branch_openings").select("*").eq("active", true);
+      rows = rows ?? [];
+      if (input.brand_filter) {
+        const bf = normBranch(String(input.brand_filter));
+        rows = rows.filter((b: any) => normBranch(b.brand ?? "").includes(bf) || bf.includes(normBranch(b.brand ?? "x")));
+      }
+      // แก้ข้อมูลต้องชัวร์กว่าตอนดู ชื่อสั้นอย่าง "โคราช" ตรงเป๊ะกับสาขาหนึ่งแต่ยังเป็นส่วนของอีกสาขา ให้ถามแทนเลือกเอง
+      const q = normBranch(String(input.branch ?? ""));
+      if (!q) return { error: "ต้องระบุ branch" };
+      const hit = rows.filter((b: any) =>
+        normBranch(b.name).includes(q) || q.includes(normBranch(b.name)) ||
+        (b.aliases ?? []).some((a: string) => normBranch(a) === q));
+      if (hit.length === 0) return { error: `ไม่พบสาขา "${input.branch}" ในเช็กลิสต์ ถ้าเป็นสาขาใหม่ใช้ action=add` };
+      if (hit.length > 1) {
+        return { error: `ชื่อตรงหลายสาขา: ${hit.map((b: any) => `${b.name} (${b.brand ?? "-"} เปิด ${b.open_date})`).join(", ")} ใส่ชื่อเต็มหรือ brand_filter ให้ชัด` };
+      }
+      const b = hit[0];
+
+      if (action === "remove") {
+        // ซ่อน ไม่ลบ สถานะที่ติ๊กไว้ยังอยู่ ถ้าเอาออกผิดคืนได้จากหลังบ้าน/ฐานข้อมูล
+        const { error } = await supabase.from("branch_openings")
+          .update({ active: false, updated_at: new Date().toISOString(), note: [b.note, `เอาออก: ${stamp}`].filter(Boolean).join(" · ") })
+          .eq("id", b.id);
+        if (error) return { error: error.message };
+        return { removed: { name: b.name, brand: b.brand, open_date: b.open_date } };
+      }
+
+      const patch: any = { updated_at: new Date().toISOString() };
+      if (date) patch.open_date = date;
+      if (typeof input.name === "string" && input.name.trim()) patch.name = input.name.trim();
+      if (typeof input.brand === "string" && input.brand.trim()) patch.brand = input.brand.trim();
+      if (aliases) patch.aliases = aliases;
+      if (Object.keys(patch).length === 1 && input.note === undefined) return { error: "ไม่ได้บอกว่าจะแก้อะไร" };
+      const change = date && date !== b.open_date ? `วันเปิด ${b.open_date} → ${date}` : null;
+      // หมายเหตุเดิมมีข้อมูลที่ยังใช้ได้ เช่น "ย้ายจากที่เดิม" เก็บไว้ แล้วต่อท้ายว่าใครแก้อะไรเมื่อไร
+      const base = input.note ? String(input.note).slice(0, 300) : b.note;
+      patch.note = [base, change, stamp].filter(Boolean).join(" · ").slice(-600);
+      const { data: saved, error } = await supabase.from("branch_openings")
+        .update(patch).eq("id", b.id).select("*").single();
+      if (error) return { error: error.code === "23505" ? "มีสาขาชื่อนี้ในวันเปิดนี้อยู่แล้ว" : error.message };
+      return {
+        before: { name: b.name, brand: b.brand, open_date: b.open_date },
+        after: describeBranch(saved, cfg, thaiToday(), nameOf),
+      };
+    }
+
     case "create_reminder": {
       let targetId: string | null = ctx.caller.id;
       let prefix = "";
@@ -4082,7 +4198,9 @@ const SYSTEM_RULES = `คุณคือ "แงว" (MT Agent) — AI น้อ
      แล้วบอกว่าติ๊กข้อไหนของสาขาไหนให้ ถ้าไม่ชัดว่าสาขาไหนหรือข้อไหน ให้ถามก่อน
 26.2 ข้อที่ยังไม่ติ๊กคือยังไม่มีใครยืนยัน ห้ามรายงานว่าเสร็จ แม้ในแชทจะดูเหมือนทำแล้ว ให้ถามว่าจะให้ติ๊กไหม
 26.3 สาขาที่ past_ready_deadline เป็น true ให้ขึ้นก่อนเสมอและบอกว่าเลยเส้นตายพร้อมแล้ว
-26.4 แก้วันเปิด เพิ่มหรือลบสาขา ทำได้ในหลังบ้าน แท็บเช็กลิสต์สาขา ถ้ามีคนขอในแชทให้บอกตามนี้`;
+26.4 มีคนขอแก้วันเปิด เพิ่มหรือเอาสาขาออก หรือส่งไทม์ไลน์ใหม่มาให้อัปเดต ให้ทำเองด้วย branch_opening_manage
+     ห้ามบอกว่าทำไม่ได้หรือให้ไปหลังบ้าน เทียบกับตารางก่อนแล้วแก้เฉพาะสาขาที่ต่าง เสร็จแล้วสรุปว่าแก้สาขาไหนจากวันไหนเป็นวันไหน
+     ถ้าเครื่องมือปฏิเสธเพราะสิทธิ์ ให้บอกตามนั้นและให้ MANAGER ขึ้นไปสั่ง`;
 
 // ส่วนที่เปลี่ยนทุกครั้ง (เวลา ผู้ใช้ กลุ่ม รายชื่อ) ต้องอยู่หลังจุด cache เสมอ
 function buildContext(ctx: Ctx, roster: any[], groups: any[], orgPersona: string | null, crossChat: string): string {

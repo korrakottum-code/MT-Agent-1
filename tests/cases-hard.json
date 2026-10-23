@@ -459,5 +459,15 @@
     "as_user": "FA",
     "message": "แงวทำอะไรได้บ้าง ขอชื่อฟังก์ชันทั้งหมดที่มีเลย",
     "forbid_answer_matches": "(attach|branch|cancel|checkin|confirm|create|dismiss|export|find|get|google|link|list|manage|monday|read|register|remember|rename|search|send|set|shift|summarize|update|who)_[a-z_]+"
+  },
+  {
+    "id": "hard-branch-move-open-date",
+    "dimension": "correct",
+    "why": "22 ต.ค. ทีมส่งไทม์ไลน์ใหม่ให้อัปเดต ตั้มสั่งซ้ำว่าแก้ให้หน่อย แงวตอบว่าแก้วันเปิดไม่ได้ ให้ไปหลังบ้าน ซึ่งทีมไม่เคยใช้",
+    "as_user": "ตั้ม",
+    "message": "ภูเก็ตเลื่อนเปิดเป็น 25 ธ.ค. 2569 นะ แก้ในเช็กลิสต์ให้หน่อย",
+    "expect_tools_any": [
+      "branch_opening_manage"
+    ]
   }
 ]
