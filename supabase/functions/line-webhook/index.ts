@@ -1754,7 +1754,7 @@ const TOOLS = [
     name: "branch_opening_manage",
     description:
       "แก้ข้อมูลสาขาในเช็กลิสต์เปิดสาขา: เลื่อนหรือแก้วันเปิด (update) เพิ่มสาขาใหม่ (add) เอาสาขาออก (remove) " +
-      "ใช้เมื่อมีคนส่งไทม์ไลน์ใหม่หรือบอกว่าสาขาไหนเลื่อนเปิด ทำได้เฉพาะ MANAGER ขึ้นไป " +
+      "ใช้เมื่อมีคนส่งไทม์ไลน์ใหม่หรือบอกว่าสาขาไหนเลื่อนเปิด ทุกคนในทีมแก้ได้ ระบบจดชื่อคนแก้ไว้ทุกครั้ง " +
       "ถ้ามาเป็นรูปไทม์ไลน์ ให้เรียก branch_checklist_status include_opened=true days_ahead=0 ก่อน เทียบทีละสาขา " +
       "แล้วเรียกเครื่องมือนี้เฉพาะสาขาที่ต่างจริง ทีละสาขา ถ้าอ่านวันจากรูปไม่ชัดให้ถามก่อน ห้ามเดา",
     input_schema: {
@@ -1864,9 +1864,6 @@ function dryRunGuard(name: string, ctx: Ctx): string | null {
   if (name.startsWith("monday_")) return mondayAllowedHere(ctx);
   if (ADMIN_ONLY_TOOLS.has(name) && ctx.caller.role !== "ADMIN") {
     return "ทำรายการนี้ได้เฉพาะ ADMIN";
-  }
-  if (name === "branch_opening_manage" && !canViewOthers(ctx.caller.role)) {
-    return "แก้วันเปิด เพิ่มหรือเอาสาขาออกได้เฉพาะ MANAGER ขึ้นไป";
   }
   return null;
 }
@@ -3277,8 +3274,9 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
     }
 
     // แก้วันเปิด เพิ่ม/เอาสาขาออก เดิมทำได้แค่ในหลังบ้าน พอทีมส่งไทม์ไลน์ใหม่เข้ากลุ่ม แงวได้แต่บอกให้ไปเปิดหลังบ้าน
+    // ทุกคนแก้ได้ ตามที่ตั้มขอ 23 ต.ค. ให้ใครในทีมก็อัปเดตไทม์ไลน์ได้เลยไม่ต้องรอหัวหน้า
+    // ปลอดภัยเพราะทุกการแก้จดชื่อคนแก้กับวันที่ลงหมายเหตุ และเอาออกคือซ่อน ไม่ลบ ย้อนได้เสมอ
     case "branch_opening_manage": {
-      if (!canViewOthers(ctx.caller.role)) return { error: "แก้วันเปิด เพิ่มหรือเอาสาขาออกได้เฉพาะ MANAGER ขึ้นไป" };
       const action = String(input.action ?? "");
       const date = input.open_date !== undefined ? String(input.open_date).trim() : undefined;
       if (date !== undefined && (!/^\d{4}-\d{2}-\d{2}$/.test(date) || isNaN(Date.parse(`${date}T00:00:00Z`)))) {
@@ -4200,7 +4198,7 @@ const SYSTEM_RULES = `คุณคือ "แงว" (MT Agent) — AI น้อ
 26.3 สาขาที่ past_ready_deadline เป็น true ให้ขึ้นก่อนเสมอและบอกว่าเลยเส้นตายพร้อมแล้ว
 26.4 มีคนขอแก้วันเปิด เพิ่มหรือเอาสาขาออก หรือส่งไทม์ไลน์ใหม่มาให้อัปเดต ให้ทำเองด้วย branch_opening_manage
      ห้ามบอกว่าทำไม่ได้หรือให้ไปหลังบ้าน เทียบกับตารางก่อนแล้วแก้เฉพาะสาขาที่ต่าง เสร็จแล้วสรุปว่าแก้สาขาไหนจากวันไหนเป็นวันไหน
-     ถ้าเครื่องมือปฏิเสธเพราะสิทธิ์ ให้บอกตามนั้นและให้ MANAGER ขึ้นไปสั่ง`;
+     ทุกคนในทีมสั่งแก้ได้ ไม่ต้องถามว่าเป็นหัวหน้าไหม`;
 
 // ส่วนที่เปลี่ยนทุกครั้ง (เวลา ผู้ใช้ กลุ่ม รายชื่อ) ต้องอยู่หลังจุด cache เสมอ
 function buildContext(ctx: Ctx, roster: any[], groups: any[], orgPersona: string | null, crossChat: string): string {
@@ -4234,6 +4232,9 @@ type AgentOpts = {
   attachmentMessageId?: string | null;
   attachmentName?: string | null;
   toolLog?: string[]; // ใช้ตอนรันข้อสอบ เก็บชื่อ tool ที่ถูกเรียกจริง
+  // tool ที่ถูกเรียกแต่ตอบกลับเป็น error (รวมโดนปฏิเสธสิทธิ์) toolLog จดชื่อตั้งแต่ก่อนเรียก
+  // ข้อสอบเรื่องสิทธิ์จึงแยกไม่ออกว่า "เรียกแล้วทำได้" กับ "เรียกแล้วโดนปฏิเสธ" ถ้าไม่มีตัวนี้
+  toolErrors?: string[];
   // ปกติข้อความที่เพิ่งเข้ามาถูกบันทึกลง messages ไปแล้ว จึงต้องตัดตัวล่าสุดออกจากประวัติกันซ้ำ
   // แต่โหมดข้อสอบไม่ได้บันทึกอะไร ถ้าตัดจะไปตัดคำตอบล่าสุดของบอททิ้ง
   // ทำให้ประวัติจบลงที่คำขอของผู้ใช้แบบไม่มีคำตอบ แล้วโมเดลนึกว่าเป็นงานค้างที่ต้องทำให้
@@ -4612,6 +4613,7 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
         result = { error: String(e) };
       }
       await auditLog(ctx, block.name, block.input, result);
+      if (result?.error) opts.toolErrors?.push(block.name);
       toolResults.push({
         type: "tool_result",
         tool_use_id: block.id,
@@ -5156,6 +5158,7 @@ async function runEval(body: string): Promise<Response> {
   const chatId = group?.line_group_id ?? caller.line_user_id;
 
   const toolLog: string[] = [];
+  const toolErrors: string[] = [];
   const usage: Record<string, number> = {};
   const started = Date.now();
   const startedIso = new Date().toISOString();
@@ -5175,7 +5178,7 @@ async function runEval(body: string): Promise<Response> {
     }
     const answer = await runAgent(message, ctx, chatId, {
       images,
-      toolLog, usageOut: usage, skipLatestMessage: false, purpose: "eval", spec: evalSpec,
+      toolLog, toolErrors, usageOut: usage, skipLatestMessage: false, purpose: "eval", spec: evalSpec,
       judgeAddressed: judge === "named" || judge === "follow_up" ? judge : null,
     });
 
@@ -5202,7 +5205,7 @@ async function runEval(body: string): Promise<Response> {
     return Response.json({
       as_user: caller.display_name, role: caller.role,
       group: group?.group_name ?? null, model: evalSpec.model,
-      message, answer, tools_called: toolLog, cleaned, ms: Date.now() - started,
+      message, answer, tools_called: toolLog, tools_errored: toolErrors, cleaned, ms: Date.now() - started,
       usage: {
         input: usage.input ?? 0, output: usage.output ?? 0,
         cache_read: usage.cacheRead ?? 0, cache_write: usage.cacheWrite ?? 0,

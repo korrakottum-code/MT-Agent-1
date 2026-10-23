@@ -29,6 +29,15 @@ function Test-AgentCase {
   foreach ($t in @($Case.forbid_tools)) {
     if ($t -and $tools -contains $t) { $problems += "forbidden tool '$t' was called" }
   }
+  # Called is not the same as allowed. tools_called is logged before the permission check runs,
+  # so a refused call still shows up there and expect_tools would pass it. expect_tools_ok needs
+  # the tool to have been called AND to have come back without an error.
+  $errored = @($Response.tools_errored)
+  foreach ($t in @($Case.expect_tools_ok)) {
+    if (-not $t) { continue }
+    if ($tools -notcontains $t) { $problems += "missing tool '$t' (called: $($tools -join ', '))" }
+    elseif ($errored -contains $t) { $problems += "tool '$t' was called but came back with an error (refused or failed)" }
+  }
   if ($Case.expect_answer_matches -and $answer -notmatch $Case.expect_answer_matches) {
     $problems += "answer does not match /$($Case.expect_answer_matches)/"
   }

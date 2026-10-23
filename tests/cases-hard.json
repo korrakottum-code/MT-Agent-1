@@ -469,5 +469,15 @@
     "expect_tools_any": [
       "branch_opening_manage"
     ]
+  },
+  {
+    "id": "hard-employee-can-move-open-date",
+    "dimension": "correct",
+    "why": "23 ต.ค. ตั้มสั่งให้ทุกคนในทีมแก้วันเปิดสาขาได้ ไม่ต้องรอหัวหน้า เดิมล็อกไว้เฉพาะ MANAGER ขึ้นไป ใช้ expect_tools_ok เพราะชื่อเครื่องมือถูกจดตั้งแต่ก่อนเช็กสิทธิ์ ถ้าใช้ expect_tools_any ข้อนี้จะผ่านแม้โดนปฏิเสธ",
+    "as_user": "FA",
+    "message": "โคราช CLASS GO เลื่อนเปิดเป็น 5 พ.ย. 2569 นะ ช่วยแก้ในเช็กลิสต์ให้หน่อย",
+    "expect_tools_ok": [
+      "branch_opening_manage"
+    ]
   }
 ]
