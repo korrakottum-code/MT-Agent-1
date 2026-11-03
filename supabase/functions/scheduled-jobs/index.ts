@@ -736,19 +736,37 @@ async function claimReminder(id: string): Promise<boolean> {
 
 // ให้ตัวรับแชทคิดเนื้อหาให้ ตัวเตือนแบบนี้เก็บ "คำสั่ง" ไม่ใช่ข้อความสำเร็จรูป
 // เช่น "สรุปสถานะเช็กลิสต์ 5 ข้อของสาขาที่จะเปิดใน 14 วัน" ต้องคิดใหม่ทุกเช้าจากข้อมูลวันนั้น
+// 2 พ.ย. ตัวรับแชทตอบ 502 กลับมาในสองวินาที ยังไม่ทันเริ่มคิด แล้วตัวเตือนรายสัปดาห์ก็ข้ามไปสัปดาห์หน้าเลย
+// ล้มเร็วแบบนี้คือฝั่ง Supabase สะดุดตอนปลุกตัวรัน เรียกซ้ำอีกนิดก็ผ่าน
+// ลองซ้ำเฉพาะที่ล้มเร็ว ถ้าคิดไปนานแล้วค่อยล้มจะไม่ลองซ้ำ เดี๋ยวงานรอบนี้เกินเวลาของตัวมันเอง
+const COMPOSE_RETRY_WAITS_MS = [3_000, 10_000];
+const COMPOSE_FAST_FAIL_MS = 15_000;
+
 async function composeAgentReminder(reminderId: string): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
-  try {
-    const res = await fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/line-webhook`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-cron-key": CRON_SECRET },
-      body: JSON.stringify({ compose_reminder: { reminder_id: reminderId } }),
-      signal: AbortSignal.timeout(120_000),
-    });
-    const out = await res.json().catch(() => ({}));
-    if (!res.ok || !out.answer) return { ok: false, error: String(out.error ?? `คิดเนื้อหาไม่สำเร็จ (${res.status})`) };
-    return { ok: true, text: String(out.answer) };
-  } catch (e) {
-    return { ok: false, error: `คิดเนื้อหาไม่สำเร็จ: ${String(e).slice(0, 160)}` };
+  for (let attempt = 0; ; attempt++) {
+    const started = Date.now();
+    let failure: string;
+    let retryable: boolean;
+    try {
+      const res = await fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/line-webhook`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-cron-key": CRON_SECRET },
+        body: JSON.stringify({ compose_reminder: { reminder_id: reminderId } }),
+        signal: AbortSignal.timeout(120_000),
+      });
+      const out = await res.json().catch(() => ({}));
+      if (res.ok && out.answer) return { ok: true, text: String(out.answer) };
+      failure = String(out.error ?? `คิดเนื้อหาไม่สำเร็จ (${res.status})`);
+      // 404 409 และ 500 ที่มีคำอธิบายมาด้วย คือตัวรับแชทตอบเองว่าทำไม่ได้ ลองซ้ำก็ได้ผลเดิม
+      retryable = !out.error && [502, 503, 504, 546].includes(res.status);
+    } catch (e) {
+      failure = `คิดเนื้อหาไม่สำเร็จ: ${String(e).slice(0, 160)}`;
+      retryable = !(e instanceof DOMException && e.name === "TimeoutError");
+    }
+    const quick = Date.now() - started < COMPOSE_FAST_FAIL_MS;
+    if (!retryable || !quick || attempt >= COMPOSE_RETRY_WAITS_MS.length) return { ok: false, error: failure };
+    console.error(`คิดเนื้อหาตัวเตือน ${reminderId} ไม่สำเร็จรอบ ${attempt + 1} ลองใหม่:`, failure);
+    await new Promise((r) => setTimeout(r, COMPOSE_RETRY_WAITS_MS[attempt]));
   }
 }
 
