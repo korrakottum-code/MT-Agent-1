@@ -15,3 +15,7 @@ verify_jwt = false
 [functions.scheduled-jobs]
 # pg_cron ยิงเข้ามาพร้อม CRON_SECRET ใน header
 verify_jwt = false
+
+[functions.team-board]
+# ลิงก์จากแงวตรวจเองใน function ไม่ใช้ JWT ของ Supabase
+verify_jwt = false
