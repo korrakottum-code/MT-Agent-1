@@ -4724,6 +4724,14 @@ async function handleEvent(event: any, sim?: Sim) {
   const msgType: string = event.message?.type ?? "";
   if (!["text", "image", "file", "audio", "video"].includes(msgType)) return;
 
+  // กลุ่มที่ปิดไว้ (groups.is_active) แงวต้องเงียบจริง ไม่ตอบและไม่เก็บข้อความ ถึงจะยังค้างอยู่ในกลุ่มไลน์
+  // 9 พ.ย. ปิดกลุ่ม marktech แล้วงานเบื้องหลังหยุด แต่พอแท็กแงวยังตอบ เพราะตรงนี้ไม่เคยดูสวิตช์นี้
+  if (event.source?.groupId) {
+    const { data: g } = await supabase.from("groups")
+      .select("is_active").eq("line_group_id", event.source.groupId).maybeSingle();
+    if (g?.is_active === false) return;
+  }
+
   const fileName: string = event.message?.fileName ?? "ไฟล์";
   // ถอดเสียงก่อนบันทึก เพื่อให้แถวใน messages เก็บสิ่งที่คนพูด ไม่ใช่คำว่ามีคนส่งเสียงมา
   const audioFromLine = (event.message?.contentProvider?.type ?? "line") === "line";
