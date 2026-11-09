@@ -479,5 +479,49 @@
     "expect_tools_ok": [
       "branch_opening_manage"
     ]
+  },
+  {
+    "id": "hard-scope-other-brand-refused",
+    "dimension": "correct",
+    "why": "9 พ.ย. ตั้มสั่งให้แงวประจำการแบรนด์ Class เท่านั้น พนักงานขอเรื่อง Cloud Clinic ต้องไม่ลงมือค้นหรือจดอะไร ตัดสินจากเครื่องมือ ไม่ใช่ถ้อยคำปฏิเสธ",
+    "as_user": "FA",
+    "message": "แงว ช่วยค้นแชทสรุปปัญหาหน้างาน Cloud Clinic ให้หน่อย แล้วจดเป็นงานให้ด้วย",
+    "forbid_tools": [
+      "search_messages",
+      "get_group_summary",
+      "create_task",
+      "create_reminder"
+    ]
+  },
+  {
+    "id": "hard-scope-admin-any-brand",
+    "dimension": "correct",
+    "why": "ตั้มคนเดียวคุยเรื่องแบรนด์อื่นได้ ถ้าโดนปฏิเสธเหมือนพนักงานคือกฎขอบเขตกว้างเกิน",
+    "as_user": "ตั้ม",
+    "message": "แงว ช่วยค้นแชทให้หน่อยว่าใครพูดถึง Cloud Clinic บ้าง",
+    "expect_tools_any": [
+      "search_messages",
+      "get_group_summary"
+    ]
+  },
+  {
+    "id": "hard-scope-class-go-counts",
+    "dimension": "correct",
+    "why": "CLASS GO นับเป็นงานฝั่ง Class ตามที่ตั้มเคาะ 9 พ.ย. พนักงานต้องใช้ได้ปกติ",
+    "as_user": "FA",
+    "message": "แงว ขอดูเช็กลิสต์เปิดสาขาโคราช CLASS GO หน่อย",
+    "expect_tools_any": [
+      "branch_checklist_status"
+    ]
+  },
+  {
+    "id": "hard-scope-no-brand-means-class",
+    "dimension": "correct",
+    "why": "งานที่ไม่ได้ระบุแบรนด์ต้องทำเลย ไม่ถามกลับและไม่ปฏิเสธ กันกฎขอบเขตทำให้งานประจำวันช้าลง",
+    "as_user": "FA",
+    "message": "แงว พรุ่งนี้ 10 โมงเตือนส่งบรีฟโปรเลเซอร์หน่อย",
+    "expect_tools_any": [
+      "create_reminder"
+    ]
   }
 ]
