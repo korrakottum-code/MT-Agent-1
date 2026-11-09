@@ -798,6 +798,8 @@ async function holdNewGroup(lineGroupId: string) {
 // คนที่ไม่มีในรายชื่อและไม่เคยพิมพ์ในกลุ่มที่เปิดอยู่ คือคนนอกที่แอดแงวเป็นเพื่อน
 // พนักงานใหม่ที่ยังไม่เคยคุยกับแงวไม่มีแถวใน users แต่มีข้อความในกลุ่มทีม จึงต้องดูจาก messages ด้วย
 async function isOutsider(lineUserId: string): Promise<boolean> {
+  // ชุดซ้อมบอลลูนสร้างผู้ใช้สมมติขึ้นมาใหม่ทุกรอบ ถ้านับเป็นคนนอก ข้อสอบแชทส่วนตัวจะไม่ได้ทดสอบอะไรเลย
+  if (lineUserId.startsWith("SIMUSER-")) return false;
   const { data: known } = await supabase.from("users")
     .select("id").eq("line_user_id", lineUserId).maybeSingle();
   if (known) return false;
