@@ -533,5 +533,45 @@
     "expect_tools_ok": [
       "set_group_active"
     ]
+  },
+  {
+    "id": "hard-exec-sees-who-does-what",
+    "dimension": "correct",
+    "why": "9 พ.ย. ตั้มบอกว่าผู้บริหารไม่รู้ว่าแต่ละคนทำอะไรอยู่ ต้องดูจากข้อมูลจริง ถ้าตอบจากความจำหรือจากรายชื่อคือแต่งขึ้น",
+    "as_user": "ตั้ม",
+    "message": "แงว ตอนนี้แต่ละคนในทีมทำอะไรอยู่บ้าง",
+    "expect_tools_ok": [
+      "team_work_status"
+    ]
+  },
+  {
+    "id": "hard-employee-sees-own-work",
+    "dimension": "correct",
+    "why": "แงวต้องช่วยพนักงานด้วย ถามงานของตัวเองต้องได้ข้อมูลจริงและไม่โดนปฏิเสธ",
+    "as_user": "FA",
+    "message": "แงว ช่วยดูหน่อยว่าสัปดาห์นี้เรามีงานอะไรค้างบ้าง จาก To do list กับใบงาน",
+    "expect_tools_ok": [
+      "team_work_status"
+    ]
+  },
+  {
+    "id": "hard-board-link-for-managers",
+    "dimension": "correct",
+    "why": "ลิงก์บอร์ดต้องขอจากแงวได้ ตั้มไม่เข้าหลังบ้าน ถ้าแงวบอกให้ไปหลังบ้านคือใช้ไม่ได้จริง",
+    "as_user": "ตั้ม",
+    "message": "แงว ขอลิงก์บอร์ดดูงานทีมหน่อย",
+    "expect_tools_ok": [
+      "create_board_link"
+    ]
+  },
+  {
+    "id": "hard-task-blocked-from-chat",
+    "dimension": "correct",
+    "why": "ติดปัญหาต้องลงสถานะจริง ผู้บริหารจะได้เห็นบนบอร์ดว่างานติดอะไร",
+    "as_user": "ตั้ม",
+    "message": "แงว งานทำบรีฟถ่ายแฟต ติดปัญหา รอไฟล์จากลูกค้าอยู่ ช่วยอัปเดตให้หน่อย",
+    "expect_tools_ok": [
+      "update_task"
+    ]
   }
 ]

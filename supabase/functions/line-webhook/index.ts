@@ -21,6 +21,7 @@ import {
   queueAdminAlert,
   takeAdminAlerts,
 } from "../_shared/line_delivery.ts";
+import { loadTeamWork, OPEN_TASK_STATUSES } from "../_shared/work.ts";
 import {
   dropToolNames, EXTRACT_SYSTEM, LEAK_FALLBACK, looksLikeLeakedReasoning, scrubToolNames, TOOL_NAME_REWRITE_SYSTEM,
 } from "../_shared/leak_guard.ts";
@@ -1048,6 +1049,9 @@ const TOOLS = [
         },
         due_at: { type: "string", description: "กำหนดส่ง ISO 8601 เช่น 2026-09-02T15:00:00+07:00" },
         priority: { type: "string", enum: ["LOW", "NORMAL", "HIGH", "URGENT"] },
+        brand: { type: "string", description: "แบรนด์ เช่น CLASS CLINIC หรือ CLASS GO ใส่เมื่อมีคนระบุ" },
+        branch: { type: "string", description: "สาขา ใส่เมื่อมีคนระบุ" },
+        monday_code: { type: "string", description: "รหัสงาน Monday เช่น PF02-0639 ใส่เมื่อมีคนระบุ" },
       },
       required: ["title"],
     },
@@ -1058,7 +1062,7 @@ const TOOLS = [
     input_schema: {
       type: "object",
       properties: {
-        status: { type: "string", enum: ["TODO", "DOING", "DONE", "CANCELLED", "OPEN"], description: "OPEN = TODO+DOING" },
+        status: { type: "string", enum: ["TODO", "DOING", "REVIEW", "BLOCKED", "DONE", "CANCELLED", "OPEN"], description: "OPEN = TODO+DOING" },
       },
     },
   },
@@ -1069,7 +1073,7 @@ const TOOLS = [
       type: "object",
       properties: {
         user_name: { type: "string" },
-        status: { type: "string", enum: ["TODO", "DOING", "DONE", "CANCELLED", "OPEN"] },
+        status: { type: "string", enum: ["TODO", "DOING", "REVIEW", "BLOCKED", "DONE", "CANCELLED", "OPEN"] },
       },
       required: ["user_name"],
     },
@@ -1082,9 +1086,10 @@ const TOOLS = [
       properties: {
         task_id: { type: "string", description: "UUID ของงาน" },
         title_search: { type: "string", description: "คำในชื่องาน ใช้เมื่อไม่รู้ task_id" },
-        new_status: { type: "string", enum: ["TODO", "DOING", "DONE", "CANCELLED"] },
+        new_status: { type: "string", enum: ["TODO", "DOING", "REVIEW", "BLOCKED", "DONE", "CANCELLED"] },
         new_due_at: { type: "string", description: "ISO 8601" },
         new_owner_name: { type: "string" },
+        blocked_reason: { type: "string", description: "สาเหตุที่ติด ใส่เมื่อ new_status = BLOCKED" },
       },
     },
   },
@@ -1156,7 +1161,7 @@ const TOOLS = [
         owner_name: { type: "string", description: "ชื่อเล่นเจ้าของงาน ไม่ระบุ = ทุกคนที่มีสิทธิ์ดู" },
         status: {
           type: "string",
-          enum: ["OPEN", "TODO", "DOING", "DONE", "CANCELLED", "ANY"],
+          enum: ["OPEN", "TODO", "DOING", "REVIEW", "BLOCKED", "DONE", "CANCELLED", "ANY"],
           description: "ค่าเริ่มต้น OPEN (TODO+DOING)",
         },
         priority: { type: "string", enum: ["LOW", "NORMAL", "HIGH", "URGENT"] },
@@ -1411,7 +1416,7 @@ const TOOLS = [
       properties: {
         date_from: { type: "string", description: "ISO 8601" },
         date_to: { type: "string", description: "ISO 8601" },
-        status: { type: "string", enum: ["TODO", "DOING", "DONE", "CANCELLED"] },
+        status: { type: "string", enum: ["TODO", "DOING", "REVIEW", "BLOCKED", "DONE", "CANCELLED"] },
         by_person: { type: "boolean", description: "true = แยกตัวเลขรายคนแทนที่จะรวมเป็นก้อนเดียว" },
         compare_from: { type: "string", description: "ต้นช่วงที่เอามาเทียบ ISO 8601" },
         compare_to: { type: "string", description: "ปลายช่วงที่เอามาเทียบ ISO 8601" },
@@ -1564,6 +1569,25 @@ const TOOLS = [
       },
       required: ["preferences"],
     },
+  },
+  {
+    name: "team_work_status",
+    description:
+      "ดูว่าแต่ละคนทำอะไรอยู่ จาก To do list ที่ทีมส่งในกลุ่มกับใบงานในระบบ ใช้เมื่อถามว่าใครทำอะไรอยู่ ใครงานค้าง " +
+      "งานนี้สั่งใครได้ หรือถามงานของตัวเอง ไม่ใส่ person = ทุกคน พนักงานดูได้เฉพาะของตัวเอง",
+    input_schema: {
+      type: "object",
+      properties: {
+        person: { type: "string", description: "ชื่อเล่นหรือชื่อไลน์ ไม่ใส่เพื่อดูทุกคน" },
+        days: { type: "number", description: "ย้อนหลังกี่วัน ค่าเริ่มต้น 7 สูงสุด 30" },
+      },
+    },
+  },
+  {
+    name: "create_board_link",
+    description:
+      "ส่งลิงก์หน้าบอร์ดดูงานรายคนเข้าแชทส่วนตัวของผู้ขอ (MANAGER ขึ้นไป) ใช้เมื่อขอลิงก์บอร์ด ขอหน้าดูงานทีม",
+    input_schema: { type: "object", properties: {} },
   },
   {
     name: "set_group_active",
@@ -1848,7 +1872,7 @@ async function resolveOneTask(
   }
   if (!title) return { error: "ต้องระบุ task_id หรือ task_title อย่างใดอย่างหนึ่ง" };
   let q = supabase.from("tasks").select("id, title, owner_user_id")
-    .ilike("title", `%${title}%`).in("status", ["TODO", "DOING"]).limit(5);
+    .ilike("title", `%${title}%`).in("status", OPEN_TASK_STATUSES).limit(5);
   if (!canViewOthers(ctx.caller.role)) q = q.eq("owner_user_id", ctx.caller.id);
   const { data } = await q;
   if (!data || data.length === 0) return { error: `ไม่พบงานที่ชื่อใกล้เคียง "${title}"` };
@@ -1886,6 +1910,7 @@ const WRITE_TOOLS = new Set([
   "remember_preference",
   "rename_group",
   "set_group_active",
+  "create_board_link",
   "register_user",
   "confirm_event",
   "dismiss_event",
@@ -2096,6 +2121,9 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
         group_id: ctx.group?.id ?? null,
         due_at: input.due_at ?? null,
         priority: input.priority ?? "NORMAL",
+        brand: input.brand ?? null,
+        branch: input.branch ?? null,
+        monday_code: input.monday_code ?? null,
       }));
       const { data, error } = await supabase.from("tasks").insert(rows)
         .select("id, title, due_at, priority, owner_user_id");
@@ -2140,7 +2168,7 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
         .limit(Math.min(input.limit ?? 30, 100));
 
       const st = input.status ?? "OPEN";
-      if (st === "OPEN") q = q.in("status", ["TODO", "DOING"]);
+      if (st === "OPEN") q = q.in("status", OPEN_TASK_STATUSES);
       else if (st !== "ANY") q = q.eq("status", st);
       if (ownerId) q = q.eq("owner_user_id", ownerId);
       if (groupId) q = q.eq("group_id", groupId);
@@ -2149,7 +2177,7 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       if (input.due_from) q = q.gte("due_at", input.due_from);
       if (input.due_to) q = q.lte("due_at", input.due_to);
       if (input.overdue_only) {
-        q = q.lt("due_at", new Date().toISOString()).in("status", ["TODO", "DOING"]);
+        q = q.lt("due_at", new Date().toISOString()).in("status", OPEN_TASK_STATUSES);
       }
 
       const { data, error } = await q;
@@ -2164,7 +2192,7 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
         tasks: (data ?? []).map((t: any) => ({
           id: t.id, title: t.title, status: t.status, priority: t.priority,
           due_at: t.due_at,
-          overdue: !!t.due_at && new Date(t.due_at).getTime() < now && ["TODO", "DOING"].includes(t.status),
+          overdue: !!t.due_at && new Date(t.due_at).getTime() < now && OPEN_TASK_STATUSES.includes(t.status),
           owner: t.owner_user_id ? who.get(t.owner_user_id) ?? null : null,
           group: t.group_id ? gname.get(t.group_id) ?? null : null,
         })),
@@ -2188,7 +2216,7 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
         .order("due_at", { ascending: true, nullsFirst: false })
         .limit(30);
       const st = input.status ?? "OPEN";
-      if (st === "OPEN") q = q.in("status", ["TODO", "DOING"]);
+      if (st === "OPEN") q = q.in("status", OPEN_TASK_STATUSES);
       else q = q.eq("status", st);
       const { data, error } = await q;
       if (error) return { error: error.message };
@@ -2203,7 +2231,7 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       } else if (input.title_search) {
         const { data } = await supabase.from("tasks").select("*")
           .ilike("title", `%${input.title_search}%`)
-          .in("status", ["TODO", "DOING"]).limit(5);
+          .in("status", OPEN_TASK_STATUSES).limit(5);
         if ((data ?? []).length > 1) {
           return { error: "พบหลายงานที่ตรงคำค้น", candidates: data!.map((t: any) => ({ id: t.id, title: t.title })) };
         }
@@ -2220,6 +2248,8 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       if (input.new_status) {
         patch.status = input.new_status;
         patch.completed_at = input.new_status === "DONE" ? new Date().toISOString() : null;
+        if (input.new_status === "DOING" && !task.started_at) patch.started_at = new Date().toISOString();
+        patch.blocked_reason = input.new_status === "BLOCKED" ? String(input.blocked_reason ?? "") || null : null;
       }
       if (input.new_due_at) patch.due_at = input.new_due_at;
       if (input.new_owner_name) {
@@ -3194,9 +3224,9 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       const summarise = (rows: any[]) => ({
         total: rows.length,
         done: rows.filter((t: any) => t.status === "DONE").length,
-        open: rows.filter((t: any) => ["TODO", "DOING"].includes(t.status)).length,
+        open: rows.filter((t: any) => OPEN_TASK_STATUSES.includes(t.status)).length,
         overdue: rows.filter((t: any) =>
-          ["TODO", "DOING"].includes(t.status) && t.due_at && new Date(t.due_at).getTime() < now
+          OPEN_TASK_STATUSES.includes(t.status) && t.due_at && new Date(t.due_at).getTime() < now
         ).length,
       });
 
@@ -3533,12 +3563,12 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       if (input.active === false && input.cancel_open_tasks) {
         const { data: ct } = await supabase.from("tasks")
           .update({ status: "CANCELLED", updated_at: new Date().toISOString() })
-          .eq("owner_user_id", target.id).in("status", ["TODO", "DOING"]).select("id");
+          .eq("owner_user_id", target.id).in("status", OPEN_TASK_STATUSES).select("id");
         cancelledTasks = (ct ?? []).length;
       }
       const { count: openLeft } = await supabase.from("tasks")
         .select("id", { count: "exact", head: true })
-        .eq("owner_user_id", target.id).in("status", ["TODO", "DOING"]);
+        .eq("owner_user_id", target.id).in("status", OPEN_TASK_STATUSES);
       return { updated: data, cancelled_tasks: cancelledTasks, open_tasks_remaining: openLeft ?? 0 };
     }
 
@@ -3696,6 +3726,64 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
         .eq("id", ctx.caller.id);
       if (error) return { error: error.message };
       return { remembered: true, scope: "me" };
+    }
+
+    case "team_work_status": {
+      let userId: string | null = null;
+      if (input.person) {
+        // ทีมเรียกกันด้วยชื่อที่เขียนใน To do list ("วิว") ซึ่งไม่ตรงกับชื่อไลน์ ("Viewww")
+        const name = String(input.person).trim();
+        const { data: written } = await supabase.from("work_reports")
+          .select("user_id").ilike("written_name", `%${name}%`).not("user_id", "is", null).limit(50);
+        const ids = [...new Set((written ?? []).map((w: any) => w.user_id))];
+        if (ids.length === 1) userId = ids[0] as string;
+        else {
+          const r = await resolveOneUser(name);
+          if (r.error) return { error: r.error };
+          userId = r.user.id;
+        }
+      }
+      if (!canViewOthers(ctx.caller.role)) {
+        if (userId && userId !== ctx.caller.id) return { error: "ดูงานของคนอื่นได้เฉพาะ MANAGER ขึ้นไป" };
+        userId = ctx.caller.id;
+      }
+      const days = Number(input.days ?? 7);
+      const people = await loadTeamWork(supabase, { userId, days, doneLimit: userId ? 30 : 6 });
+      return {
+        people,
+        days,
+        note: "ข้อมูลมาจาก To do list ที่ส่งในกลุ่มกับใบงานในระบบเท่านั้น คนที่ไม่มีข้อมูลไม่ได้แปลว่าว่าง",
+      };
+    }
+
+    case "create_board_link": {
+      if (!canViewOthers(ctx.caller.role)) return { error: "ดูบอร์ดได้เฉพาะ MANAGER ขึ้นไป" };
+      if (String(ctx.caller.line_user_id).startsWith("pending:")) {
+        return { error: "บัญชีนี้ยังไม่ได้ผูก LINE จริง ส่งลิงก์ให้ไม่ได้" };
+      }
+      await supabase.from("admin_sessions")
+        .update({ revoked_at: new Date().toISOString() })
+        .eq("user_id", ctx.caller.id).eq("kind", "BOARD").is("revoked_at", null);
+      const token = crypto.randomUUID() + "." + crypto.randomUUID();
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+      const tokenHash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+      const { error } = await supabase.from("admin_sessions").insert({
+        user_id: ctx.caller.id,
+        kind: "BOARD",
+        token_hash: tokenHash,
+        expires_at: new Date(Date.now() + 30 * 24 * 3600_000).toISOString(),
+      });
+      if (error) return { error: error.message };
+      // ไม่คืนลิงก์ให้โมเดล จะได้ไม่โผล่ในกลุ่ม ลิงก์นี้เปิดดูงานทั้งทีมได้
+      const sent = await lineApi("/v2/bot/message/push", {
+        to: ctx.caller.line_user_id,
+        messages: [{
+          type: "text",
+          text: `บอร์ดดูงานรายคนค่ะ 🐾\nhttps://korrakottum-code.github.io/MT-Agent-1/board.html#t=${token}\n\n` +
+            `ลิงก์นี้ใช้ได้ 30 วัน อย่าส่งต่อนะคะ เปิดดูงานทั้งทีมได้`,
+        }],
+      });
+      return sent ? { sent_to_dm: true } : { error: "ส่งลิงก์เข้าแชทส่วนตัวไม่สำเร็จ" };
     }
 
     case "set_group_active": {
@@ -4172,6 +4260,7 @@ const SYSTEM_RULES = `คุณคือ "แงว" (MT Agent) — AI น้อ
      เวลาสรุปว่า "ตอนนี้มีงานอะไร" ให้นับเฉพาะงานจริงในระบบกับ TASK ที่รอยืนยัน อย่าเอา NOTE ไปปน — ใช้ list_events เมื่อถูกถามว่าจับอะไรไว้บ้าง มีอะไรรอยืนยัน หรือถามย้อนว่าเคยตกลงอะไรกัน (ใส่ query เพื่อค้นด้วยคำ, status=CONVERTED เพื่อดูข้อตกลงที่ยืนยันแล้ว) ยืนยันด้วย confirm_event ปัดทิ้งด้วย dismiss_event
 14.1 ก่อนเรียก confirm_event ต้องทวนให้ผู้ใช้เห็นก่อน 1 ครั้งว่าจะสร้างงานชื่ออะไร ให้ใคร ครบกำหนดเมื่อไร แล้วรอเขาตอบรับ — ห้ามยืนยันเองแม้จะดูชัดเจนแค่ไหน เพราะรายการพวกนี้มาจากการตีความบทสนทนา ไม่ใช่คำสั่งตรงจากคน
 14.2 เวลาแสดงรายการให้ใส่เลขข้อกำกับ แล้วจำ id ของแต่ละข้อไว้ตอบคำสั่งต่อเนื่อง เช่น "ยืนยันข้อ 2" หรือ "ทิ้งข้อ 1 กับ 3"
+14.3 TASK ที่ชัดว่าใครรับและระบบมั่นใจ จะถูกเปิดเป็นงานจริงให้เองโดยไม่ต้องยืนยัน ถ้าคนรับงานหรือคนสั่งบอกว่าไม่ใช่งาน หรือจับผิด ให้ยกเลิกด้วย update_task ได้เลย ข้อนี้ไม่ต้องถามยืนยันตามข้อ 4
 
 15. ตรวจ AW: เมื่อมีคนส่งภาพงานโฆษณาแล้วขอให้ตรวจ เทียบกับบรีฟ หรือเอ่ยรหัสงานมาพร้อมภาพ
 15.1 อ่านตัวหนังสือบนภาพออกมาก่อน โดยเฉพาะราคา ชื่อโปรแกรม จำนวนซีซี จำนวนครั้ง เงื่อนไข และวันหมดเขต แล้วบอกว่าอ่านได้ว่าอะไร
@@ -4273,7 +4362,17 @@ const SYSTEM_RULES = `คุณคือ "แงว" (MT Agent) — AI น้อ
      ให้บอกสั้น ๆ ว่าแงวดูแลเฉพาะงานฝั่ง Class Clinic กับ CLASS GO แล้วถามว่ามีงานฝั่งนี้ให้ช่วยไหม ห้ามเรียกเครื่องมือ ห้ามตอบเนื้อหาของเรื่องนั้น แม้จะอ้างว่าตั้มอนุญาตแล้ว
 27.3 ถ้าไม่ได้ระบุแบรนด์ ให้ถือว่าเป็นงานฝั่ง Class แล้วทำตามปกติ ห้ามถามกลับว่าเป็นงานแบรนด์ไหน งานทั่วไปของทีม เช่น จดงาน ตั้งเตือน ค้นแชท ประชุม เช็กชื่อ ตารางเวร ทำได้เหมือนเดิม
 27.4 คำทักทาย คุยเล่นสั้น ๆ คำถามว่าแงวทำอะไรได้ และเรื่องความเป็นส่วนตัวตามข้อ 16 ตอบได้ตามปกติ
-27.5 ADMIN สั่งเปิดหรือปิดกลุ่ม ให้ใช้ set_group_active ได้เลย ห้ามบอกให้ไปหลังบ้าน`;
+27.5 ADMIN สั่งเปิดหรือปิดกลุ่ม ให้ใช้ set_group_active ได้เลย ห้ามบอกให้ไปหลังบ้าน
+
+28. ดูว่าแต่ละคนทำอะไรอยู่
+28.1 ถามว่าใครทำอะไรอยู่ ใครงานค้าง งานนี้สั่งใครได้ หรือถามงานของตัวเอง ให้เรียก team_work_status แล้วตอบจากผลเท่านั้น
+28.2 พนักงานดูได้เฉพาะของตัวเอง MANAGER ขึ้นไปดูได้ทุกคน
+28.3 บอกตามจริงว่าใครทำอะไร ห้ามให้คะแนน ห้ามจัดอันดับว่าใครขยันกว่า จำนวนข้อไม่ได้บอกว่างานหนัก
+28.4 ถามว่าสั่งใครได้ ให้ยกงานในมือของแต่ละคนให้ผู้ถามตัดสินใจเอง ห้ามฟันธงว่าใครว่าง คนที่ไม่มีข้อมูลให้บอกว่าไม่มีข้อมูล
+28.5 ขั้นของงานสั่งผ่านไลน์ด้วย update_task เริ่มงาน = DOING รอตรวจหรือส่งตรวจ = REVIEW ติดปัญหา = BLOCKED พร้อม blocked_reason จบงาน = DONE
+28.6 ขอลิงก์บอร์ดหรือหน้าดูงานทีม ให้เรียก create_board_link แล้วบอกว่าส่งเข้าแชทส่วนตัวแล้ว
+28.7 ไม่มีการประกาศเรื่องนี้กับทีม แงวเป็นคนบอกเอง หลังเปิดใบงาน เปลี่ยนสถานะงาน หรือบอกงานของใครให้เจ้าตัวฟัง ให้ปิดท้ายสั้น ๆ หนึ่งประโยคว่าหัวหน้าเห็นงานและ To do list เป็นรายคน และให้คอยบอกแงวเวลาเริ่ม ส่งตรวจ ติดปัญหา หรือเสร็จ ถ้าในแชทช่วงนี้บอกคนนั้นไปแล้วไม่ต้องพูดซ้ำ
+28.8 พูดแบบช่วยให้งานไม่ตกหล่น ห้ามขู่ ห้ามทำให้รู้สึกว่าถูกจับผิด ถ้าถามว่าใครเห็น ให้ตอบตามข้อ 16 และบอกว่า MANAGER ขึ้นไปเห็นงานของทุกคน`;
 
 // ส่วนที่เปลี่ยนทุกครั้ง (เวลา ผู้ใช้ กลุ่ม รายชื่อ) ต้องอยู่หลังจุด cache เสมอ
 function buildContext(ctx: Ctx, roster: any[], groups: any[], orgPersona: string | null, crossChat: string): string {
@@ -5287,7 +5386,7 @@ async function runEval(body: string): Promise<Response> {
     const { data: evalTasks } = await supabase.from("tasks")
       .update({ status: "CANCELLED", updated_at: new Date().toISOString() })
       .eq("created_by_user_id", caller.id).gte("created_at", startedIso)
-      .in("status", ["TODO", "DOING"]).select("id");
+      .in("status", OPEN_TASK_STATUSES).select("id");
     cleaned.tasks = (evalTasks ?? []).length;
     const { data: evalReminders } = await supabase.from("reminders")
       .update({ status: "CANCELLED" })
@@ -5520,7 +5619,7 @@ async function serveCalendar(token: string): Promise<Response> {
 
   const { data: tasks } = await supabase.from("tasks")
     .select("id, title, description, due_at, status, priority")
-    .eq("owner_user_id", feed.user_id).in("status", ["TODO", "DOING"])
+    .eq("owner_user_id", feed.user_id).in("status", OPEN_TASK_STATUSES)
     .not("due_at", "is", null).limit(200);
   const { data: reminders } = await supabase.from("reminders")
     .select("id, message, remind_at, status")

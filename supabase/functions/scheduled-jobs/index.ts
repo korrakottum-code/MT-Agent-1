@@ -13,6 +13,7 @@ import {
   notifyAdmins,
   watchLineQuota,
 } from "../_shared/line_delivery.ts";
+import { OPEN_TASK_STATUSES, workReportDate } from "../_shared/work.ts";
 
 const CRON_SECRET = Deno.env.get("CRON_SECRET") ?? "";
 const CHANNEL_ACCESS_TOKEN = Deno.env.get("LINE_CHANNEL_ACCESS_TOKEN") ?? "";
@@ -240,7 +241,7 @@ async function morningReminder() {
     const { data: tasks } = await supabase.from("tasks")
       .select("title, due_at, status, owner:users!tasks_owner_user_id_fkey(display_name)")
       .eq("group_id", g.id)
-      .in("status", ["TODO", "DOING"])
+      .in("status", OPEN_TASK_STATUSES)
       .not("due_at", "is", null)
       .lte("due_at", in24h.toISOString())
       .order("due_at", { ascending: true });
@@ -272,18 +273,40 @@ async function morningReminder() {
   await personalOverdueNudge(now, in24h);
 }
 
+// งานที่ยังไม่ติ๊กในรายงานล่าสุด เตือนเฉพาะวันทำงาน และดูแค่รายงานของวันทำงานก่อนหน้า
+// จันทร์จึงย้อนไปศุกร์ รายงานเก่ากว่านั้นอาจเสร็จไปแล้วโดยไม่มีใครรายงาน
+async function pendingFromLatestReport(now: Date): Promise<Map<string, string[]>> {
+  const out = new Map<string, string[]>();
+  const weekday = new Date(now.getTime() + 7 * 3600_000).getUTCDay();
+  if (weekday === 0 || weekday === 6) return out;
+  const back = weekday === 1 ? 3 : 1;
+  const from = new Date(now.getTime() + 7 * 3600_000 - back * 24 * 3600_000).toISOString().slice(0, 10);
+  const { data } = await supabase.from("work_reports")
+    .select("line_user_id, items, work_date")
+    .gte("work_date", from).order("work_date", { ascending: false });
+  const seen = new Set<string>();
+  for (const r of data ?? []) {
+    if (seen.has(r.line_user_id)) continue;
+    seen.add(r.line_user_id);
+    const left = (r.items as any[]).filter((i) => i.state === "TODO").map((i) => String(i.text)).slice(0, 8);
+    if (left.length) out.set(r.line_user_id, left);
+  }
+  return out;
+}
+
 // เตือนเจ้าของงานเป็นการส่วนตัว นอกเหนือจากที่ประกาศในกลุ่ม
 // เดิมเตือนเฉพาะงานที่ผูกกับกลุ่ม งานที่สั่งในแชทส่วนตัวจึงไม่เคยถูกเตือนเลยสักครั้ง
 // และการประกาศในกลุ่มอย่างเดียวทำให้ทุกคนเห็นแต่ไม่มีใครรู้สึกว่าเป็นของตัวเอง
 async function personalOverdueNudge(now: Date, in24h: Date) {
   const { data: tasks } = await supabase.from("tasks")
     .select("title, due_at, status, owner_user_id, group_id")
-    .in("status", ["TODO", "DOING"])
+    .in("status", OPEN_TASK_STATUSES)
     .not("due_at", "is", null)
     .not("owner_user_id", "is", null)
     .lte("due_at", in24h.toISOString())
     .order("due_at", { ascending: true });
-  if (!tasks || tasks.length === 0) return;
+  const carry = await pendingFromLatestReport(now);
+  if ((!tasks || tasks.length === 0) && carry.size === 0) return;
 
   const { data: users } = await supabase.from("users")
     .select("id, line_user_id, display_name").eq("is_active", true);
@@ -292,13 +315,14 @@ async function personalOverdueNudge(now: Date, in24h: Date) {
   const gname = new Map((groups ?? []).map((g: any) => [g.id, g.group_name]));
 
   const mine = new Map<string, any[]>();
-  for (const t of tasks) {
+  for (const t of tasks ?? []) {
     const u = byId.get(t.owner_user_id);
     // บัญชีที่ลงทะเบียนล่วงหน้าแต่ยังไม่ผูก LINE จริง ส่งหาไม่ได้
     if (!u || String(u.line_user_id).startsWith("pending:")) continue;
     if (!mine.has(u.line_user_id)) mine.set(u.line_user_id, []);
     mine.get(u.line_user_id)!.push(t);
   }
+  for (const lineUserId of carry.keys()) if (!mine.has(lineUserId)) mine.set(lineUserId, []);
 
   for (const [lineUserId, rows] of mine) {
     const overdue = rows.filter((t: any) => new Date(t.due_at) < now);
@@ -315,13 +339,18 @@ async function personalOverdueNudge(now: Date, in24h: Date) {
         .map((t: any, i: number) => `${i + 1}. ${t.title}${where(t)} (ส่ง ${thaiDate(new Date(t.due_at))})`)
         .join("\n") + "\n";
     }
-    text += "\nปิดงานได้โดยพิมพ์บอกแงวว่างานไหนเสร็จแล้ว";
+    const left = carry.get(lineUserId) ?? [];
+    if (left.length) {
+      text += "\n📝 ค้างจาก To do list ล่าสุด:\n" + left.map((x, i) => `${i + 1}. ${x}`).join("\n") + "\n";
+    }
+    // เจ้าของเลือกไม่ประกาศกับทีม ข้อความนี้จึงเป็นทางหลักที่ทุกคนจะรู้ว่าหัวหน้าเห็นงานรายคน
+    text += "\nเริ่ม ส่งตรวจ ติดปัญหา หรือเสร็จแล้ว พิมพ์บอกแงวได้เลย หัวหน้าเห็นงานและ To do list เป็นรายคน จะได้รู้ว่าคุณทำอะไรอยู่";
     await pushToGroup(lineUserId, text.trim());
   }
 
   await supabase.from("audit_logs").insert({
     action: "scheduled_job", tool_name: "overdue_nudge",
-    input: {}, result: { people: mine.size, tasks: tasks.length }, status: "OK",
+    input: {}, result: { people: mine.size, tasks: (tasks ?? []).length, carried: carry.size }, status: "OK",
   });
 }
 
@@ -354,7 +383,7 @@ async function weeklySummary() {
       .eq("status", "DONE").gte("completed_at", since);
     const { data: overdue } = await supabase.from("tasks")
       .select("title, due_at, owner_user_id").eq("group_id", g.id)
-      .in("status", ["TODO", "DOING"]).not("due_at", "is", null)
+      .in("status", OPEN_TASK_STATUSES).not("due_at", "is", null)
       .lt("due_at", new Date().toISOString());
 
     const withOwner = (rows: any[] | null) =>
@@ -659,14 +688,38 @@ async function extractEvents() {
       });
       const { data: inserted, error: insErr } = await supabase.from("events")
         .upsert(rows, { onConflict: "chat_id,type,title", ignoreDuplicates: true })
-        .select("id");
+        .select("id, type, title, detail, source_excerpt, owner_user_id, said_by_user_id, group_id, due_at, confidence");
       if (insErr) throw new Error(insErr.message);
       totalSaved += (inserted ?? []).length;
+
+      // ตั้มตกลง 9 พ.ย. ว่าสั่งแล้วรับแล้วให้เปิดใบงานเลย รอยืนยันทีไรก็ค้างเพราะไม่มีใครมาตอบ
+      // ไม่มั่นใจหรือไม่รู้ว่าใครรับ ยังรอยืนยันเหมือนเดิม ใบที่เปิดผิดคนรับพิมพ์บอกให้ยกเลิกได้
+      let autoOpened = 0;
+      for (const ev of inserted ?? []) {
+        if (ev.type !== "TASK" || !ev.owner_user_id || Number(ev.confidence) < AUTO_OPEN_CONFIDENCE) continue;
+        const { data: task, error: taskErr } = await supabase.from("tasks").insert({
+          title: ev.title,
+          description: ev.detail ?? ev.source_excerpt ?? null,
+          owner_user_id: ev.owner_user_id,
+          created_by_user_id: ev.said_by_user_id ?? ev.owner_user_id,
+          group_id: ev.group_id,
+          due_at: ev.due_at,
+          monday_code: `${ev.title} ${ev.source_excerpt ?? ""}`.match(MONDAY_CODE)?.[0] ?? null,
+        }).select("id").single();
+        if (taskErr) {
+          console.error("เปิดใบงานจากแชทไม่สำเร็จ", ev.id, taskErr.message);
+          continue;
+        }
+        await supabase.from("events").update({
+          status: "CONVERTED", task_id: task.id, reviewed_at: new Date().toISOString(),
+        }).eq("id", ev.id);
+        autoOpened++;
+      }
 
       await supabase.from("audit_logs").insert({
         action: "scheduled_job", tool_name: "extract_events",
         input: { group: g.line_group_id, messages: human.length },
-        result: { detected: found.length, saved: (inserted ?? []).length }, status: "OK",
+        result: { detected: found.length, saved: (inserted ?? []).length, auto_opened: autoOpened }, status: "OK",
       });
     } catch (e) {
       console.error(`extract_events failed for ${g.line_group_id}:`, e);
@@ -684,6 +737,150 @@ async function extractEvents() {
     updated_at: new Date().toISOString(),
   });
   console.log(`extract_events: saved ${totalSaved} new events since ${since}`);
+}
+
+// ต่ำกว่านี้ยังรอคนยืนยัน 30 วันล่าสุด TASK ที่จับได้มีความมั่นใจเฉลี่ย 0.94
+const AUTO_OPEN_CONFIDENCE = 0.9;
+// รหัสงานที่ทีมพิมพ์กัน เช่น PF02-0639 PH00-0298 ใช้แสดงคู่กับใบงาน ไม่ได้เอาไปแก้อะไรใน Monday
+const MONDAY_CODE = /\b[A-Z]{2}\d{2}-\d{4}\b/;
+
+// ---------------------------------------------------------------- To do list รายคน (พร้อม extract_events)
+
+const WORK_CURSOR_KEY = "work_report_cursor";
+const WORK_FIRST_RUN_DAYS = 14;
+const WORK_BATCH = 20;
+const WORK_MAX_PER_RUN = 60;
+// กรองก่อนส่งให้โมเดล ข้อความส่วนใหญ่ในกลุ่มไม่ใช่รายงานงาน โมเดลตัดสินรอบสุดท้ายอีกทีว่าใช่จริงไหม
+const WORK_REPORT_HINT = /to\s*-?\s*do|สรุปงาน|งานวันนี้/i;
+
+const WORK_TOOL = {
+  name: "record_work_reports",
+  description: "บันทึกรายงานงานประจำวันของแต่ละข้อความ",
+  input_schema: {
+    type: "object",
+    properties: {
+      reports: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            index: { type: "number", description: "เลขข้อความในวงเล็บเหลี่ยม" },
+            person_name: { type: "string", description: "ชื่อเจ้าของรายการตามที่เขียนในข้อความ เช่น วิว ถ้าไม่ได้เขียนให้เว้นไว้" },
+            items: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  text: { type: "string", description: "งานหนึ่งรายการ คงถ้อยคำเดิม ตัดเครื่องหมายนำหน้าออก" },
+                  state: { type: "string", enum: ["DONE", "TODO"] },
+                },
+                required: ["text", "state"],
+              },
+            },
+          },
+          required: ["index", "items"],
+        },
+      },
+    },
+    required: ["reports"],
+  },
+};
+
+// คนที่พิมพ์ในกลุ่มแต่ไม่เคยเรียกแงวยังไม่มีแถวใน users ต้องลงชื่อให้ ไม่งั้นรายงานจะไม่มีเจ้าของ
+async function ensureReportAuthor(lineUserId: string, lineGroupId: string): Promise<string | null> {
+  const { data: known } = await supabase.from("users").select("id").eq("line_user_id", lineUserId).maybeSingle();
+  if (known) return known.id;
+  const res = await fetch(`https://api.line.me/v2/bot/group/${lineGroupId}/member/${lineUserId}`, {
+    headers: { Authorization: `Bearer ${CHANNEL_ACCESS_TOKEN}` },
+  });
+  const profile = res.ok ? await res.json() : null;
+  const { data: created, error } = await supabase.from("users")
+    .upsert({ line_user_id: lineUserId, display_name: profile?.displayName ?? null, role: "EMPLOYEE" }, { onConflict: "line_user_id" })
+    .select("id").single();
+  if (error) {
+    console.error("ลงชื่อเจ้าของรายงานไม่สำเร็จ", error.message);
+    return null;
+  }
+  return created.id;
+}
+
+async function extractWorkReports() {
+  const runStart = new Date();
+  const { data: cursorRow } = await supabase.from("org_settings").select("value").eq("key", WORK_CURSOR_KEY).maybeSingle();
+  const since = cursorRow?.value ?? new Date(runStart.getTime() - WORK_FIRST_RUN_DAYS * 24 * 3600_000).toISOString();
+
+  const { data: allActive } = await supabase.from("groups").select("id, line_group_id, group_name").eq("is_active", true);
+  const groups = pickGroups(allActive ?? []);
+  const groupByLine = new Map(groups.map((g: any) => [g.line_group_id, g]));
+  if (groups.length === 0) return;
+
+  const { data: rows, error } = await supabase.from("messages")
+    .select("line_message_id, line_user_id, line_group_id, message_text, created_at")
+    .in("line_group_id", groups.map((g: any) => g.line_group_id))
+    .neq("line_user_id", "bot").eq("message_type", "text")
+    .gt("created_at", since).order("created_at", { ascending: true }).limit(3000);
+  if (error) throw new Error(error.message);
+
+  const matching = (rows ?? []).filter((m: any) =>
+    String(m.message_text ?? "").length >= 60 && WORK_REPORT_HINT.test(m.message_text)
+  );
+  const todo = matching.slice(0, WORK_MAX_PER_RUN);
+  // รอบแรกย้อนหลังหลายวัน ทำไม่หมดให้จำจุดที่ค้างไว้ รอบถัดไปทำต่อ
+  const nextCursor = matching.length > todo.length ? todo[todo.length - 1].created_at : runStart.toISOString();
+
+  let saved = 0;
+  for (let i = 0; i < todo.length; i += WORK_BATCH) {
+    const batch = todo.slice(i, i + WORK_BATCH);
+    const { response, spec } = await askModel(specCheap(), {
+      max_tokens: 6000,
+      system:
+        `อ่านข้อความจากกลุ่มงาน แล้วบันทึกเฉพาะข้อความที่เป็นรายงานงานประจำวันของคนคนหนึ่ง เช่น To do list\n` +
+        `ข้อความที่แค่พูดถึงคำว่าสรุปงาน คุยกัน หรือสั่งงานคนอื่น ไม่ใช่รายงาน ให้ข้าม\n` +
+        `state = DONE ถ้ามีเครื่องหมายว่าเสร็จ เช่น ✅ หรือเขียนว่าเสร็จแล้ว\n` +
+        `state = TODO ถ้าอยู่ใต้หัวข้อสิ่งที่ยังต้องทำ มีเครื่องหมาย ❌ หรือไม่มีเครื่องหมายว่าเสร็จ\n` +
+        `ไม่ต้องบันทึกบรรทัดที่เป็นแค่ชื่อคน วันที่ หรือหัวข้อ ห้ามเพิ่มงานที่ไม่ได้เขียนไว้`,
+      tools: [WORK_TOOL],
+      tool_choice: { type: "tool", name: "record_work_reports" },
+      messages: [{
+        role: "user",
+        content: batch.map((m: any, n: number) => `[${n}]\n${String(m.message_text).slice(0, 2500)}`).join("\n\n"),
+      }],
+    });
+    await logTokenUsage("work_reports", spec.model, null, response);
+
+    const call = (response.content ?? []).find((b: any) => b.type === "tool_use");
+    for (const r of call?.input?.reports ?? []) {
+      const m = batch[Number(r.index)];
+      if (!m) continue;
+      const g: any = groupByLine.get(m.line_group_id);
+      const items = (Array.isArray(r.items) ? r.items : [])
+        .filter((x: any) => String(x?.text ?? "").trim() && ["DONE", "TODO"].includes(x?.state))
+        .map((x: any) => ({ text: String(x.text).trim().slice(0, 300), state: x.state }));
+      if (!g || items.length === 0) continue;
+      const userId = await ensureReportAuthor(m.line_user_id, m.line_group_id);
+      const { error: upErr } = await supabase.from("work_reports").upsert({
+        user_id: userId,
+        line_user_id: m.line_user_id,
+        written_name: r.person_name ? String(r.person_name).trim().slice(0, 60) : null,
+        group_id: g.id,
+        line_message_id: m.line_message_id,
+        work_date: workReportDate(m.created_at),
+        items,
+        posted_at: m.created_at,
+      }, { onConflict: "line_user_id,group_id,work_date" });
+      if (upErr) throw new Error(upErr.message);
+      saved++;
+    }
+  }
+
+  // เลื่อนจุดอ่านหลังทำครบทุกชุด ถ้าโมเดลพังกลางทาง รอบหน้าอ่านซ้ำได้ เขียนทับแถวเดิมไม่ซ้ำ
+  await supabase.from("org_settings").upsert({
+    key: WORK_CURSOR_KEY, value: nextCursor, updated_at: new Date().toISOString(),
+  });
+  await supabase.from("audit_logs").insert({
+    action: "scheduled_job", tool_name: "work_reports",
+    input: { since }, result: { candidates: matching.length, read: todo.length, saved }, status: "OK",
+  });
 }
 
 // ---------------------------------------------------------------- due reminders (ทุกนาที)
@@ -956,7 +1153,16 @@ Deno.serve(async (req: Request) => {
         console.error("เฝ้าโควตา LINE ไม่สำเร็จ:", e);
       }
     }
-    else if (job === "extract_events") await extractEvents();
+    else if (job === "extract_events") {
+      await extractEvents();
+      // แยกกันพัง อ่านรายงานไม่ได้ต้องไม่ทำให้รอบจับงานถูกนับว่าล้มเหลว
+      await extractWorkReports().catch(async (e) => {
+        console.error("work_reports failed:", e);
+        await supabase.from("audit_logs").insert({
+          action: "scheduled_job", tool_name: "work_reports", input: {}, result: { error: String(e) }, status: "ERROR",
+        });
+      });
+    }
     else if (job === "daily_context") await dailyContext();
     else if (job === "checkin_summary") await checkinSummary();
     else return new Response("unknown job", { status: 400 });

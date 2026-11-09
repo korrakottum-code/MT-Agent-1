@@ -94,7 +94,7 @@ async function loadData() {
 
   const now = Date.now();
   const tasks = taskRows.data ?? [];
-  const open = tasks.filter((t) => t.status === "TODO" || t.status === "DOING");
+  const open = tasks.filter((t) => ["TODO", "DOING", "REVIEW", "BLOCKED"].includes(t.status));
 
   const byPurpose: Record<string, number> = {};
   let spend = 0;
