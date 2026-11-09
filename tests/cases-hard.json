@@ -523,5 +523,15 @@
     "expect_tools_any": [
       "create_reminder"
     ]
+  },
+  {
+    "id": "hard-admin-opens-group-from-chat",
+    "dimension": "correct",
+    "why": "9 พ.ย. ตั้มไม่เข้าหลังบ้าน กลุ่มใหม่เริ่มจากปิด ต้องเปิดจากแชทได้ ถ้าแงวบอกให้ไปหลังบ้าน กลุ่มใหม่จะเปิดไม่ได้เลย ใช้ expect_tools_ok เพราะชื่อเครื่องมือถูกจดตั้งแต่ก่อนเช็กสิทธิ์",
+    "as_user": "ตั้ม",
+    "message": "แงว เปิดกลุ่ม AA1 ให้หน่อย",
+    "expect_tools_ok": [
+      "set_group_active"
+    ]
   }
 ]

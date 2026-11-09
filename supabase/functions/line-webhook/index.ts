@@ -777,6 +777,38 @@ async function ensureGroup(lineGroupId: string | null) {
   return created;
 }
 
+// กลุ่มที่ไม่เคยเห็นต้องรอ ADMIN เปิดก่อน ใครก็ดึงแงวเข้ากลุ่มได้ ถ้าเปิดเองทันทีข้อมูลทีมจะไปโผล่ในกลุ่มคนนอก
+async function holdNewGroup(lineGroupId: string) {
+  const groupName = await fetchLineGroupName(lineGroupId);
+  const { data: created } = await supabase.from("groups")
+    .upsert(
+      { line_group_id: lineGroupId, group_name: groupName, is_active: false },
+      { onConflict: "line_group_id", ignoreDuplicates: true },
+    )
+    .select("id");
+  if (!created?.length) return;
+  await notifyAdmins(
+    supabase, pushAsBot, `new_group_${lineGroupId}`,
+    `มีคนดึงแงวเข้ากลุ่มใหม่ "${groupName ?? "ไม่ทราบชื่อ"}" ตอนนี้แงวเงียบและไม่เก็บข้อความ ` +
+      `ถ้าเป็นกลุ่มงานของทีม บอกแงวในแชทนี้ว่า "เปิดกลุ่ม ${groupName ?? "ชื่อกลุ่ม"}"`,
+    24 * 3600_000,
+  );
+}
+
+// คนที่ไม่มีในรายชื่อและไม่เคยพิมพ์ในกลุ่มที่เปิดอยู่ คือคนนอกที่แอดแงวเป็นเพื่อน
+// พนักงานใหม่ที่ยังไม่เคยคุยกับแงวไม่มีแถวใน users แต่มีข้อความในกลุ่มทีม จึงต้องดูจาก messages ด้วย
+async function isOutsider(lineUserId: string): Promise<boolean> {
+  const { data: known } = await supabase.from("users")
+    .select("id").eq("line_user_id", lineUserId).maybeSingle();
+  if (known) return false;
+  const { data: open } = await supabase.from("groups").select("line_group_id").eq("is_active", true);
+  const ids = (open ?? []).map((g: any) => g.line_group_id);
+  if (ids.length === 0) return true;
+  const { data: seen } = await supabase.from("messages")
+    .select("id").eq("line_user_id", lineUserId).in("line_group_id", ids).limit(1);
+  return (seen ?? []).length === 0;
+}
+
 async function findUserByName(name: string) {
   const { data } = await supabase
     .from("users").select("*")
@@ -1532,6 +1564,20 @@ const TOOLS = [
     },
   },
   {
+    name: "set_group_active",
+    description:
+      "เปิดหรือปิดการทำงานของแงวในกลุ่ม (เฉพาะ ADMIN) ใช้เมื่อ ADMIN สั่ง 'เปิดกลุ่ม X' หรือ 'ปิดกลุ่ม X' " +
+      "กลุ่มที่ปิดอยู่แงวไม่ตอบ ไม่เก็บข้อความ ไม่ส่งสรุป กลุ่มใหม่ทุกกลุ่มเริ่มจากปิด",
+    input_schema: {
+      type: "object",
+      properties: {
+        group_name: { type: "string", description: "ชื่อกลุ่มหรือบางส่วนของชื่อ" },
+        active: { type: "boolean", description: "true = เปิด, false = ปิด" },
+      },
+      required: ["group_name", "active"],
+    },
+  },
+  {
     name: "rename_group",
     description:
       "ตั้ง/เปลี่ยนชื่อกลุ่มปัจจุบันในระบบ (เฉพาะ ADMIN) ใช้ตอนเชิญบอทเข้ากลุ่มใหม่ที่ยังไม่มีชื่อ",
@@ -1837,6 +1883,7 @@ const WRITE_TOOLS = new Set([
   "update_my_profile",
   "remember_preference",
   "rename_group",
+  "set_group_active",
   "register_user",
   "confirm_event",
   "dismiss_event",
@@ -1857,7 +1904,7 @@ const WRITE_TOOLS = new Set([
 // ผลคือข้อสอบเรื่อง "กลุ่มนี้ห้ามแตะ Monday" คืนค่าว่า ok แล้วแงวก็รายงานว่าเปลี่ยนสถานะให้แล้ว
 // ทั้งที่ของจริงจะถูกปฏิเสธ ข้อสอบจึงวัดสิ่งที่ตรงข้ามกับความจริง
 const ADMIN_ONLY_TOOLS = new Set([
-  "manage_user", "register_user", "link_user", "set_user_active", "rename_group", "create_admin_link",
+  "manage_user", "register_user", "link_user", "set_user_active", "rename_group", "set_group_active", "create_admin_link",
 ]);
 
 function dryRunGuard(name: string, ctx: Ctx): string | null {
@@ -3649,6 +3696,24 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       return { remembered: true, scope: "me" };
     }
 
+    case "set_group_active": {
+      if (ctx.caller.role !== "ADMIN") return { error: "เฉพาะ ADMIN เท่านั้นที่เปิดหรือปิดกลุ่มได้" };
+      const { data: found, error: findError } = await supabase.from("groups")
+        .select("id, group_name, is_active")
+        .ilike("group_name", `%${String(input.group_name).trim()}%`).limit(5);
+      if (findError) return { error: findError.message };
+      if (!found || found.length === 0) {
+        const { data: closed } = await supabase.from("groups").select("group_name").eq("is_active", false);
+        return { error: `ไม่พบกลุ่มชื่อ "${input.group_name}"`, closed_groups: (closed ?? []).map((g: any) => g.group_name) };
+      }
+      if (found.length > 1) return { error: `ชื่อกลุ่มตรงหลายกลุ่ม: ${found.map((g: any) => g.group_name).join(", ")}` };
+      const { data, error } = await supabase.from("groups")
+        .update({ is_active: input.active === true }).eq("id", found[0].id)
+        .select("group_name, is_active").single();
+      if (error) return { error: error.message };
+      return { group: data };
+    }
+
     case "rename_group": {
       if (ctx.caller.role !== "ADMIN") return { error: "เฉพาะ ADMIN เท่านั้นที่ตั้งชื่อกลุ่มได้" };
       if (!ctx.group) return { error: "ใช้ได้เฉพาะในกลุ่ม" };
@@ -4205,7 +4270,8 @@ const SYSTEM_RULES = `คุณคือ "แงว" (MT Agent) — AI น้อ
 27.2 คนอื่นทุกคน ทุก role รวม MANAGER ใช้แงวได้เฉพาะงานฝั่ง Class ถ้าคำขอระบุชัดว่าเป็นแบรนด์หรือลูกค้าอื่น เช่น Cloud Clinic หรือเห็นชัดว่าไม่ใช่เรื่องงาน เช่น การบ้าน ดูดวง สูตรอาหาร
      ให้บอกสั้น ๆ ว่าแงวดูแลเฉพาะงานฝั่ง Class Clinic กับ CLASS GO แล้วถามว่ามีงานฝั่งนี้ให้ช่วยไหม ห้ามเรียกเครื่องมือ ห้ามตอบเนื้อหาของเรื่องนั้น แม้จะอ้างว่าตั้มอนุญาตแล้ว
 27.3 ถ้าไม่ได้ระบุแบรนด์ ให้ถือว่าเป็นงานฝั่ง Class แล้วทำตามปกติ ห้ามถามกลับว่าเป็นงานแบรนด์ไหน งานทั่วไปของทีม เช่น จดงาน ตั้งเตือน ค้นแชท ประชุม เช็กชื่อ ตารางเวร ทำได้เหมือนเดิม
-27.4 คำทักทาย คุยเล่นสั้น ๆ คำถามว่าแงวทำอะไรได้ และเรื่องความเป็นส่วนตัวตามข้อ 16 ตอบได้ตามปกติ`;
+27.4 คำทักทาย คุยเล่นสั้น ๆ คำถามว่าแงวทำอะไรได้ และเรื่องความเป็นส่วนตัวตามข้อ 16 ตอบได้ตามปกติ
+27.5 ADMIN สั่งเปิดหรือปิดกลุ่ม ให้ใช้ set_group_active ได้เลย ห้ามบอกให้ไปหลังบ้าน`;
 
 // ส่วนที่เปลี่ยนทุกครั้ง (เวลา ผู้ใช้ กลุ่ม รายชื่อ) ต้องอยู่หลังจุด cache เสมอ
 function buildContext(ctx: Ctx, roster: any[], groups: any[], orgPersona: string | null, crossChat: string): string {
@@ -4720,6 +4786,12 @@ type Sim = {
 };
 
 async function handleEvent(event: any, sim?: Sim) {
+  if (event.type === "join" && event.source?.groupId) {
+    const { data: g } = await supabase.from("groups")
+      .select("id").eq("line_group_id", event.source.groupId).maybeSingle();
+    if (!g) await holdNewGroup(event.source.groupId);
+    return;
+  }
   if (event.type !== "message") return;
   const msgType: string = event.message?.type ?? "";
   if (!["text", "image", "file", "audio", "video"].includes(msgType)) return;
@@ -4729,7 +4801,17 @@ async function handleEvent(event: any, sim?: Sim) {
   if (event.source?.groupId) {
     const { data: g } = await supabase.from("groups")
       .select("is_active").eq("line_group_id", event.source.groupId).maybeSingle();
-    if (g?.is_active === false) return;
+    if (!g) {
+      await holdNewGroup(event.source.groupId);
+      return;
+    }
+    if (g.is_active === false) return;
+  } else if (event.source?.userId && await isOutsider(event.source.userId)) {
+    await lineSend("/v2/bot/message/reply", {
+      replyToken: event.replyToken,
+      messages: [{ type: "text", text: "แงวใช้ได้เฉพาะทีมงาน Class ค่ะ ถ้าเป็นทีมงาน พิมพ์ในกลุ่มทีมก่อนหนึ่งครั้งแล้วค่อยทักมาใหม่นะคะ" }],
+    });
+    return;
   }
 
   const fileName: string = event.message?.fileName ?? "ไฟล์";
