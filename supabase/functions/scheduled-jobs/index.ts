@@ -607,7 +607,11 @@ async function extractEvents() {
         .gte("created_at", since).lt("created_at", runStart.toISOString())
         .order("created_at", { ascending: true }).limit(400);
       const human = (msgs ?? []).filter((m: any) => m.line_user_id !== "bot");
-      if (human.length < 3) continue; // คุยกันไม่กี่คำ ยังไม่พอให้สรุปอะไร
+      if (human.length < 3) {
+        // คุยกันไม่กี่คำ ยังไม่พอให้สรุปอะไร แต่เรื่องที่จับไว้ตอนกลางคืนยังต้องถามตอนเช้า
+        await askMissingTaskInfo(g, runStart).catch((e) => console.error("ask failed", e));
+        continue;
+      }
 
       const { data: known } = await supabase.from("events")
         .select("type, title").eq("chat_id", g.line_group_id)
@@ -695,11 +699,11 @@ async function extractEvents() {
       if (insErr) throw new Error(insErr.message);
       totalSaved += (inserted ?? []).length;
 
-      // ตั้มตกลง 9 พ.ย. ว่าสั่งแล้วรับแล้วให้เปิดใบงานเลย รอยืนยันทีไรก็ค้างเพราะไม่มีใครมาตอบ
-      // ไม่มั่นใจหรือไม่รู้ว่าใครรับ ยังรอยืนยันเหมือนเดิม ใบที่เปิดผิดคนรับพิมพ์บอกให้ยกเลิกได้
+      // ตั้มตกลง 9 พ.ย. ว่าสั่งแล้วรับแล้วให้เปิดใบงานเลย และ 10 พ.ย. ว่าต้องมั่นใจครบทุกข้อก่อน
+      // ใครสั่ง ใครรับ งานอะไร ส่งเมื่อไหร่ ขาดข้อไหนไม่เปิด แงวถามในกลุ่มแทน (askMissingTaskInfo)
       let autoOpened = 0;
       for (const ev of inserted ?? []) {
-        if (ev.type !== "TASK" || !ev.owner_user_id || Number(ev.confidence) < AUTO_OPEN_CONFIDENCE) continue;
+        if (!isCompleteTask(ev)) continue;
         const { data: task, error: taskErr } = await supabase.from("tasks").insert({
           title: ev.title,
           description: ev.detail ?? ev.source_excerpt ?? null,
@@ -719,10 +723,12 @@ async function extractEvents() {
         autoOpened++;
       }
 
+      const asked = await askMissingTaskInfo(g, runStart);
+
       await supabase.from("audit_logs").insert({
         action: "scheduled_job", tool_name: "extract_events",
         input: { group: g.line_group_id, messages: human.length },
-        result: { detected: found.length, saved: (inserted ?? []).length, auto_opened: autoOpened }, status: "OK",
+        result: { detected: found.length, saved: (inserted ?? []).length, auto_opened: autoOpened, asked }, status: "OK",
       });
     } catch (e) {
       console.error(`extract_events failed for ${g.line_group_id}:`, e);
@@ -744,6 +750,50 @@ async function extractEvents() {
 
 // ต่ำกว่านี้ยังรอคนยืนยัน 30 วันล่าสุด TASK ที่จับได้มีความมั่นใจเฉลี่ย 0.94
 const AUTO_OPEN_CONFIDENCE = 0.9;
+
+// เปิดใบงานเองได้เฉพาะเมื่อรู้ครบ ใครสั่ง ใครรับ งานอะไร ส่งเมื่อไหร่ และมั่นใจว่าเป็นงานจริง
+function isCompleteTask(ev: any): boolean {
+  return ev.type === "TASK" && Boolean(ev.owner_user_id) && Boolean(ev.said_by_user_id) &&
+    Boolean(ev.due_at) && String(ev.title ?? "").trim().length > 0 &&
+    Number(ev.confidence) >= AUTO_OPEN_CONFIDENCE;
+}
+
+// ถามได้เฉพาะเวลาทำงาน ข้อความในกลุ่มตอนตีสองรบกวนทุกคน เรื่องที่จับได้กลางคืนจะถูกถามรอบเช้า
+const ASK_FROM_HOUR = 8;
+const ASK_UNTIL_HOUR = 20;
+const ASK_LOOKBACK_MS = 24 * 3600_000;
+const ASK_MAX_ITEMS = 5;
+
+// งานที่ยังไม่ครบ ถามรวมเป็นข้อความเดียวต่อกลุ่ม คนตอบกลับข้อความนี้ แงวในแชทจะเปิดงานให้ตามกฎ 14.5
+async function askMissingTaskInfo(g: any, now: Date): Promise<number> {
+  const hour = new Date(now.getTime() + 7 * 3600_000).getUTCHours();
+  if (hour < ASK_FROM_HOUR || hour >= ASK_UNTIL_HOUR) return 0;
+  const { data: pending } = await supabase.from("events")
+    .select("id, type, title, owner_user_id, said_by_user_id, due_at, confidence")
+    .eq("chat_id", g.line_group_id).eq("type", "TASK").eq("status", "NEW")
+    .is("asked_at", null).is("task_id", null)
+    .gte("created_at", new Date(now.getTime() - ASK_LOOKBACK_MS).toISOString())
+    .order("created_at", { ascending: true }).limit(ASK_MAX_ITEMS);
+  const items = (pending ?? []).filter((ev: any) => !isCompleteTask(ev));
+  if (items.length === 0) return 0;
+
+  const lines = items.map((ev: any, i: number) => {
+    const missing: string[] = [];
+    if (!ev.said_by_user_id) missing.push("ใครสั่ง");
+    if (!ev.owner_user_id) missing.push("ใครรับ");
+    if (!ev.due_at) missing.push("ส่งเมื่อไหร่");
+    const ask = missing.length ? `ยังไม่รู้ว่า${missing.join(" ")}` : "ใช่งานจริงไหม";
+    return `${i + 1}. ${ev.title} — ${ask}`;
+  });
+  const text = "แงวเห็นงานในแชทแต่ยังไม่ครบ ขอเช็คก่อนเปิดงานค่ะ\n\n" + lines.join("\n") +
+    "\n\nตอบกลับข้อความนี้บอกแงวได้เลย ถ้าไม่ใช่งานก็บอกได้ค่ะ";
+  const sent = await pushToGroup(g.line_group_id, text);
+  // ส่งไม่ออกก็ยังจดว่าถามแล้ว ไม่งั้นรอบหน้าจะถามซ้ำเรื่อย ๆ ตอนโควตาหมด
+  await supabase.from("events").update({ asked_at: new Date().toISOString() })
+    .in("id", items.map((ev: any) => ev.id));
+  if (!(sent as any)?.ok) console.error("ถามงานที่ยังไม่ครบไม่สำเร็จ", g.line_group_id, sent);
+  return items.length;
+}
 // รหัสงานที่ทีมพิมพ์กัน เช่น PF02-0639 PH00-0298 ใช้แสดงคู่กับใบงาน ไม่ได้เอาไปแก้อะไรใน Monday
 const MONDAY_CODE = /\b[A-Z]{2}\d{2}-\d{4}\b/;
 
