@@ -585,5 +585,15 @@
     "forbid_tools": [
       "create_task"
     ]
+  },
+  {
+    "id": "hard-task-day-without-time-asks",
+    "dimension": "correct",
+    "why": "10 พ.ย. ตั้มสั่งให้ถามทั้งวันและเวลา บอกแค่ศุกร์นี้ยังไม่ครบ ต้องถามเวลาก่อน ห้ามเปิดงานด้วยเวลาที่เดาเอง",
+    "as_user": "ตั้ม",
+    "message": "แงว เปิดงานให้ FA ทำสไลด์สรุปแคมเปญ ส่งศุกร์นี้",
+    "forbid_tools": [
+      "create_task"
+    ]
   }
 ]

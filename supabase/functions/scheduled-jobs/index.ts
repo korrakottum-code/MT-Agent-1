@@ -478,6 +478,10 @@ const EXTRACT_TOOL = {
             owner_name: { type: "string", description: "ชื่อเล่นคนที่ต้องรับผิดชอบ ถ้าไม่ชัดให้เว้นว่าง" },
             said_by_name: { type: "string", description: "ชื่อเล่นคนที่พูดเรื่องนี้" },
             due_at: { type: "string", description: "ISO 8601 +07:00 เฉพาะเมื่อมีกำหนดชัดเจน" },
+            due_time_known: {
+              type: "boolean",
+              description: "true เมื่อมีคนบอกเวลาด้วย เช่น 15:00 บ่ายสาม เช้า เที่ยง เย็น สิ้นวัน · false เมื่อบอกแค่วัน",
+            },
             confidence: { type: "number", description: "0–1 ความมั่นใจว่าเป็นเรื่องจริงจัง ไม่ใช่คุยเล่นหรือเดาเอง" },
             source_excerpt: { type: "string", description: "ข้อความต้นทางสั้น ๆ ที่ทำให้สรุปแบบนี้" },
           },
@@ -650,7 +654,7 @@ async function extractEvents() {
           `- ข้อความของ "แงว" คือคำตอบของบอทเอง ใช้เป็นบริบทได้ แต่ห้ามเอามาเป็นเรื่องที่จับ\n` +
           `- เรื่องที่อยู่ในรายการ "จับไปแล้ว" หรือ "มีในระบบแล้ว" ห้ามจับซ้ำ แม้จะถูกพูดถึงอีกครั้ง\n` +
           `- ข้ามคำสั่งที่คนพูดกับแงวโดยตรงและการตั้งค่าระบบ (ตั้งชื่อกลุ่ม เปลี่ยนสิทธิ์ ตั้งเตือน สร้างงานผ่านบอท) เพราะระบบบันทึกไว้ให้แล้ว\n` +
-          `- due_at ใส่เฉพาะเมื่อมีคนระบุกำหนดไว้ชัดเจน ถ้าไม่มีให้เว้นว่าง อย่าเดาวันเอง\n` +
+          `- due_at ใส่เฉพาะเมื่อมีคนระบุกำหนดไว้ชัดเจน ถ้าไม่มีให้เว้นว่าง อย่าเดาวันเอง ถ้าบอกแค่วันไม่บอกเวลา ให้ใส่ due_time_known=false\n` +
           `- ปีในวันที่ต้องเป็น ค.ศ. เท่านั้น (ปีนี้คือ ${new Date(runStart.getTime() + 7 * 3600_000).getUTCFullYear()}) ห้ามใช้ พ.ศ. เด็ดขาด\n\n` +
           `เวลาปัจจุบัน: ${nowIso}\n` +
           `คนในองค์กร: ${(users ?? []).map((u: any) => u.display_name).filter(Boolean).join(", ")}`,
@@ -689,13 +693,14 @@ async function extractEvents() {
           owner_user_id: findUser(e.owner_name),
           said_by_user_id: findUser(e.said_by_name),
           due_at: due ? due.toISOString() : null,
+          due_time_known: due ? e.due_time_known === true : null,
           confidence: Math.min(1, Math.max(0, Number(e.confidence))),
           source_excerpt: e.source_excerpt ? String(e.source_excerpt).slice(0, 500) : null,
         };
       });
       const { data: inserted, error: insErr } = await supabase.from("events")
         .upsert(rows, { onConflict: "chat_id,type,title", ignoreDuplicates: true })
-        .select("id, type, title, detail, source_excerpt, owner_user_id, said_by_user_id, group_id, due_at, confidence");
+        .select("id, type, title, detail, source_excerpt, owner_user_id, said_by_user_id, group_id, due_at, due_time_known, confidence");
       if (insErr) throw new Error(insErr.message);
       totalSaved += (inserted ?? []).length;
 
@@ -751,10 +756,15 @@ async function extractEvents() {
 // ต่ำกว่านี้ยังรอคนยืนยัน 30 วันล่าสุด TASK ที่จับได้มีความมั่นใจเฉลี่ย 0.94
 const AUTO_OPEN_CONFIDENCE = 0.9;
 
+// "วันศุกร์ 14 พ.ย." ใช้ถามเวลาเมื่อรู้แค่วันส่ง
+function thaiDay(iso: string): string {
+  return new Date(iso).toLocaleDateString("th-TH", { timeZone: "Asia/Bangkok", weekday: "long", day: "numeric", month: "short" });
+}
+
 // เปิดใบงานเองได้เฉพาะเมื่อรู้ครบ ใครสั่ง ใครรับ งานอะไร ส่งเมื่อไหร่ และมั่นใจว่าเป็นงานจริง
 function isCompleteTask(ev: any): boolean {
   return ev.type === "TASK" && Boolean(ev.owner_user_id) && Boolean(ev.said_by_user_id) &&
-    Boolean(ev.due_at) && String(ev.title ?? "").trim().length > 0 &&
+    Boolean(ev.due_at) && ev.due_time_known === true && String(ev.title ?? "").trim().length > 0 &&
     Number(ev.confidence) >= AUTO_OPEN_CONFIDENCE;
 }
 
@@ -769,7 +779,7 @@ async function askMissingTaskInfo(g: any, now: Date): Promise<number> {
   const hour = new Date(now.getTime() + 7 * 3600_000).getUTCHours();
   if (hour < ASK_FROM_HOUR || hour >= ASK_UNTIL_HOUR) return 0;
   const { data: pending } = await supabase.from("events")
-    .select("id, type, title, owner_user_id, said_by_user_id, due_at, confidence")
+    .select("id, type, title, owner_user_id, said_by_user_id, due_at, due_time_known, confidence")
     .eq("chat_id", g.line_group_id).eq("type", "TASK").eq("status", "NEW")
     .is("asked_at", null).is("task_id", null)
     .gte("created_at", new Date(now.getTime() - ASK_LOOKBACK_MS).toISOString())
@@ -781,7 +791,8 @@ async function askMissingTaskInfo(g: any, now: Date): Promise<number> {
     const missing: string[] = [];
     if (!ev.said_by_user_id) missing.push("ใครสั่ง");
     if (!ev.owner_user_id) missing.push("ใครรับ");
-    if (!ev.due_at) missing.push("ส่งเมื่อไหร่");
+    if (!ev.due_at) missing.push("ส่งวันไหน กี่โมง");
+    else if (ev.due_time_known !== true) missing.push(`ส่ง${thaiDay(ev.due_at)}กี่โมง`);
     const ask = missing.length ? `ยังไม่รู้ว่า${missing.join(" ")}` : "ใช่งานจริงไหม";
     return `${i + 1}. ${ev.title} — ${ask}`;
   });
