@@ -563,9 +563,11 @@ Deno.serve(async (req) => {
 
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
 
-  // แลกลิงก์ใช้ครั้งเดียวเป็น session แล้วส่ง token ต่อทาง fragment
+  // เปิดลิงก์จากแชท: ยังไม่แลก แค่ส่งต่อไปหน้าเว็บพร้อมลิงก์ใน fragment
+  // ไลน์เปิดลิงก์เองเพื่อทำกล่องตัวอย่างใต้ข้อความ เดิมการเปิดนั้นแลกลิงก์ทิ้งไปก่อนเจ้าของกด (10 พ.ย.)
+  // ตัวทำกล่องตัวอย่างไม่รัน JavaScript จึงแลกจริงตอนหน้าเว็บ POST /exchange เท่านั้น
   const linkToken = url.searchParams.get("t");
-  if (linkToken) {
+  if (linkToken && req.method === "GET") {
     const found = await resolveTicket(linkToken, "LINK");
     if (!found) {
       return new Response(
@@ -574,8 +576,20 @@ Deno.serve(async (req) => {
         { status: 401, headers: { "content-type": "text/plain; charset=utf-8" } },
       );
     }
-    await supabase.from("admin_sessions")
-      .update({ used_at: new Date().toISOString() }).eq("id", found.ticket.id);
+    return new Response(null, {
+      status: 302,
+      headers: { location: `${CONSOLE_URL}#t=${encodeURIComponent(linkToken)}`, "cache-control": "no-store" },
+    });
+  }
+
+  if (path === "/exchange" && req.method === "POST") {
+    const body = await req.json().catch(() => ({}));
+    const found = await resolveTicket(String(body?.t ?? ""), "LINK");
+    if (!found) return json({ error: "ลิงก์นี้หมดอายุหรือถูกใช้ไปแล้ว ขอลิงก์ใหม่จากแงว" }, 401);
+    // แลกได้ครั้งเดียว: อัปเดตเฉพาะแถวที่ยังไม่ถูกใช้ ถ้าสองแท็บแลกพร้อมกันจะได้แค่แท็บเดียว
+    const { data: claimed } = await supabase.from("admin_sessions")
+      .update({ used_at: new Date().toISOString() }).eq("id", found.ticket.id).is("used_at", null).select("id");
+    if (!claimed?.length) return json({ error: "ลิงก์นี้ถูกใช้ไปแล้ว ขอลิงก์ใหม่จากแงว" }, 401);
 
     const sessionToken = crypto.randomUUID() + "." + crypto.randomUUID();
     await supabase.from("admin_sessions").insert({
@@ -585,11 +599,7 @@ Deno.serve(async (req) => {
       expires_at: new Date(Date.now() + SESSION_HOURS * 3600_000).toISOString(),
     });
     await audit(found.user.id, "admin_login", { via: "magic_link" }, { ok: true }, "OK");
-
-    return new Response(null, {
-      status: 302,
-      headers: { location: `${CONSOLE_URL}#s=${sessionToken}`, "cache-control": "no-store" },
-    });
+    return json({ s: sessionToken });
   }
 
   const bearer = (req.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "");

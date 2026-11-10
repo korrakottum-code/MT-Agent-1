@@ -12,12 +12,15 @@ const STATE = {
 let current = "checklist";
 
 // token มาทาง fragment ซึ่งไม่ถูกส่งไปเซิร์ฟเวอร์ใด ๆ — ย้ายเข้า sessionStorage แล้วล้าง URL ทันที
+// #t= คือลิงก์ใช้ครั้งเดียวจากแชท ต้องแลกเป็น session ที่นี่ (ตัวทำกล่องตัวอย่างของไลน์ไม่รัน JS จึงแลกทิ้งไม่ได้)
+// #s= คือ session ที่ได้แล้ว
+const LINK = (location.hash.match(/(?:^|[#&])t=([^&]+)/) || [])[1];
 (function grabToken() {
   const m = location.hash.match(/(?:^|[#&])s=([^&]+)/);
   if (m) {
     try { sessionStorage.setItem("mt_admin", decodeURIComponent(m[1])); } catch (_) {}
-    history.replaceState(null, "", location.pathname + location.search);
   }
+  if (m || LINK) history.replaceState(null, "", location.pathname + location.search);
 })();
 const token = () => { try { return sessionStorage.getItem("mt_admin"); } catch (_) { return null; } };
 
@@ -605,10 +608,24 @@ document.addEventListener("change", async (e) => {
   }
 });
 
-if (token()) {
+function start() {
   loadData().then(async () => {
     // ดึงสุขภาพระบบไว้ตั้งแต่เปิดหน้า จะได้ขึ้นจุดแดงที่แท็บถ้ามีอะไรผิดปกติ โดยไม่ต้องกดเข้าไปดูเอง
     const h = await api("/health");
     if (h) { STATE.health = h; paintHealthDot(); }
   });
+}
+
+if (LINK) {
+  fetch(API + "/exchange", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ t: decodeURIComponent(LINK) }),
+  }).then((r) => r.json().then((b) => ({ ok: r.ok, b }))).then(({ ok, b }) => {
+    if (!ok || !b.s) return lockOut(b.error || "ลิงก์ใช้ไม่ได้ ขอลิงก์ใหม่จากแงว");
+    try { sessionStorage.setItem("mt_admin", b.s); } catch (_) {}
+    start();
+  }).catch(() => lockOut("เชื่อมต่อไม่ได้ ลองรีเฟรช"));
+} else if (token()) {
+  start();
 }
