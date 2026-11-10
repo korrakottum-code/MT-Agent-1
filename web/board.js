@@ -1,7 +1,7 @@
 // หน้านี้อ่านอย่างเดียว ไม่มีปุ่มแก้ไขงานใด ๆ ทีมสั่งงานผ่านไลน์เหมือนเดิม
 // ข้อความทุกอย่างมาจากแชท จึงใส่ผ่าน textContent เท่านั้น ห้ามต่อเป็น HTML
 const API = window.BOARD_API || "https://ssjsjvcbulclnvlrkdsj.supabase.co/functions/v1/team-board";
-const STATUS = { TODO: "ยังไม่เริ่ม", DOING: "กำลังทำ", REVIEW: "รอตรวจ", BLOCKED: "ติดปัญหา" };
+const STATUS = { TODO: "ยังไม่เสร็จ", DOING: "ยังไม่เสร็จ", REVIEW: "ยังไม่เสร็จ", BLOCKED: "ยังไม่เสร็จ" };
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => {
   const n = document.createElement(tag);
@@ -9,6 +9,8 @@ const el = (tag, cls, text) => {
   if (text !== undefined) n.textContent = text;
   return n;
 };
+const thaiDue = (v) =>
+  new Date(v).toLocaleString("th-TH", { timeZone: "Asia/Bangkok", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) + " น.";
 const thaiDate = (v) =>
   new Date(v.length === 10 ? `${v}T12:00:00+07:00` : v)
     .toLocaleDateString("th-TH", { timeZone: "Asia/Bangkok", day: "numeric", month: "short" });
@@ -52,7 +54,7 @@ async function load() {
   const stamp = new Date(data.generated_at).toLocaleString("th-TH", {
     timeZone: "Asia/Bangkok", dateStyle: "medium", timeStyle: "short",
   });
-  $("sub").textContent = `ข้อมูลจาก To do list ในกลุ่มและใบงานที่สั่งในไลน์ · อัปเดต ${stamp}`;
+  $("sub").textContent = `งานที่สั่งกันในไลน์ ใครถืองานอะไร ใครสั่ง ส่งเมื่อไหร่ · อัปเดต ${stamp}`;
 
   const current = $("group").value;
   const names = [...new Set(people.flatMap((p) => p.groups))].sort((a, b) => a.localeCompare(b, "th"));
@@ -68,7 +70,7 @@ function taskRow(t) {
   li.append(document.createTextNode(t.title));
   const bits = [];
   if (t.ordered_by) bits.push(`สั่งโดย ${t.ordered_by}`);
-  if (t.due_at) bits.push(`ส่ง ${thaiDate(t.due_at)}`);
+  bits.push(t.due_at ? `ส่ง ${thaiDue(t.due_at)}` : "ไม่มีกำหนดส่ง");
   if (t.branch) bits.push(t.branch);
   if (t.monday_code) bits.push(t.monday_code);
   if (t.blocked_reason) bits.push(`ติด: ${t.blocked_reason}`);
@@ -82,20 +84,15 @@ function card(p) {
   if (p.line_name && p.line_name !== p.name) h.append(el("small", "", p.line_name));
   c.append(h);
 
-  const today = new Date(Date.now() + 7 * 3600_000).toISOString().slice(0, 10);
-  const gap = p.last_report_date
-    ? Math.round((new Date(today) - new Date(p.last_report_date)) / 86400000)
-    : null;
-  const meta = el("div", "meta" + (gap !== null && gap > 3 ? " stale" : ""));
+  const meta = el("div", "meta");
   const parts = [];
-  parts.push(p.last_report_date ? `รายงานล่าสุด ${thaiDate(p.last_report_date)} · ส่ง ${p.report_days} วัน` : "ยังไม่มี To do list ในช่วงนี้");
   if (p.groups.length) parts.push(p.groups.join(", "));
-  if (p.closed_recent) parts.push(`ปิดใบงาน ${p.closed_recent} ใบ`);
+  if (p.closed_recent) parts.push(`เสร็จแล้ว ${p.closed_recent} งานในช่วงนี้`);
   meta.textContent = parts.join(" · ");
   c.append(meta);
 
   if (p.open_tasks.length) {
-    c.append(el("h3", "", `ใบงานที่ถืออยู่ (${p.open_tasks.length})`));
+    c.append(el("h3", "", `งานที่ยังไม่เสร็จ (${p.open_tasks.length})`));
     const ul = el("ul");
     p.open_tasks.forEach((t) => ul.append(taskRow(t)));
     c.append(ul);
@@ -123,7 +120,7 @@ function card(p) {
     c.append(d);
   }
   if (!p.open_tasks.length && !p.pending.length && !p.done.length) {
-    c.append(el("p", "empty", "ไม่มีข้อมูลในช่วงนี้ ไม่ได้แปลว่าว่าง"));
+    c.append(el("p", "empty", "ไม่มีงานค้าง"));
   }
   return c;
 }

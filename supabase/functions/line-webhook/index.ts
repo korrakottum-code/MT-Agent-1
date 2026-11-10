@@ -1602,7 +1602,7 @@ const TOOLS = [
   {
     name: "create_board_link",
     description:
-      "ส่งลิงก์หน้าบอร์ดดูงานรายคนเข้าแชทส่วนตัวของผู้ขอ (MANAGER ขึ้นไป) ใช้เมื่อขอลิงก์บอร์ด ขอหน้าดูงานทีม",
+      "ส่งลิงก์หน้าบอร์ดงานทีมเข้าแชทส่วนตัวของผู้ขอ (MANAGER ขึ้นไป) หน้านี้บอกว่าใครถืองานอะไร ใครสั่ง ส่งเมื่อไหร่ ใช้เมื่อขอบอร์ดดูว่าใครทำอะไร ขอหน้าดูงานทีม ถ้าขอแค่ \"ลิงก์บอร์ด\" เฉย ๆ ให้ถามสั้น ๆ ว่าบอร์ดงานทีมของแงวหรือบอร์ด Monday",
     input_schema: { type: "object", properties: {} },
   },
   {
@@ -1866,7 +1866,7 @@ const TOOLS = [
 const TOOL_NAMES = TOOLS.map((t) => t.name);
 
 // พักไว้ 10 พ.ย. 2569 เจ้าของอยากให้เก็บงานแค่ ใครสั่ง ใครรับ งานอะไร ส่งเมื่อไหร่ เปิดคืนได้โดยเอาชื่อออกจากชุดนี้
-const PAUSED_TOOLS = new Set(["team_work_status", "create_board_link"]);
+const PAUSED_TOOLS = new Set(["team_work_status"]);
 const ACTIVE_TOOLS = TOOLS.filter((t) => !PAUSED_TOOLS.has(t.name));
 
 type Ctx = {

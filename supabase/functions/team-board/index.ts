@@ -54,7 +54,7 @@ Deno.serve(async (req) => {
       viewer: viewer.display_name,
       generated_at: new Date().toISOString(),
       days: Math.min(30, Math.max(1, days || 7)),
-      people: await loadTeamWork(supabase, { days }),
+      people: await loadTeamWork(supabase, { days, withReports: false }),
     });
   } catch (e) {
     console.error("team-board failed:", e);

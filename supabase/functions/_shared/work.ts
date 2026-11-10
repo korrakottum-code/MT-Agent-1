@@ -91,7 +91,7 @@ export function buildPeople(
     .sort((a, b) => String(a.name).localeCompare(String(b.name), "th"));
 }
 
-export async function loadTeamWork(sb: any, opts: { userId?: string | null; days?: number; doneLimit?: number }) {
+export async function loadTeamWork(sb: any, opts: { userId?: string | null; days?: number; doneLimit?: number; withReports?: boolean }) {
   const days = Math.min(30, Math.max(1, Number(opts.days ?? 7)));
   const now = Date.now();
   const since = new Date(now - days * 24 * 3600_000).toISOString();
@@ -109,8 +109,9 @@ export async function loadTeamWork(sb: any, opts: { userId?: string | null; days
     reportQuery = reportQuery.eq("user_id", opts.userId);
     taskQuery = taskQuery.eq("owner_user_id", opts.userId);
   }
+  // To do list หยุดเก็บแล้ว (WORK_REPORTS_ON ใน scheduled-jobs) หน้าบอร์ดจึงไม่ดึงของเก่ามาโชว์
   const [reports, tasks, users, groups] = await Promise.all([
-    reportQuery,
+    opts.withReports === false ? Promise.resolve({ data: [], error: null }) : reportQuery,
     taskQuery,
     sb.from("users").select("id, display_name, is_active").eq("is_active", true),
     sb.from("groups").select("id, group_name"),
