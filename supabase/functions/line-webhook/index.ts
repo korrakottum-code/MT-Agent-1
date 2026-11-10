@@ -5039,7 +5039,9 @@ async function handleEvent(event: any, sim?: Sim) {
 
   const caller = await ensureUser(lineUserId, lineGroupId);
   const group = await ensureGroup(lineGroupId);
-  const ctx: Ctx = { caller, group, lineGroupId };
+  // โหมดซ้อมต้องเปิด dryRun เอง เดิมไม่ได้เปิด การซ้อมเลยสร้างใบงานและตัวเตือนจริงในกลุ่มปลอม
+  // แล้วตัวเตือนส่งไม่ออก แจ้งเตือนเจ้าของทุกชั่วโมง (10 พ.ย. 2569)
+  const ctx: Ctx = { caller, group, lineGroupId, ...(sim ? { dryRun: true } : {}) };
 
   // แนบรูป: ส่งรูปมาตรง ๆ (DM) หรือข้อความพูดถึงรูป → ดึงรูปล่าสุดในแชทมาให้ดู
   let images: { data: string; media_type: string }[] = [];
