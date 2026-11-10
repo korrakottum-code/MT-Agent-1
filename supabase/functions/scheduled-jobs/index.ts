@@ -275,7 +275,11 @@ async function morningReminder() {
 
 // งานที่ยังไม่ติ๊กในรายงานล่าสุด เตือนเฉพาะวันทำงาน และดูแค่รายงานของวันทำงานก่อนหน้า
 // จันทร์จึงย้อนไปศุกร์ รายงานเก่ากว่านั้นอาจเสร็จไปแล้วโดยไม่มีใครรายงาน
+// พักการอ่าน To do list ไว้ 10 พ.ย. 2569 เจ้าของอยากให้เก็บแค่งานที่สั่งในไลน์ เปิดคืนได้ที่ค่านี้
+const WORK_REPORTS_ON = false;
+
 async function pendingFromLatestReport(now: Date): Promise<Map<string, string[]>> {
+  if (!WORK_REPORTS_ON) return new Map();
   const out = new Map<string, string[]>();
   const weekday = new Date(now.getTime() + 7 * 3600_000).getUTCDay();
   if (weekday === 0 || weekday === 6) return out;
@@ -343,8 +347,7 @@ async function personalOverdueNudge(now: Date, in24h: Date) {
     if (left.length) {
       text += "\n📝 ค้างจาก To do list ล่าสุด:\n" + left.map((x, i) => `${i + 1}. ${x}`).join("\n") + "\n";
     }
-    // เจ้าของเลือกไม่ประกาศกับทีม ข้อความนี้จึงเป็นทางหลักที่ทุกคนจะรู้ว่าหัวหน้าเห็นงานรายคน
-    text += "\nเริ่ม ส่งตรวจ ติดปัญหา หรือเสร็จแล้ว พิมพ์บอกแงวได้เลย หัวหน้าเห็นงานและ To do list เป็นรายคน จะได้รู้ว่าคุณทำอะไรอยู่";
+    text += "\nปิดงานได้โดยพิมพ์บอกแงวว่างานไหนเสร็จแล้ว";
     await pushToGroup(lineUserId, text.trim());
   }
 
@@ -1156,7 +1159,7 @@ Deno.serve(async (req: Request) => {
     else if (job === "extract_events") {
       await extractEvents();
       // แยกกันพัง อ่านรายงานไม่ได้ต้องไม่ทำให้รอบจับงานถูกนับว่าล้มเหลว
-      await extractWorkReports().catch(async (e) => {
+      if (WORK_REPORTS_ON) await extractWorkReports().catch(async (e) => {
         console.error("work_reports failed:", e);
         await supabase.from("audit_logs").insert({
           action: "scheduled_job", tool_name: "work_reports", input: {}, result: { error: String(e) }, status: "ERROR",
