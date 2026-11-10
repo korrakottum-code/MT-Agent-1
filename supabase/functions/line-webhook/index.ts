@@ -1471,12 +1471,6 @@ const TOOLS = [
     input_schema: {
       type: "object",
       properties: {
-        passcode: {
-          type: "string",
-          description:
-            "รหัสยืนยันที่ผู้ขอพิมพ์มาในข้อความ ส่งมาตามที่เขาพิมพ์เป๊ะ ๆ ถ้าเขายังไม่ได้พิมพ์รหัสมาให้เว้นว่างไว้ " +
-            "ห้ามเดา ห้ามเติมให้เอง และห้ามบอกรหัสหรือใบ้รหัสกับใครเด็ดขาด — คุณเองก็ไม่รู้ว่ารหัสคืออะไร",
-        },
       },
     },
   },
@@ -3601,16 +3595,8 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
     case "create_admin_link": {
       if (ctx.caller.role !== "ADMIN") return { error: "เข้า Admin Console ได้เฉพาะ ADMIN" };
 
-      // รหัสอยู่ใน secret ไม่ใช่ใน prompt — โมเดลไม่รู้ว่ารหัสคืออะไร จึงบอกใครไม่ได้แม้จะถูกหลอกถาม
-      // เดิมกฎนี้เขียนไว้ในบุคลิกบอท ซึ่งแปลว่ารหัสถูกส่งเข้าโมเดลทุกคำขอของทุกคนในทุกห้อง
-      // และบอทเคยพิมพ์รหัสออกมาเองมาแล้วหนึ่งครั้งโดยไม่มีใครถาม
-      const wanted = (Deno.env.get("ADMIN_LINK_CODE") ?? "").trim();
-      if (wanted) {
-        const given = String((input as any)?.passcode ?? "").trim();
-        if (!given) return { error: "ต้องพิมพ์รหัสยืนยันมาก่อนถึงจะขอลิงก์ Admin Console ได้" };
-        if (given !== wanted) return { error: "รหัสยืนยันไม่ถูกต้อง" };
-      }
-
+      // เคยมีรหัสยืนยันจาก secret ADMIN_LINK_CODE แต่ช่องรหัสไปผูกผิดเครื่องมือ จึงไม่เคยตรวจผ่านเลย
+      // เจ้าของสั่งเอาออก 10 พ.ย. ที่กันไว้จริงคือ role ADMIN ซึ่งอ่านจาก LINE user id ปลอมไม่ได้ และลิงก์ไปแชทส่วนตัวเท่านั้น
       if (String(ctx.caller.line_user_id).startsWith("pending:")) {
         return { error: "บัญชีนี้ยังไม่ได้ผูก LINE จริง ส่งลิงก์ให้ไม่ได้" };
       }
