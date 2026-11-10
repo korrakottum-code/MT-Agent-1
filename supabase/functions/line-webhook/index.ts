@@ -1048,6 +1048,11 @@ const TOOLS = [
             "จะได้งานแยกกันคนละใบ ติดตามและปิดงานได้อิสระ ถ้าใส่ช่องนี้แล้วไม่ต้องใส่ owner_name",
         },
         due_at: { type: "string", description: "กำหนดส่ง ISO 8601 เช่น 2026-09-02T15:00:00+07:00" },
+        due_time_given: {
+          type: "boolean",
+          description: "true เฉพาะเมื่อคนพูดเวลาส่งเองจริง เช่น 15:00 บ่ายสาม เช้า เที่ยง เย็น สิ้นวัน · บอกแค่วันให้เป็น false แล้วถามเวลาก่อน",
+        },
+        no_deadline: { type: "boolean", description: "true เฉพาะเมื่อคนบอกเองว่าไม่มีกำหนด หรือให้ตามจนกว่าจะเสร็จ" },
         priority: { type: "string", enum: ["LOW", "NORMAL", "HIGH", "URGENT"] },
         brand: { type: "string", description: "แบรนด์ เช่น CLASS CLINIC หรือ CLASS GO ใส่เมื่อมีคนระบุ" },
         branch: { type: "string", description: "สาขา ใส่เมื่อมีคนระบุ" },
@@ -2100,7 +2105,20 @@ const SENDS_OUTWARD = new Set([
   "send_dm", "monday_send_images", "create_admin_link", "google_connect_link", "create_meeting",
 ]);
 
+// ตั้มสั่ง 10 พ.ย. ว่าต้องรู้วันและเวลาส่งก่อนเปิดงาน กฎในข้อความอย่างเดียวคุมไม่อยู่ ข้อสอบเห็นแงวเดาเวลาเอง
+// จึงตรวจที่นี่ ก่อนโหมดข้อสอบ ทั้งของจริงและข้อสอบโดนเหมือนกัน
+function taskDeadlineMissing(input: any): string | null {
+  if (input?.no_deadline === true) return null;
+  if (!input?.due_at) return "ยังไม่รู้วันและเวลาส่ง ห้ามเปิดงาน ให้ถามผู้ใช้สั้น ๆ ว่าส่งวันไหน กี่โมง";
+  if (input?.due_time_given !== true) return "รู้แค่วันส่ง ยังไม่รู้เวลา ห้ามเปิดงาน ให้ถามผู้ใช้สั้น ๆ ว่ากี่โมง";
+  return null;
+}
+
 async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
+  if (name === "create_task") {
+    const missing = taskDeadlineMissing(input);
+    if (missing) return { error: missing };
+  }
   if (ctx.readOnly && (WRITE_TOOLS.has(name) || SENDS_OUTWARD.has(name))) {
     return {
       error: "ข้อความเตือนอัตโนมัติอ่านข้อมูลแล้วรายงานได้อย่างเดียว ห้ามแก้ข้อมูลหรือส่งข้อความออกไปเอง " +

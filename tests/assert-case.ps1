@@ -38,6 +38,10 @@ function Test-AgentCase {
     if ($tools -notcontains $t) { $problems += "missing tool '$t' (called: $($tools -join ', '))" }
     elseif ($errored -contains $t) { $problems += "tool '$t' was called but came back with an error (refused or failed)" }
   }
+  # Refused is fine, done is not: the tool may be tried as long as it came back with an error
+  foreach ($t in @($Case.forbid_tools_ok)) {
+    if ($t -and $tools -contains $t -and $errored -notcontains $t) { $problems += "tool '$t' went through but should not have" }
+  }
   if ($Case.expect_answer_matches -and $answer -notmatch $Case.expect_answer_matches) {
     $problems += "answer does not match /$($Case.expect_answer_matches)/"
   }
