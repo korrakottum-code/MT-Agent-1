@@ -3063,7 +3063,7 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
         }],
       });
       if (!sent) {
-        return { error: "ส่งลิงก์ไม่สำเร็จ ต้องเพิ่ม MT agent 1 เป็นเพื่อนใน LINE ก่อน" };
+        return { error: "ส่งลิงก์ไม่สำเร็จ ต้องเพิ่มแงว (@303dpzyq) เป็นเพื่อนใน LINE ก่อน" };
       }
       return {
         sent_to_dm: true,
@@ -3312,7 +3312,7 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
         messages: [{ type: "text", text: String(input.message).slice(0, 4900) }],
       });
       if (!ok) {
-        return { error: `ส่งไม่สำเร็จ — "${target.display_name}" อาจยังไม่ได้เพิ่ม MT agent 1 เป็นเพื่อนใน LINE` };
+        return { error: `ส่งไม่สำเร็จ — "${target.display_name}" อาจยังไม่ได้เพิ่มแงว (@303dpzyq) เป็นเพื่อนใน LINE` };
       }
       return { sent_to: target.display_name };
     }
@@ -3631,7 +3631,7 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
         }],
       });
       if (!sent) {
-        return { error: "ส่งลิงก์ไม่สำเร็จ — ต้องเพิ่ม MT agent 1 เป็นเพื่อนใน LINE ก่อนถึงจะรับลิงก์ได้" };
+        return { error: "ส่งลิงก์ไม่สำเร็จ — ต้องเพิ่มแงว (@303dpzyq) เป็นเพื่อนใน LINE ก่อนถึงจะรับลิงก์ได้" };
       }
       // ไม่คืนตัวลิงก์ให้โมเดล กันไม่ให้มันเผลอพิมพ์ซ้ำลงในกลุ่ม
       return { sent_to_dm: ctx.caller.display_name, valid_for: "15 นาที ใช้ได้ครั้งเดียว" };
@@ -4877,8 +4877,15 @@ async function runAgent(userText: string, ctx: Ctx, chatId: string, opts: AgentO
 
 // ---------------------------------------------------------------- Webhook
 
+// แท็กในไลน์ออกมาเป็นตัวหนังสือ "@ชื่อบอท" ตัวจริงใช้ isSelf ใน mention ข้างล่าง อันนี้กันไว้เผื่อคนพิมพ์ @ เอง
+// 16 พ.ย. เปลี่ยนชื่อบอทจาก MT agent 1 เป็นแงว ถ้าดูแต่ตัวหนังสือ แท็กชื่อใหม่จะกลายเป็นแค่เอ่ยชื่อ
 function isCallingAI(text: string): boolean {
-  return /@\s?(ai|mt\s?agent)/i.test(text);
+  return /@\s?(ai|mt\s?agent|แงว)/i.test(text);
+}
+
+// ไลน์บอกมาเองว่าแท็กไหนคือบอท ไม่ขึ้นกับชื่อที่ตั้ง เปลี่ยนชื่อกี่ครั้งก็ยังจับได้
+function mentionsBot(message: any): boolean {
+  return (message?.mention?.mentionees ?? []).some((m: any) => m?.isSelf === true);
 }
 
 // เอ่ยชื่อบอทโดยไม่แท็ก → ให้โมเดลอ่านบริบทแล้วตัดสินใจเองว่าควรตอบไหม
@@ -4992,7 +4999,8 @@ async function handleEvent(event: any, sim?: Sim) {
   // เสียงที่ถอดได้แล้วนับเป็นข้อความ พูดว่า "แงว เปิดงาน..." ใส่ไมค์จึงได้ผลเหมือนพิมพ์
   const said = msgType === "audio" && spoken ? spoken : text;
   const speakable = msgType === "text" || (msgType === "audio" && Boolean(spoken));
-  const tagged = speakable && (isCallingAI(said) || isBareName(said) || Boolean(quoted?.fromBot));
+  const tagged = speakable &&
+    (mentionsBot(event.message) || isCallingAI(said) || isBareName(said) || Boolean(quoted?.fromBot));
   const named = speakable && isNameMention(said);
   // รูปและไฟล์ในกลุ่มแค่เก็บไว้ก่อน รอให้คนแท็กถามถึง จะได้ไม่รบกวนทุกครั้งที่มีคนแชร์ไฟล์
   // เสียงก็เหมือนกัน ถอดเก็บไว้เงียบ ๆ แล้วตอบเฉพาะตอนที่คนพูดเรียกชื่อบอทจริง ๆ
