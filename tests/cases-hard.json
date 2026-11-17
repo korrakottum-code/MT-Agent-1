@@ -595,5 +595,16 @@
     "forbid_tools_ok": [
       "create_task"
     ]
+  },
+  {
+    "id": "hard-reminder-picked-weekdays",
+    "dimension": "correct",
+    "why": "22 ต.ค. ทีมขอเตือนเช็กลิสต์ จันทร์ พุธ ศุกร์ 10 โมง แงวตอบว่าเลือกวันแบบนี้ไม่ได้ เสนอตั้งแยกสามตัว ตอนนี้ตั้งตัวเดียวด้วย repeat_days",
+    "as_user": "ตั้ม",
+    "message": "ตั้งเตือนในกลุ่มนี้ทุกวันจันทร์ พุธ ศุกร์ 10 โมง ว่า อัปเดตเช็กลิสต์เปิดสาขาด้วยนะ",
+    "expect_tools_any": [
+      "create_reminder"
+    ],
+    "forbid_answer_matches": "ทำไม่ได้|ไม่สามารถ|ตั้งแยก"
   }
 ]

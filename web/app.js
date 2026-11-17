@@ -168,6 +168,11 @@ function renderEvents() {
 // ---------------------------------------------------------------- ตัวเตือน
 
 const REPEAT = { "": "ครั้งเดียว", daily: "ทุกวัน", weekdays: "ทุกวันทำงาน", weekly: "ทุกสัปดาห์" };
+const DAY_NAMES = ["อา", "จ", "อ", "พ", "พฤ", "ศ", "ส"];
+// แงวตั้งแบบเลือกวันได้ (days:1,3,5) ต้องโชว์และเก็บค่าเดิมไว้ ไม่งั้นกดบันทึกแล้วกลายเป็นครั้งเดียว
+const repeatMap = (rule) => /^days:/.test(rule ?? "")
+  ? { ...REPEAT, [rule]: "ทุก " + rule.slice(5).split(",").map((d) => DAY_NAMES[+d]).join(" ") }
+  : REPEAT;
 
 function renderReminders() {
   const r = STATE.reminders;
@@ -175,7 +180,7 @@ function renderReminders() {
   const pending = r.pending.map((x) => `<div class="card" data-rem="${esc(x.id)}">
       <div class="row">
         <span class="tag ${x.kind === "AGENT" ? "accent" : ""}">${x.kind === "AGENT" ? "คิดใหม่ทุกรอบ" : "ข้อความตายตัว"}</span>
-        <span class="tag">${REPEAT[x.repeat_rule ?? ""]}</span>
+        <span class="tag">${repeatMap(x.repeat_rule)[x.repeat_rule ?? ""]}</span>
         <span class="muted grow">${esc(x.chat)}</span>
         <span class="muted">ส่งครั้งถัดไป <b style="color:var(--text)">${thaiDate(x.remind_at)}</b> (${rel(x.remind_at)})</span>
       </div>
@@ -184,7 +189,7 @@ function renderReminders() {
       <textarea class="msg" style="margin-top:10px">${esc(x.message)}</textarea>
       <div class="row" style="margin-top:8px">
         <label class="muted">เวลา <input type="datetime-local" class="at" value="${toLocalInput(x.remind_at)}"></label>
-        <label class="muted">รอบ <select class="rep">${opts(REPEAT, x.repeat_rule)}</select></label>
+        <label class="muted">รอบ <select class="rep">${opts(repeatMap(x.repeat_rule), x.repeat_rule)}</select></label>
         <label class="muted">ชนิด <select class="kind">${opts({ TEXT: "ข้อความตายตัว", AGENT: "คิดใหม่ทุกรอบ" }, x.kind)}</select></label>
       </div>
       <div class="row" style="margin-top:10px">

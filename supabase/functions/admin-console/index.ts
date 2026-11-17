@@ -414,7 +414,8 @@ async function doAction(user: { id: string; display_name: string }, body: any) {
         patch.kind = body.kind;
       }
       if (body.repeat_rule !== undefined) {
-        if (![null, "daily", "weekdays", "weekly"].includes(body.repeat_rule)) return { error: "รอบเตือนไม่ถูกต้อง" };
+        if (![null, "daily", "weekdays", "weekly"].includes(body.repeat_rule) &&
+          !/^days:[0-6](,[0-6])*$/.test(String(body.repeat_rule))) return { error: "รอบเตือนไม่ถูกต้อง" };
         patch.repeat_rule = body.repeat_rule;
       }
       if (Object.keys(patch).length === 0) return { error: "ไม่ได้ระบุว่าจะแก้อะไร" };

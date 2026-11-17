@@ -960,6 +960,12 @@ function nextOccurrence(from: Date, rule: string): Date | null {
     bump(1);
     // วันในสัปดาห์คิดตามเวลาไทย เพราะคนอ่านเตือนอยู่ที่ไทย
     while ([0, 6].includes(new Date(next.getTime() + 7 * 3600_000).getUTCDay())) bump(1);
+  } else if (/^days:[0-6](,[0-6])*$/.test(rule)) {
+    // เลือกวันเอง เช่น days:1,3,5 = จันทร์ พุธ ศุกร์ (0 = อาทิตย์ ตามเวลาไทย)
+    // 22 ต.ค. ทีมขอเตือนเช็กลิสต์ จันทร์ พุธ ศุกร์ ตอนนั้นมีแค่ทุกวัน/วันทำงาน/ทุกสัปดาห์ แงวเลยต้องตั้งแยกสามตัว
+    const days = rule.slice(5).split(",").map(Number);
+    bump(1);
+    while (!days.includes(new Date(next.getTime() + 7 * 3600_000).getUTCDay())) bump(1);
   } else return null;
   // ถ้าเครื่องหยุดไปหลายวัน อย่ายิงย้อนหลังรัว ๆ ให้ข้ามมาที่รอบถัดไปที่ยังไม่ถึง
   while (next.getTime() <= Date.now()) {

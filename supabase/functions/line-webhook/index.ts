@@ -1455,7 +1455,13 @@ const TOOLS = [
         repeat: {
           type: "string",
           enum: ["daily", "weekdays", "weekly"],
-          description: "เตือนซ้ำทุกวัน ทุกวันทำงาน หรือทุกสัปดาห์ ไม่ใส่ = เตือนครั้งเดียว",
+          description: "เตือนซ้ำทุกวัน ทุกวันทำงาน หรือทุกสัปดาห์ ไม่ใส่ = เตือนครั้งเดียว ถ้าเลือกเฉพาะบางวันให้ใช้ repeat_days แทน",
+        },
+        repeat_days: {
+          type: "array",
+          items: { type: "string" },
+          description: "เตือนซ้ำเฉพาะวันที่เลือก เช่น [\"จันทร์\", \"พุธ\", \"ศุกร์\"] ตั้งเป็นตัวเตือนตัวเดียว ไม่ต้องแยกหลายตัว " +
+            "remind_at คือเวลาครั้งแรก ถ้าวันนั้นไม่อยู่ในวันที่เลือก ระบบเลื่อนไปวันที่เลือกถัดไปเอง",
         },
         until_task_done: {
           type: "string",
@@ -3493,9 +3499,19 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       }
 
       // เตือนซ้ำ ผูกกับงานได้ พอปิดงานแล้วหยุดเตือนเอง
-      const rule = ["daily", "weekdays", "weekly"].includes(String(input.repeat ?? ""))
-        ? String(input.repeat)
-        : null;
+      const pickedDays = Array.isArray(input.repeat_days) ? weekdaysFrom(input.repeat_days.map(String)) : [];
+      if (Array.isArray(input.repeat_days) && input.repeat_days.length > 0 && pickedDays.length === 0) {
+        return { error: `อ่านวันไม่ออก: ${input.repeat_days.join(", ")} ใช้ชื่อวันภาษาไทย เช่น จันทร์ พุธ ศุกร์` };
+      }
+      const rule = pickedDays.length > 0
+        ? `days:${pickedDays.join(",")}`
+        : ["daily", "weekdays", "weekly"].includes(String(input.repeat ?? "")) ? String(input.repeat) : null;
+      // ครั้งแรกต้องตกวันที่เลือกด้วย ไม่งั้นสั่ง "จันทร์ พุธ ศุกร์" วันอังคาร แล้วได้เตือนวันอังคารหนึ่งครั้ง
+      if (pickedDays.length > 0) {
+        while (!pickedDays.includes(new Date(when.getTime() + 7 * 3600_000).getUTCDay())) {
+          when.setTime(when.getTime() + 24 * 3600_000);
+        }
+      }
       let linkedTask: { id: string; title: string } | null = null;
       if (input.until_task_done) {
         const t = await resolveOneTask(ctx, undefined, String(input.until_task_done));
@@ -3528,7 +3544,9 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
         repeat: rule,
         stops_when_done: linkedTask?.title ?? null,
         note: rule
-          ? `เตือนซ้ำแบบ ${rule} ตั้งแล้ว` +
+          ? `เตือนซ้ำ${rule.startsWith("days:")
+              ? `ทุกวัน${rule.slice(5).split(",").map((d) => THAI_WEEKDAYS[Number(d)]).join(" ")}`
+              : `แบบ ${rule}`} ตั้งแล้ว ครั้งแรกคือ remind_at ใน reminder_set` +
             (linkedTask
               ? ` จะหยุดเองเมื่อปิดงาน "${linkedTask.title}" บอกคนสั่งด้วยว่าให้พิมพ์บอกเมื่อเสร็จ`
               : " ไม่ได้ผูกกับงานไหน จะเตือนไปจนกว่าจะสั่งยกเลิก หรือครบ 60 วัน บอกคนสั่งตามนี้")
@@ -3545,7 +3563,10 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       if (error) return { error: error.message };
       const blocked = await getPushBlocked(supabase);
       return {
-        pending: data,
+        // days:1,3,5 เป็นของภายใน แปลเป็นชื่อวันให้ จะได้ไม่หลุดรหัสไปถึงคน
+        pending: (data ?? []).map((r: any) => String(r.repeat_rule ?? "").startsWith("days:")
+          ? { ...r, repeat_rule: `ทุกวัน${String(r.repeat_rule).slice(5).split(",").map((d) => THAI_WEEKDAYS[Number(d)]).join(" ")}` }
+          : r),
         // ผลการส่งจริงอยู่ที่ last_error และ last_failed_at ถ้ามีคนถามว่าทำไมไม่เห็นตัวเตือน ให้ตอบจากตรงนี้
         delivery: blocked
           ? describePushBlocked(blocked)
@@ -4250,7 +4271,7 @@ const SYSTEM_RULES = `คุณคือ "แงว" (MT Agent) — AI น้อ
 2.3 ห้ามรับปากอนาคตที่คุณทำไม่ได้ กฎ 2.1 ห้ามอ้างว่า "ทำแล้ว" ข้อนี้ห้ามอ้างว่า "จะทำ" ด้วย
     ถ้าไม่มี tool ทำสิ่งนั้น ห้ามพูดว่า "จะเตือนทุกสัปดาห์" "ตั้งระบบไว้ให้แล้ว" "รับรู้แล้วว่าเสร็จ" "บันทึกถาวรแล้ว" หรือ "ไม่มีหลุดแน่นอน"
     ให้บอกตรง ๆ ว่าทำไม่ได้ แล้วเสนอสิ่งที่ทำได้จริงแทน เช่น ปิดแอดใน Facebook ให้ไม่ได้ แต่ตั้งเตือนคนที่ดูแลแอดให้ได้
-    ก่อนจะบอกว่าทำไม่ได้ ให้ดูเครื่องมือที่มีก่อนเสมอ เตือนตามเวลา เตือนซ้ำทุกวัน/ทุกวันทำงาน/ทุกสัปดาห์
+    ก่อนจะบอกว่าทำไม่ได้ ให้ดูเครื่องมือที่มีก่อนเสมอ เตือนตามเวลา เตือนซ้ำทุกวัน/ทุกวันทำงาน/ทุกสัปดาห์/เฉพาะวันที่เลือก
     และเตือนที่คิดเนื้อหาใหม่ทุกรอบ (create_reminder live) ทำได้จริงทั้งหมด
     สิ่งที่ remember_preference ทำได้คือจำวิธีพูดและวิธีตอบเท่านั้น มันไม่ได้สร้างการแจ้งเตือน ไม่ได้ปิดงาน และไม่ได้เปลี่ยนความสามารถของระบบ
     ห้ามเรียกมันว่า "บันทึกเข้าระบบถาวร" ให้บอกว่าจำวิธีตอบไว้ให้แล้ว
@@ -4319,8 +4340,9 @@ const SYSTEM_RULES = `คุณคือ "แงว" (MT Agent) — AI น้อ
 19.2 ห้ามตัดตัวที่สงสัยว่าซ้ำออกเองโดยไม่บอก
 
 20. เตือนซ้ำจนกว่าจะเสร็จ
-20.0 create_reminder ตั้งเตือนซ้ำได้สามแบบ daily ทุกวัน / weekdays ทุกวันทำงาน / weekly ทุกสัปดาห์
-     ทั้งสามแบบใช้ได้จริงทั้งหมด ห้ามบอกว่าแบบไหนทำไม่ได้ ความสามารถของตัวเองให้ดูจากเครื่องมือที่มี ไม่ใช่จากความจำ
+20.0 create_reminder ตั้งเตือนซ้ำได้สี่แบบ daily ทุกวัน / weekdays ทุกวันทำงาน / weekly ทุกสัปดาห์
+     / repeat_days เฉพาะวันที่เลือก เช่น จันทร์ พุธ ศุกร์ ใช้ตัวเตือนตัวเดียว ห้ามแยกตั้งหลายตัว
+     ทุกแบบใช้ได้จริงทั้งหมด ห้ามบอกว่าแบบไหนทำไม่ได้ ความสามารถของตัวเองให้ดูจากเครื่องมือที่มี ไม่ใช่จากความจำ
 20.1 ก่อนเรียก create_reminder ทุกครั้ง ต้องมีเวลาที่ชัดเจนอยู่ในมือก่อนเสมอ เช็คตามลำดับนี้ก่อนตั้งเตือน
      (ก) ข้อความบอกเวลาตรงตัว เช่น "9 โมง" "14:00" ใช้ตามนั้นได้เลย
      (ข) ข้อความบอกเวลาคร่าว ๆ อย่าง เช้า บ่าย เย็น ให้ใช้เวลามาตรฐาน เช้า 09:00 บ่าย 13:00 เย็น 17:00
