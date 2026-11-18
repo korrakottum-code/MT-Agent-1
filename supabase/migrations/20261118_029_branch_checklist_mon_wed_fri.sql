@@ -6,3 +6,7 @@ set repeat_rule = 'days:1,3,5',
     remind_at = '2026-11-20 03:00:00+00',
     repeat_until = '2027-01-10 03:00:00+00'
 where id = 'ef7dc737-33c9-439a-b4ba-39a96226e189' and status = 'PENDING';
+
+-- ตั้มสั่งต่อ 09:49 ว่า "10 โมงก็ 10 โมง" ให้วันนี้ (พุธ) ส่งรอบ 10:00 ด้วย แม้ 09:00 ส่งไปแล้ว
+update reminders set remind_at = '2026-11-18 03:00:00+00'
+where id = 'ef7dc737-33c9-439a-b4ba-39a96226e189' and status = 'PENDING' and remind_at = '2026-11-20 03:00:00+00';
