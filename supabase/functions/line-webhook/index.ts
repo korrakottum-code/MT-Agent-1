@@ -28,6 +28,7 @@ import {
 import { formatSalesThai, isIsoDate, salesQuery, shiftMonths, type SalesFile } from "../_shared/clinic_sales.ts";
 import { formatQueueThai, pickBranch, queueResult, type QueueStats } from "../_shared/clinic_queue.ts";
 import { adsResult, formatAdsThai, type SpendResponse } from "../_shared/clinic_ads.ts";
+import { formatTTThai, ttResult, type TTStats } from "../_shared/clinic_tt.ts";
 
 const CHANNEL_SECRET = Deno.env.get("LINE_CHANNEL_SECRET") ?? "";
 const CHANNEL_ACCESS_TOKEN = Deno.env.get("LINE_CHANNEL_ACCESS_TOKEN") ?? "";
@@ -1925,6 +1926,27 @@ const TOOLS = [
       required: ["date_from", "date_to"],
     },
   },
+  {
+    name: "clinic_tt_coupons",
+    description:
+      "คูปอง TikTok (TT) ที่ลูกค้านำมาใช้หน้าร้าน Class Clinic จากรายงานคูปอง TT (ดึงจาก POS ทุกเช้า) ใช้เมื่อถามว่าคูปอง TikTok ถูกใช้กี่ใบ กี่บิล " +
+      "ลูกค้าคูปองซื้อเพิ่มเท่าไหร่ สาขาไหนหรือโปรไหนดี หรือเทียบกับเดือนก่อน เครื่องมือคิดเลขให้เสร็จ ห้ามบวกลบเอง ห้ามตอบจากความจำ " +
+      "มูลค่าคูปองไม่ใช่เงินสดที่สาขาได้ ยอดซื้อเพิ่มไม่ใช่ยอดทั้งบิล ต้องพูดให้ถูก ไม่มีจำนวนลูกค้า (คน) ถ้าถูกถามให้บอกว่ายังไม่มี " +
+      "ไม่ใช่ยอดขายของ TikTok Shop และไม่ใช่คิว " +
+      "ดูได้เฉพาะ ADMIN และ EXECUTIVE ถ้าถามในกลุ่ม เครื่องมือส่งตัวเลขเข้าแชทส่วนตัวเอง คุณแค่บอกว่าส่งแล้ว ห้ามพูดตัวเลขในกลุ่ม",
+    input_schema: {
+      type: "object",
+      properties: {
+        date_from: { type: "string", description: "วันเริ่ม YYYY-MM-DD แบบ ค.ศ." },
+        date_to: { type: "string", description: "วันสุดท้าย YYYY-MM-DD รวมวันนั้นด้วย" },
+        compare: { type: "string", enum: ["previous_month", "previous_year", "none"] },
+        branch: { type: "string", description: "เฉพาะสาขาเดียว ไม่ใส่ = รวมทั้งเครือ" },
+        by_branch: { type: "boolean", description: "true = แยกทุกสาขา เรียงตามยอดซื้อเพิ่ม" },
+        by_promo: { type: "boolean", description: "true = แยกรายโปรคูปอง" },
+      },
+      required: ["date_from", "date_to"],
+    },
+  },
 ];
 
 // ชื่อพวกนี้เป็นของภายใน คำตอบถึงคนต้องไม่มี ด่านสุดท้ายใน runAgent ใช้ตรวจ
@@ -2241,6 +2263,7 @@ async function getJsonWithKey(url: string, keyName: string): Promise<any> {
 
 const QLASS_STATS_URL = "https://hjuvtsjjtucdirlkdgwa.supabase.co/functions/v1/external-queue-stats";
 const ADS_SPEND_URL = "https://korrakot-db.vercel.app/api/external/ads-spend";
+const TT_STATS_URL = "https://aupfhfwixmbzitovqbkg.supabase.co/functions/v1/tt-coupon-stats";
 
 // ถูกถามในกลุ่ม: ส่งข้อความที่คิดเสร็จแล้วเข้าแชทส่วนตัวของคนถาม แล้วคืนให้โมเดลแค่ว่าส่งแล้ว
 // โมเดลไม่เห็นตัวเลขเลย จึงพิมพ์ลงกลุ่มไม่ได้แม้จะพลาด (แบบเดียวกับลิงก์ปฏิทิน)
@@ -3500,6 +3523,34 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
       const r = adsResult(cur, prev);
       if (rg.clipped) r.note += ` · ช่วงที่ขอเลยวันนี้ จึงนับถึง ${rg.cur!.to} (เมื่อวาน) และช่วงเทียบยาวเท่ากัน`;
       if (ctx.lineGroupId) return await sendNumbersPrivately(ctx, formatAdsThai(r));
+      return r;
+    }
+
+    case "clinic_tt_coupons": {
+      if (!canSeeClinicNumbers(ctx.caller.role)) return { error: CLINIC_NUMBERS_DENIED };
+      const rg = clinicRanges(input);
+      if (rg.error) return { error: rg.error };
+      const get = (r: { from: string; to: string }) =>
+        getJsonWithKey(`${TT_STATS_URL}?since=${r.from}&until=${r.to}`, "TT_STATS_API_KEY") as Promise<TTStats>;
+      let cur: TTStats, prev: TTStats | null = null;
+      try {
+        cur = await get(rg.cur!);
+        // ขอเกินวันที่ดึงข้อมูลไว้ ตัดให้จบวันล่าสุด แล้วให้ช่วงเทียบยาวเท่ากัน
+        let cr = rg.cur!, pr = rg.prev ?? null;
+        if (cur.data_through && cr.to > cur.data_through) {
+          if (cr.from > cur.data_through) return { error: `ข้อมูลคูปองมีถึง ${cur.data_through} ช่วงที่ถามยังไม่มีข้อมูล` };
+          const shift = input.compare === "previous_year" ? -12 : -1;
+          cr = { from: cr.from, to: cur.data_through };
+          pr = pr ? { from: shiftMonths(cr.from, shift), to: shiftMonths(cr.to, shift) } : null;
+          cur = await get(cr);
+        }
+        if (pr) prev = await get(pr);
+      } catch (e) {
+        return { error: `ดึงข้อมูลคูปอง TT ไม่ได้: ${(e as Error).message} บอกผู้ถามตรง ๆ ห้ามเดาตัวเลข` };
+      }
+      const r = ttResult(cur, prev, { branch: input.branch, byBranch: !!input.by_branch, byPromo: !!input.by_promo });
+      if ("error" in r) return r;
+      if (ctx.lineGroupId) return await sendNumbersPrivately(ctx, formatTTThai(r));
       return r;
     }
 
