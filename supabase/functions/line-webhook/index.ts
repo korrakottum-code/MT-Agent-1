@@ -25,6 +25,9 @@ import { loadTeamWork, OPEN_TASK_STATUSES } from "../_shared/work.ts";
 import {
   dropToolNames, EXTRACT_SYSTEM, LEAK_FALLBACK, looksLikeLeakedReasoning, scrubToolNames, TOOL_NAME_REWRITE_SYSTEM,
 } from "../_shared/leak_guard.ts";
+import { formatSalesThai, isIsoDate, salesQuery, shiftMonths, type SalesFile } from "../_shared/clinic_sales.ts";
+import { formatQueueThai, pickBranch, queueResult, type QueueStats } from "../_shared/clinic_queue.ts";
+import { adsResult, formatAdsThai, type SpendResponse } from "../_shared/clinic_ads.ts";
 
 const CHANNEL_SECRET = Deno.env.get("LINE_CHANNEL_SECRET") ?? "";
 const CHANNEL_ACCESS_TOKEN = Deno.env.get("LINE_CHANNEL_ACCESS_TOKEN") ?? "";
@@ -1862,6 +1865,66 @@ const TOOLS = [
       required: ["action"],
     },
   },
+  {
+    name: "clinic_sales",
+    description:
+      "ยอดขายหน้าร้านของสาขา Class Clinic จากไฟล์ยอดขายที่แดชบอร์ด CEO ใช้ (ไม่รวม TikTok Shop) " +
+      "ใช้เมื่อถามยอดขาย รายได้ ยอดสาขา หรือเทียบยอดกับเดือนก่อน/ปีก่อน เครื่องมือคิดเลขให้เสร็จ ห้ามบวกลบหรือปัดตัวเลขเอง " +
+      "ห้ามตอบยอดขายจากความจำหรือจากแชทเก่า ต้องเรียกเครื่องมือนี้ทุกครั้ง " +
+      "\"เทียบเดือนก่อน\" = compare previous_month (วันเดียวกันของเดือนก่อน ยาวเท่ากัน) " +
+      "ถ้าขอช่วงเกินวันที่มีข้อมูล เครื่องมือตัดให้จบวันล่าสุด (data_through) ต้องบอกผู้ถามว่าข้อมูลมีถึงวันไหน " +
+      "ดูได้เฉพาะ ADMIN และ EXECUTIVE ถ้าถามในกลุ่ม เครื่องมือส่งตัวเลขเข้าแชทส่วนตัวของผู้ถามเอง " +
+      "แล้วคุณแค่บอกในกลุ่มสั้น ๆ ว่าส่งเข้าแชทส่วนตัวแล้ว ห้ามพูดตัวเลขในกลุ่ม",
+    input_schema: {
+      type: "object",
+      properties: {
+        date_from: { type: "string", description: "วันเริ่ม YYYY-MM-DD แบบ ค.ศ. (2569 = 2026)" },
+        date_to: { type: "string", description: "วันสุดท้าย YYYY-MM-DD รวมวันนั้นด้วย" },
+        compare: { type: "string", enum: ["previous_month", "previous_year", "none", "custom"] },
+        compare_from: { type: "string", description: "ใช้กับ compare=custom" },
+        compare_to: { type: "string", description: "ใช้กับ compare=custom" },
+        branch: { type: "string", description: "เฉพาะสาขาเดียว ไม่ใส่ = รวมทั้งเครือ" },
+        by_branch: { type: "boolean", description: "true = แยกยอดทุกสาขา เรียงจากมากไปน้อย" },
+      },
+      required: ["date_from", "date_to"],
+    },
+  },
+  {
+    name: "clinic_queues",
+    description:
+      "คิวลูกค้าของสาขา Class Clinic จากระบบคิว Qlass (นับตามวันนัด) ใช้เมื่อถามจำนวนคิว คิวจอง มาจริง ไม่มา ยกเลิก ลูกค้าใหม่ " +
+      "หรือเทียบคิวกับเดือนก่อน เครื่องมือคิดเลขให้เสร็จ ห้ามบวกลบเอง ห้ามตอบจากความจำ " +
+      "อัตรามาจริง/ไม่มา คิดจากคิวที่ปิดสถานะแล้วเท่านั้น ถ้าเทียบสองช่วงให้เทียบอัตรา ห้ามเอาจำนวนมาจริงดิบมาเทียบ " +
+      "ไม่มีตัวเลขคิวแยก TikTok ถ้าถูกถามให้บอกตรง ๆ ว่ายังไม่มี " +
+      "ดูได้เฉพาะ ADMIN และ EXECUTIVE ถ้าถามในกลุ่ม เครื่องมือส่งตัวเลขเข้าแชทส่วนตัวเอง คุณแค่บอกว่าส่งแล้ว ห้ามพูดตัวเลขในกลุ่ม",
+    input_schema: {
+      type: "object",
+      properties: {
+        date_from: { type: "string", description: "วันนัดเริ่ม YYYY-MM-DD แบบ ค.ศ." },
+        date_to: { type: "string", description: "วันนัดสุดท้าย YYYY-MM-DD รวมวันนั้นด้วย" },
+        compare: { type: "string", enum: ["previous_month", "previous_year", "none"] },
+        branch: { type: "string", description: "เฉพาะสาขาเดียว ไม่ใส่ = รวมทั้งเครือ" },
+        by_branch: { type: "boolean", description: "true = แยกทุกสาขา เรียงตามคิวจอง" },
+      },
+      required: ["date_from", "date_to"],
+    },
+  },
+  {
+    name: "clinic_meta_ads",
+    description:
+      "งบโฆษณา Meta (Facebook/IG) ของ Class Clinic รวมทุกบัญชี ใช้เมื่อถามว่าใช้งบแอดไปเท่าไหร่ หรือเทียบงบกับเดือนก่อน " +
+      "มีเฉพาะงบรวมทั้งเครือ ไม่มีแยกสาขา ไม่มีจำนวนคนทักหรือคิวจากแอด ถ้าถูกถามให้บอกตรง ๆ ว่ายังไม่มี ห้ามคำนวณหรือเดาเอง " +
+      "ดูได้เฉพาะ ADMIN และ EXECUTIVE ถ้าถามในกลุ่ม เครื่องมือส่งตัวเลขเข้าแชทส่วนตัวเอง คุณแค่บอกว่าส่งแล้ว ห้ามพูดตัวเลขในกลุ่ม",
+    input_schema: {
+      type: "object",
+      properties: {
+        date_from: { type: "string", description: "วันเริ่ม YYYY-MM-DD แบบ ค.ศ." },
+        date_to: { type: "string", description: "วันสุดท้าย YYYY-MM-DD รวมวันนั้นด้วย" },
+        compare: { type: "string", enum: ["previous_month", "previous_year", "none"] },
+      },
+      required: ["date_from", "date_to"],
+    },
+  },
 ];
 
 // ชื่อพวกนี้เป็นของภายใน คำตอบถึงคนต้องไม่มี ด่านสุดท้ายใน runAgent ใช้ตรวจ
@@ -2116,6 +2179,87 @@ function taskDeadlineMissing(input: any): string | null {
   return null;
 }
 
+// ตัวเลขธุรกิจของ Class Clinic (ยอดขาย ฯลฯ) ตั้มสั่ง 18 พ.ย. 2569 ว่าตอบได้เฉพาะ ADMIN กับ EXECUTIVE
+// และถ้าถามในกลุ่ม ตัวเลขต้องไปที่แชทส่วนตัวของคนถามเท่านั้น คนอื่นในกลุ่มห้ามเห็น
+const canSeeClinicNumbers = (role: string) => ["ADMIN", "EXECUTIVE"].includes(role);
+const CLINIC_NUMBERS_DENIED = "ข้อมูลตัวเลขของคลินิกเปิดให้เฉพาะผู้บริหาร (ADMIN และ EXECUTIVE) บอกผู้ถามตรง ๆ ว่าไม่มีสิทธิ์ดู ห้ามบอกตัวเลขใด ๆ";
+
+// ไฟล์เดียวกับที่แดชบอร์ด CEO ใช้ (Vercel deploy จาก main ของรีโปแดชบอร์ด) อัปเดตวันละครั้งตอนเช้า
+// เก็บไว้ในหน่วยความจำ 10 นาที คำถามติดกันจะได้ไม่ดึงซ้ำ
+const SALES_URL = (Deno.env.get("CLASS_SALES_URL") ?? "https://class-ceo-dashboard.vercel.app/data/sales.json").trim();
+let salesCache: { at: number; file: SalesFile } | null = null;
+async function loadSalesFile(): Promise<SalesFile> {
+  if (salesCache && Date.now() - salesCache.at < 10 * 60_000) return salesCache.file;
+  const res = await fetch(SALES_URL, { headers: { "Cache-Control": "no-cache" } });
+  if (!res.ok) throw new Error(`ดึงไฟล์ยอดขายไม่ได้ (HTTP ${res.status})`);
+  const file = await res.json() as SalesFile;
+  if (!file?.months) throw new Error("ไฟล์ยอดขายผิดรูปแบบ ไม่มีช่อง months");
+  salesCache = { at: Date.now(), file };
+  return file;
+}
+
+// ช่วงเวลาที่ใช้ร่วมกันของเครื่องมือคิวและแอด: ตรวจรูปแบบ แล้วหาช่วงเทียบที่ยาวเท่ากัน
+// endBeforeToday: งบแอดของวันนี้ยังไม่จบวัน ถ้านับรวมจะเทียบครึ่งวันกับเต็มวัน จึงตัดให้จบเมื่อวาน (เวลาไทย)
+function clinicRanges(
+  input: any, opts: { endBeforeToday?: boolean } = {},
+): { cur?: { from: string; to: string }; prev?: { from: string; to: string } | null; clipped?: boolean; error?: string } {
+  const from = input.date_from;
+  let to = input.date_to ?? input.date_from;
+  if (!isIsoDate(from) || !isIsoDate(to)) return { error: "ต้องใส่ date_from และ date_to เป็น YYYY-MM-DD แบบ ค.ศ." };
+  if (from > to) return { error: "date_from ต้องไม่หลัง date_to" };
+  let clipped = false;
+  if (opts.endBeforeToday) {
+    const y = new Date(Date.now() + 7 * 3600_000 - 86_400_000).toISOString().slice(0, 10);
+    if (from > y) return { error: `ยังไม่มีงบของช่วงนี้ที่จบวันแล้ว ข้อมูลเต็มวันล่าสุดคือ ${y}` };
+    if (to > y) { to = y; clipped = true; }
+  }
+  const shift = input.compare === "previous_month" ? -1 : input.compare === "previous_year" ? -12 : 0;
+  return {
+    cur: { from, to },
+    prev: shift ? { from: shiftMonths(from, shift), to: shiftMonths(to, shift) } : null,
+    clipped,
+  };
+}
+
+// คีย์อ่านอย่างเดียวของแต่ละแหล่งอยู่ใน Supabase Secrets ไม่มีคีย์ = ปิดเครื่องมือนั้น ไม่เดาตัวเลข
+async function getJsonWithKey(url: string, keyName: string): Promise<any> {
+  const key = (Deno.env.get(keyName) ?? "").trim();
+  if (!key) throw new Error(`ยังไม่ได้ตั้ง secret ${keyName}`);
+  // Korrakot-DB ตอบช่วงวันที่ยังไม่เคยถามช้าได้ถึงราว 80 วินาที (วัด 20 พ.ย.) รอนานกว่านี้แงวจะค้าง
+  // หมดเวลาแล้วให้บอกผู้ถามว่าลองถามใหม่ รอบสองเร็ว เพราะต้นทางเก็บผลไว้แล้ว
+  let res: Response;
+  try {
+    res = await fetch(url, { headers: { Authorization: `Bearer ${key}`, Accept: "application/json" }, signal: AbortSignal.timeout(90_000) });
+  } catch (e) {
+    if ((e as Error).name === "TimeoutError") throw new Error("แหล่งข้อมูลตอบช้าเกิน 90 วินาที ให้ผู้ถามลองถามใหม่อีกครั้งในอีกสักครู่");
+    throw e;
+  }
+  if (res.status === 401) throw new Error(`แหล่งข้อมูลไม่รับคีย์ ${keyName} (401)`);
+  if (!res.ok) throw new Error(`แหล่งข้อมูลตอบ HTTP ${res.status}`);
+  return await res.json();
+}
+
+const QLASS_STATS_URL = "https://hjuvtsjjtucdirlkdgwa.supabase.co/functions/v1/external-queue-stats";
+const ADS_SPEND_URL = "https://korrakot-db.vercel.app/api/external/ads-spend";
+
+// ถูกถามในกลุ่ม: ส่งข้อความที่คิดเสร็จแล้วเข้าแชทส่วนตัวของคนถาม แล้วคืนให้โมเดลแค่ว่าส่งแล้ว
+// โมเดลไม่เห็นตัวเลขเลย จึงพิมพ์ลงกลุ่มไม่ได้แม้จะพลาด (แบบเดียวกับลิงก์ปฏิทิน)
+async function sendNumbersPrivately(ctx: Ctx, text: string): Promise<any> {
+  if (ctx.readOnly) return { error: "ข้อความเตือนอัตโนมัติในกลุ่มส่งตัวเลขคลินิกไม่ได้ ตั้งเตือนในแชทส่วนตัวแทน" };
+  if (String(ctx.caller.line_user_id).startsWith("pending:")) {
+    return { error: "บัญชีนี้ยังไม่ได้ผูก LINE จริง ส่งเข้าแชทส่วนตัวไม่ได้ ห้ามบอกตัวเลขในกลุ่ม" };
+  }
+  if (ctx.dryRun) return { sent_to_dm: true, dry_run: "โหมดข้อสอบ ไม่ได้ส่งจริง", numbers_hidden: "ตัวเลขอยู่ในแชทส่วนตัว ห้ามพูดในกลุ่ม" };
+  const ok = await lineApi("/v2/bot/message/push", {
+    to: ctx.caller.line_user_id,
+    messages: [{ type: "text", text: text.slice(0, 4900) }],
+  });
+  if (!ok) {
+    return { error: "ส่งเข้าแชทส่วนตัวไม่สำเร็จ ผู้ถามอาจยังไม่ได้เพิ่ม MT agent 1 เป็นเพื่อน ให้ทักแงวในแชทส่วนตัวแทน ห้ามบอกตัวเลขในกลุ่ม" };
+  }
+  return { sent_to_dm: true, numbers_hidden: "ตัวเลขอยู่ในแชทส่วนตัวแล้ว ห้ามพูดในกลุ่ม" };
+}
+
 async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
   if (name === "create_task") {
     const missing = taskDeadlineMissing(input);
@@ -2325,6 +2469,9 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
         .order("created_at", { ascending: false })
         .limit(Math.min(input.limit ?? 20, 50));
       if (scope === "this_group") q = q.eq("line_group_id", ctx.lineGroupId);
+      // แชทส่วนตัวเก็บด้วย id ของคน (ขึ้นต้น U) ซึ่งมีคำตอบตัวเลขคลินิกของผู้บริหารอยู่
+      // ค้นข้ามกลุ่มจึงให้เห็นแชทส่วนตัวเฉพาะ ADMIN กับ EXECUTIVE (18 พ.ย. 2569)
+      if (scope === "all_groups" && !canSeeClinicNumbers(ctx.caller.role)) q = q.not("line_group_id", "like", "U%");
       const { data, error } = await q;
       if (error) return { error: error.message };
       const { data: gs } = await supabase.from("groups").select("line_group_id, group_name");
@@ -3299,6 +3446,61 @@ async function executeTool(name: string, input: any, ctx: Ctx): Promise<any> {
         }
       }
       return result;
+    }
+
+    case "clinic_sales": {
+      if (!canSeeClinicNumbers(ctx.caller.role)) return { error: CLINIC_NUMBERS_DENIED };
+      let file: SalesFile;
+      try {
+        file = await loadSalesFile();
+      } catch (e) {
+        return { error: `${(e as Error).message} บอกผู้ถามว่าตอนนี้ดึงยอดขายไม่ได้ ห้ามเดาตัวเลข` };
+      }
+      const r = salesQuery(file, input);
+      if ("error" in r) return r;
+      if (ctx.lineGroupId) return await sendNumbersPrivately(ctx, formatSalesThai(r));
+      return r;
+    }
+
+    case "clinic_queues": {
+      if (!canSeeClinicNumbers(ctx.caller.role)) return { error: CLINIC_NUMBERS_DENIED };
+      const rg = clinicRanges(input);
+      if (rg.error) return { error: rg.error };
+      const get = (r: { from: string; to: string }) =>
+        getJsonWithKey(`${QLASS_STATS_URL}?since=${r.from}&until=${r.to}`, "QLASS_EXTERNAL_API_KEY") as Promise<QueueStats>;
+      let cur: QueueStats, prev: QueueStats | null = null;
+      try {
+        [cur, prev] = await Promise.all([get(rg.cur!), rg.prev ? get(rg.prev) : Promise.resolve(null)]);
+      } catch (e) {
+        return { error: `ดึงคิวจาก Qlass ไม่ได้: ${(e as Error).message} บอกผู้ถามตรง ๆ ห้ามเดาตัวเลข` };
+      }
+      let branch: string | undefined;
+      if (input.branch) {
+        const b = pickBranch(cur, String(input.branch));
+        if (b.error) return b;
+        branch = b.name;
+      }
+      const r = queueResult(cur, prev, { branch, byBranch: !!input.by_branch });
+      if (ctx.lineGroupId) return await sendNumbersPrivately(ctx, formatQueueThai(r));
+      return r;
+    }
+
+    case "clinic_meta_ads": {
+      if (!canSeeClinicNumbers(ctx.caller.role)) return { error: CLINIC_NUMBERS_DENIED };
+      const rg = clinicRanges(input, { endBeforeToday: true });
+      if (rg.error) return { error: rg.error };
+      const get = (r: { from: string; to: string }) =>
+        getJsonWithKey(`${ADS_SPEND_URL}?since=${r.from}&until=${r.to}&groupBy=day`, "KORRAKOT_ADS_API_KEY") as Promise<SpendResponse>;
+      let cur: SpendResponse, prev: SpendResponse | null = null;
+      try {
+        [cur, prev] = await Promise.all([get(rg.cur!), rg.prev ? get(rg.prev) : Promise.resolve(null)]);
+      } catch (e) {
+        return { error: `ดึงงบแอดจาก Korrakot-DB ไม่ได้: ${(e as Error).message} บอกผู้ถามตรง ๆ ห้ามเดาตัวเลข` };
+      }
+      const r = adsResult(cur, prev);
+      if (rg.clipped) r.note += ` · ช่วงที่ขอเลยวันนี้ จึงนับถึง ${rg.cur!.to} (เมื่อวาน) และช่วงเทียบยาวเท่ากัน`;
+      if (ctx.lineGroupId) return await sendNumbersPrivately(ctx, formatAdsThai(r));
+      return r;
     }
 
     case "send_dm": {
